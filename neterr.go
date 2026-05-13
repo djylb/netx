@@ -147,12 +147,13 @@ func extractErrno(err error) (syscall.Errno, bool) {
 }
 
 func errnoName(errno syscall.Errno) string {
-	switch errno {
-	case syscall.ECONNRESET:
+	err := error(errno)
+	switch {
+	case errors.Is(err, syscall.ECONNRESET):
 		return "ECONNRESET"
-	case syscall.ECONNABORTED:
+	case errors.Is(err, syscall.ECONNABORTED):
 		return "ECONNABORTED"
-	case syscall.EPIPE:
+	case errors.Is(err, syscall.EPIPE):
 		return "EPIPE"
 	default:
 		return errno.Error()

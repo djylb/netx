@@ -102,9 +102,12 @@ func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout tim
 	}
 	tlsConn := tls.Client(raw, cfg)
 	if err := tlsConn.Handshake(); err != nil {
-		_ = raw.Close()
+		_ = tlsConn.Close()
 		return nil, err
 	}
-	_ = tlsConn.SetDeadline(time.Time{})
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
 	return NewTimeoutConn(tlsConn, idle), nil
 }

@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const SIO_KEEPALIVE_VALS = 0x98000004
+const sioKeepaliveVals = 0x98000004
 
 var errInvalidKeepAliveParams = errors.New("tcp keepalive parameters must be positive")
 
@@ -38,7 +38,7 @@ func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	var serr error
 	err = raw.Control(func(fd uintptr) {
 		serr = windows.WSAIoctl(windows.Handle(fd),
-			SIO_KEEPALIVE_VALS,
+			sioKeepaliveVals,
 			(*byte)(unsafe.Pointer(&ka)), uint32(unsafe.Sizeof(ka)),
 			nil, 0,
 			&bytesReturned,

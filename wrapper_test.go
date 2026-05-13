@@ -1,7 +1,6 @@
 package netx
 
 import (
-	"errors"
 	"io"
 	"net"
 	"sync"
@@ -98,108 +97,16 @@ func (r *rawClosingRWC) GetRawConn() net.Conn {
 
 func TestWrappedConnHelpersHandleNilState(t *testing.T) {
 	var nilWrapped *wrappedConn
-	if _, err := nilWrapped.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil Read() error = %v, want %v", err, net.ErrClosed)
-	}
-	if _, err := nilWrapped.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil Write() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilWrapped.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilWrapped.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetReadDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilWrapped.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetWriteDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if got := nilWrapped.LocalAddr(); got != nil {
-		t.Fatalf("nil LocalAddr() = %v, want nil", got)
-	}
-	if got := nilWrapped.RemoteAddr(); got != nil {
-		t.Fatalf("nil RemoteAddr() = %v, want nil", got)
-	}
+	assertClosedConnState(t, "nil", nilWrapped)
 
 	malformed := &wrappedConn{}
-	if _, err := malformed.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed Read() error = %v, want %v", err, net.ErrClosed)
-	}
-	if _, err := malformed.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed Write() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetReadDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetWriteDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if got := malformed.LocalAddr(); got != nil {
-		t.Fatalf("malformed LocalAddr() = %v, want nil", got)
-	}
-	if got := malformed.RemoteAddr(); got != nil {
-		t.Fatalf("malformed RemoteAddr() = %v, want nil", got)
-	}
+	assertClosedConnState(t, "malformed", malformed)
 }
 
 func TestAddrOverrideConnHelpersHandleNilState(t *testing.T) {
 	var nilConn *AddrOverrideConn
-	if got := nilConn.GetRawConn(); got != nil {
-		t.Fatalf("nil GetRawConn() = %v, want nil", got)
-	}
-	if got := nilConn.LocalAddr(); got != nil {
-		t.Fatalf("nil LocalAddr() = %v, want nil", got)
-	}
-	if got := nilConn.RemoteAddr(); got != nil {
-		t.Fatalf("nil RemoteAddr() = %v, want nil", got)
-	}
-	if _, err := nilConn.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil Read() error = %v, want %v", err, net.ErrClosed)
-	}
-	if _, err := nilConn.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil Write() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilConn.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilConn.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetReadDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilConn.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil SetWriteDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := nilConn.Close(); err != nil {
-		t.Fatalf("nil Close() error = %v, want nil", err)
-	}
+	assertClosedRawConnState(t, "nil", nilConn)
 
 	malformed := &AddrOverrideConn{}
-	if got := malformed.GetRawConn(); got != nil {
-		t.Fatalf("malformed GetRawConn() = %v, want nil", got)
-	}
-	if got := malformed.LocalAddr(); got != nil {
-		t.Fatalf("malformed LocalAddr() = %v, want nil", got)
-	}
-	if got := malformed.RemoteAddr(); got != nil {
-		t.Fatalf("malformed RemoteAddr() = %v, want nil", got)
-	}
-	if _, err := malformed.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed Read() error = %v, want %v", err, net.ErrClosed)
-	}
-	if _, err := malformed.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed Write() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetReadDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed SetWriteDeadline() error = %v, want %v", err, net.ErrClosed)
-	}
-	if err := malformed.Close(); err != nil {
-		t.Fatalf("malformed Close() error = %v, want nil", err)
-	}
+	assertClosedRawConnState(t, "malformed", malformed)
 }

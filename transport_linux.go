@@ -10,8 +10,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const SO_ORIGINAL_DST = 80
-const TCP_KEEPIDLE = unix.TCP_KEEPIDLE
+const soOriginalDst = 80
+const tcpKeepIdle = unix.TCP_KEEPIDLE
 
 func GetAddress(conn net.Conn) (string, error) {
 	dst, err := redirectedDestinationFromConn(conn)
@@ -46,7 +46,7 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 			unix.SYS_GETSOCKOPT,
 			fd,
 			uintptr(unix.SOL_IP),
-			uintptr(SO_ORIGINAL_DST),
+			uintptr(soOriginalDst),
 			uintptr(unsafe.Pointer(&sa4)),
 			uintptr(unsafe.Pointer(&sz4)),
 			0,
@@ -65,7 +65,7 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 			unix.SYS_GETSOCKOPT,
 			fd,
 			uintptr(unix.SOL_IPV6),
-			uintptr(SO_ORIGINAL_DST),
+			uintptr(soOriginalDst),
 			uintptr(unsafe.Pointer(&sa6)),
 			uintptr(unsafe.Pointer(&sz6)),
 			0,
@@ -87,15 +87,4 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 		return "", opErr
 	}
 	return dst, nil
-}
-
-func transparentDestinationFromLocalAddr(addr net.Addr) (string, error) {
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
-		return "", fmt.Errorf("local address is not tcp: %T", addr)
-	}
-	if tcpAddr.IP == nil || tcpAddr.IP.IsUnspecified() || tcpAddr.Port <= 0 {
-		return "", fmt.Errorf("invalid local address %v", addr)
-	}
-	return net.JoinHostPort(tcpAddr.IP.String(), strconv.Itoa(tcpAddr.Port)), nil
 }

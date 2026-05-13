@@ -172,20 +172,24 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcp bool
 		srcPort:  srcPort,
 		dstPort:  dstPort,
 	}
-	switch {
-	case tcp && srcIsV4:
-		meta.v1Protocol = "TCP4"
-		meta.famProto = 0x11
-		meta.addrBytes = 12
-	case tcp && !srcIsV4:
-		meta.v1Protocol = "TCP6"
-		meta.famProto = 0x21
-		meta.addrBytes = 36
-	case !tcp && srcIsV4:
+	if tcp {
+		if srcIsV4 {
+			meta.v1Protocol = "TCP4"
+			meta.famProto = 0x11
+			meta.addrBytes = 12
+		} else {
+			meta.v1Protocol = "TCP6"
+			meta.famProto = 0x21
+			meta.addrBytes = 36
+		}
+		return meta, true
+	}
+
+	if srcIsV4 {
 		meta.v1Protocol = "TCP4"
 		meta.famProto = 0x12
 		meta.addrBytes = 12
-	default:
+	} else {
 		meta.v1Protocol = "TCP6"
 		meta.famProto = 0x22
 		meta.addrBytes = 36

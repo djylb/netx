@@ -47,11 +47,14 @@ func (w *wrappedConn) Close() error {
 	if w == nil {
 		return nil
 	}
+	if w.closeParent && w.parent != nil && rawConnOf(w.rwc) == w.parent {
+		w.parent = nil
+	}
 	var err1, err2 error
 	if w.rwc != nil {
 		err1 = w.rwc.Close()
 	}
-	if w.closeParent && w.parent != nil && rawConnOf(w.rwc) != w.parent {
+	if w.closeParent && w.parent != nil {
 		err2 = w.parent.Close()
 	}
 	return errors.Join(err1, err2)

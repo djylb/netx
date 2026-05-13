@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	PfOut        = 2
-	LEN          = 4*16 + 4*4 + 4*1
-	IOCInOut     = 0x80000000
-	IOCPARM_MASK = 0x1FFF
-	DIOCNATLOOK  = IOCInOut | ((LEN & IOCPARM_MASK) << 16) | ('D' << 8) | 23
-	TCP_KEEPIDLE = unix.TCP_KEEPALIVE
+	pfOut       = 2
+	natLookLen  = 4*16 + 4*4 + 4*1
+	iocInOut    = 0x80000000
+	iocParmMask = 0x1FFF
+	diocNatLook = iocInOut | ((natLookLen & iocParmMask) << 16) | ('D' << 8) | 23
+	tcpKeepIdle = unix.TCP_KEEPALIVE
 )
 
 func GetAddress(conn net.Conn) (string, error) {
@@ -32,7 +32,7 @@ func GetAddress(conn net.Conn) (string, error) {
 		af, proto, protoVariant, direction uint8
 	}
 
-	nl.direction = PfOut
+	nl.direction = pfOut
 
 	var raIP, laIP net.IP
 	var raPort, laPort int
@@ -78,7 +78,7 @@ func GetAddress(conn net.Conn) (string, error) {
 	nl.sxport[0], nl.sxport[1] = byte(raPort>>8), byte(raPort)
 	nl.dxport[0], nl.dxport[1] = byte(laPort>>8), byte(laPort)
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), DIOCNATLOOK, uintptr(unsafe.Pointer(&nl)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), diocNatLook, uintptr(unsafe.Pointer(&nl)))
 	if errno != 0 {
 		return "", fmt.Errorf("failed to get redirected address: %v", errno)
 	}

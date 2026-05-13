@@ -4,6 +4,7 @@ package netx
 
 import (
 	"context"
+	"errors"
 	"net"
 	"syscall"
 
@@ -48,5 +49,7 @@ func enableTransparentSocket(fd int) error {
 }
 
 func isIgnorableTransparentSockopt(err error) bool {
-	return err == unix.ENOPROTOOPT || err == unix.EINVAL || err == unix.EAFNOSUPPORT
+	return errors.Is(err, unix.ENOPROTOOPT) ||
+		errors.Is(err, unix.EINVAL) ||
+		errors.Is(err, unix.EAFNOSUPPORT)
 }

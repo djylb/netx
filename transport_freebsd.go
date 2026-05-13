@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -17,7 +18,7 @@ const (
 	sysPFOUT       = 0x2
 	sysPFFWD       = 0x3
 	sysDIOCNATLOOK = 0xc04c4417
-	TCP_KEEPIDLE   = unix.TCP_KEEPIDLE
+	tcpKeepIdle    = unix.TCP_KEEPIDLE
 )
 
 type pfiocNatlook struct {
@@ -114,7 +115,7 @@ func redirectedDestinationFromPF(conn net.Conn) (string, error) {
 	for _, dir := range []byte{sysPFOUT, sysPFIN} {
 		nl.Direction = dir
 		err = ioctl(fd, int(ioc), b)
-		if err == nil || err != syscall.ENOENT {
+		if err == nil || !errors.Is(err, syscall.ENOENT) {
 			break
 		}
 	}
@@ -135,15 +136,4 @@ func redirectedDestinationFromPF(conn net.Conn) (string, error) {
 	}
 
 	return net.JoinHostPort(odIP.String(), strconv.Itoa(int(odPort))), nil
-}
-
-func transparentDestinationFromLocalAddr(addr net.Addr) (string, error) {
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
-		return "", fmt.Errorf("local address is not tcp: %T", addr)
-	}
-	if tcpAddr.IP == nil || tcpAddr.IP.IsUnspecified() || tcpAddr.Port <= 0 {
-		return "", fmt.Errorf("invalid local address %v", addr)
-	}
-	return net.JoinHostPort(tcpAddr.IP.String(), strconv.Itoa(tcpAddr.Port)), nil
 }
