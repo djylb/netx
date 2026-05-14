@@ -135,6 +135,13 @@ func (fc *FramedConn) Close() error {
 	return fc.Conn.Close()
 }
 
+func (fc *FramedConn) RawConn() net.Conn {
+	if fc == nil {
+		return nil
+	}
+	return rawConnOf(fc.Conn)
+}
+
 func (fc *FramedConn) writeFrame(p []byte) error {
 	if fc == nil || fc.Conn == nil {
 		return net.ErrClosed

@@ -11,5 +11,5 @@ func SetTCPKeepAlive(tc *net.TCPConn, cfg TCPKeepAliveConfig) error {
 	if err := validateTCPKeepAliveConfig(tc, cfg); err != nil {
 		return err
 	}
-	return errKeepAliveParamsUnsupported
+	return ErrTCPKeepAliveUnsupported
 }

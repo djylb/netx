@@ -11,8 +11,8 @@ type ProxyProtocolVersion int
 
 const (
 	ProxyProtocolNone ProxyProtocolVersion = iota
-	ProxyProtocolVersion1
-	ProxyProtocolVersion2
+	ProxyProtocolV1
+	ProxyProtocolV2
 )
 
 // ParseTCPAddr converts host:port text into a TCP address.
@@ -22,7 +22,16 @@ func ParseTCPAddr(addr string) (*net.TCPAddr, error) {
 
 // ProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
 func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
-	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
+	clientTCP, ok := clientAddr.(*net.TCPAddr)
+	if !ok || clientTCP == nil {
+		return []byte("PROXY UNKNOWN\r\n")
+	}
+	targetTCP, ok := targetAddr.(*net.TCPAddr)
+	if !ok || targetTCP == nil {
+		return []byte("PROXY UNKNOWN\r\n")
+	}
+
+	meta, ok := proxyAddrMetaFromIPs(clientTCP.IP, targetTCP.IP, clientTCP.Port, targetTCP.Port, true)
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
 	}
@@ -80,9 +89,9 @@ func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version Proxy
 	targetAddr = normalizeTarget(clientAddr, targetAddr)
 
 	switch version {
-	case ProxyProtocolVersion2:
+	case ProxyProtocolV2:
 		return ProxyProtocolV2Header(clientAddr, targetAddr)
-	case ProxyProtocolVersion1:
+	case ProxyProtocolV1:
 		return ProxyProtocolV1Header(clientAddr, targetAddr)
 	default:
 		return nil
@@ -92,14 +101,14 @@ func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version Proxy
 func normalizeTarget(src, dst net.Addr) net.Addr {
 	switch s := src.(type) {
 	case *net.TCPAddr:
-		d, _ := dst.(*net.TCPAddr)
+		d := cloneTCPAddr(dst)
 		if d == nil {
 			d = &net.TCPAddr{Port: 0}
 		}
 		d.IP = normalizeTargetIP(s.IP, d.IP)
 		return d
 	case *net.UDPAddr:
-		d, _ := dst.(*net.UDPAddr)
+		d := cloneUDPAddr(dst)
 		if d == nil {
 			d = &net.UDPAddr{Port: 0}
 		}
@@ -107,6 +116,30 @@ func normalizeTarget(src, dst net.Addr) net.Addr {
 		return d
 	default:
 		return dst
+	}
+}
+
+func cloneTCPAddr(addr net.Addr) *net.TCPAddr {
+	tcpAddr, _ := addr.(*net.TCPAddr)
+	if tcpAddr == nil {
+		return nil
+	}
+	return &net.TCPAddr{
+		IP:   append(net.IP(nil), tcpAddr.IP...),
+		Port: tcpAddr.Port,
+		Zone: tcpAddr.Zone,
+	}
+}
+
+func cloneUDPAddr(addr net.Addr) *net.UDPAddr {
+	udpAddr, _ := addr.(*net.UDPAddr)
+	if udpAddr == nil {
+		return nil
+	}
+	return &net.UDPAddr{
+		IP:   append(net.IP(nil), udpAddr.IP...),
+		Port: udpAddr.Port,
+		Zone: udpAddr.Zone,
 	}
 }
 
@@ -158,19 +191,19 @@ func buildProxyAddrMeta(clientAddr, targetAddr net.Addr) (proxyAddrMeta, bool) {
 		if !ok || c == nil || t == nil {
 			return proxyAddrMeta{}, false
 		}
-		return proxyAddrMetaFromIPs(c.IP, t.IP, uint16(c.Port), uint16(t.Port), true)
+		return proxyAddrMetaFromIPs(c.IP, t.IP, c.Port, t.Port, true)
 	case *net.UDPAddr:
 		u, ok := targetAddr.(*net.UDPAddr)
 		if !ok || c == nil || u == nil {
 			return proxyAddrMeta{}, false
 		}
-		return proxyAddrMetaFromIPs(c.IP, u.IP, uint16(c.Port), uint16(u.Port), false)
+		return proxyAddrMetaFromIPs(c.IP, u.IP, c.Port, u.Port, false)
 	default:
 		return proxyAddrMeta{}, false
 	}
 }
 
-func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcp bool) (proxyAddrMeta, bool) {
+func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (proxyAddrMeta, bool) {
 	srcIsV4 := srcIP.To4() != nil
 	dstIsV4 := dstIP.To4() != nil
 	if srcIsV4 != dstIsV4 {
@@ -179,13 +212,16 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcp bool
 	if !srcIsV4 && (srcIP.To16() == nil || dstIP.To16() == nil) {
 		return proxyAddrMeta{}, false
 	}
+	if !validTCPPort(srcPort) || !validTCPPort(dstPort) {
+		return proxyAddrMeta{}, false
+	}
 	meta := proxyAddrMeta{
 		srcIP:    srcIP,
 		dstIP:    dstIP,
 		clientIP: srcIP.String(),
 		targetIP: dstIP.String(),
-		srcPort:  srcPort,
-		dstPort:  dstPort,
+		srcPort:  uint16(srcPort),
+		dstPort:  uint16(dstPort),
 	}
 	if tcp {
 		if srcIsV4 {
@@ -210,4 +246,8 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcp bool
 		meta.addrBytes = 36
 	}
 	return meta, true
+}
+
+func validTCPPort(port int) bool {
+	return port >= 0 && port <= 65535
 }

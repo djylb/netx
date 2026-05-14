@@ -52,7 +52,7 @@ func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Durat
 	}, nil
 }
 
-func (c *TLSConn) GetRawConn() net.Conn {
+func (c *TLSConn) RawConn() net.Conn {
 	if c == nil {
 		return nil
 	}

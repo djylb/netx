@@ -13,6 +13,16 @@ type wrappedConn struct {
 	closeParent bool
 }
 
+// RawConnProvider is implemented by wrappers that can expose their underlying net.Conn.
+type RawConnProvider interface {
+	RawConn() net.Conn
+}
+
+// RawConnOf returns v's underlying net.Conn when it is available.
+func RawConnOf(v any) net.Conn {
+	return rawConnOf(v)
+}
+
 // WrapConn exposes rwc as a net.Conn using parent for addresses and deadlines.
 // Closing the returned connection closes rwc and parent.
 func WrapConn(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
@@ -96,19 +106,22 @@ func (w *wrappedConn) SetWriteDeadline(t time.Time) error {
 	return w.parent.SetWriteDeadline(t)
 }
 
-func (w *wrappedConn) GetRawConn() net.Conn {
+func (w *wrappedConn) RawConn() net.Conn {
 	if w == nil {
 		return nil
 	}
-	return w.parent
+	if raw := rawConnOf(w.parent); raw != nil {
+		return raw
+	}
+	return rawConnOf(w.rwc)
 }
 
 func rawConnOf(v any) net.Conn {
 	if v == nil {
 		return nil
 	}
-	if getter, ok := v.(interface{ GetRawConn() net.Conn }); ok {
-		return getter.GetRawConn()
+	if getter, ok := v.(interface{ RawConn() net.Conn }); ok {
+		return getter.RawConn()
 	}
 	if conn, ok := v.(net.Conn); ok {
 		return conn

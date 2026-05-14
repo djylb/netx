@@ -73,7 +73,7 @@ func (c *observedReadWriteCloser) Close() error {
 	return c.rwc.Close()
 }
 
-func (c *observedReadWriteCloser) GetRawConn() net.Conn {
+func (c *observedReadWriteCloser) RawConn() net.Conn {
 	if c == nil {
 		return nil
 	}

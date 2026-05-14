@@ -104,7 +104,7 @@ func (r *rawClosingRWC) Close() error {
 	return r.raw.Close()
 }
 
-func (r *rawClosingRWC) GetRawConn() net.Conn {
+func (r *rawClosingRWC) RawConn() net.Conn {
 	if r == nil {
 		return nil
 	}

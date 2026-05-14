@@ -1,7 +1,6 @@
 package netx
 
 import (
-	"fmt"
 	"net"
 	"time"
 )
@@ -12,25 +11,8 @@ type AddrOverrideConn struct {
 	rAddr net.Addr
 }
 
-// NewAddrOverrideConn wraps base and overrides its local or remote address from strings.
-func NewAddrOverrideConn(base net.Conn, remote, local string) (*AddrOverrideConn, error) {
-	if base == nil {
-		return nil, fmt.Errorf("base conn is nil")
-	}
-	rAddr, err := parseTCPAddrMaybe(remote)
-	if err != nil {
-		return nil, fmt.Errorf("invalid remote addr %q: %w", remote, err)
-	}
-	lAddr, _ := parseTCPAddrMaybe(local)
-	return &AddrOverrideConn{
-		Conn:  base,
-		lAddr: lAddr,
-		rAddr: rAddr,
-	}, nil
-}
-
-// NewAddrOverrideFromAddr wraps base and overrides its local or remote address from net.Addr values.
-func NewAddrOverrideFromAddr(base net.Conn, remote, local net.Addr) *AddrOverrideConn {
+// NewAddrOverrideConn wraps base and overrides its local or remote address.
+func NewAddrOverrideConn(base net.Conn, remote, local net.Addr) *AddrOverrideConn {
 	return &AddrOverrideConn{
 		Conn:  base,
 		lAddr: local,
@@ -106,20 +88,9 @@ func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
-func (c *AddrOverrideConn) GetRawConn() net.Conn {
+func (c *AddrOverrideConn) RawConn() net.Conn {
 	if c == nil {
 		return nil
 	}
-	return c.Conn
-}
-
-func parseTCPAddrMaybe(s string) (*net.TCPAddr, error) {
-	if s == "" {
-		return nil, nil
-	}
-	a, err := net.ResolveTCPAddr("tcp", s)
-	if err != nil {
-		return nil, err
-	}
-	return a, nil
+	return rawConnOf(c.Conn)
 }

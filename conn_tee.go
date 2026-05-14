@@ -96,6 +96,13 @@ func (t *TeeConn) SetWriteDeadline(deadline time.Time) error {
 	return t.underlying.SetWriteDeadline(deadline)
 }
 
+func (t *TeeConn) RawConn() net.Conn {
+	if t == nil {
+		return nil
+	}
+	return rawConnOf(t.underlying)
+}
+
 func (t *TeeConn) StopBuffering() {
 	if t == nil {
 		return

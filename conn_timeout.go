@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"sync"
@@ -16,7 +17,7 @@ type TimeoutConn struct {
 }
 
 // NewTimeoutConn wraps c and refreshes its deadline before each read or write.
-func NewTimeoutConn(c net.Conn, idle time.Duration) net.Conn {
+func NewTimeoutConn(c net.Conn, idle time.Duration) *TimeoutConn {
 	return &TimeoutConn{Conn: c, idleTimeout: normalizeLinkTimeout(idle)}
 }
 
@@ -24,7 +25,9 @@ func (c *TimeoutConn) Read(b []byte) (int, error) {
 	if c == nil || c.Conn == nil {
 		return 0, net.ErrClosed
 	}
-	c.refreshDeadline()
+	if err := c.refreshDeadline(); err != nil {
+		return 0, err
+	}
 	return c.Conn.Read(b)
 }
 
@@ -32,13 +35,15 @@ func (c *TimeoutConn) Write(b []byte) (int, error) {
 	if c == nil || c.Conn == nil {
 		return 0, net.ErrClosed
 	}
-	c.refreshDeadline()
+	if err := c.refreshDeadline(); err != nil {
+		return 0, err
+	}
 	return c.Conn.Write(b)
 }
 
-func (c *TimeoutConn) refreshDeadline() {
+func (c *TimeoutConn) refreshDeadline() error {
 	if c == nil || c.Conn == nil {
-		return
+		return net.ErrClosed
 	}
 	deadline := time.Now().Add(c.idleTimeout)
 	c.mu.Lock()
@@ -47,7 +52,7 @@ func (c *TimeoutConn) refreshDeadline() {
 	}
 	c.lastSet = deadline
 	c.mu.Unlock()
-	_ = c.SetDeadline(deadline)
+	return c.SetDeadline(deadline)
 }
 
 func (c *TimeoutConn) Close() error {
@@ -92,24 +97,22 @@ func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+func (c *TimeoutConn) RawConn() net.Conn {
+	if c == nil {
+		return nil
+	}
+	return rawConnOf(c.Conn)
+}
+
 // NewTimeoutTLSConn performs a TLS handshake and returns a timeout-wrapped connection.
-func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (net.Conn, error) {
-	if raw == nil {
-		return nil, net.ErrClosed
-	}
-	idle = normalizeLinkTimeout(idle)
-	handshakeTimeout = normalizeLinkTimeout(handshakeTimeout)
-	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		_ = raw.Close()
-		return nil, err
-	}
-	tlsConn := tls.Client(raw, cfg)
-	if err := tlsConn.Handshake(); err != nil {
-		_ = tlsConn.Close()
-		return nil, err
-	}
-	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
-		_ = tlsConn.Close()
+func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
+	return NewTimeoutTLSConnContext(context.Background(), raw, cfg, idle, handshakeTimeout)
+}
+
+// NewTimeoutTLSConnContext performs a TLS handshake using ctx and returns a timeout-wrapped connection.
+func NewTimeoutTLSConnContext(ctx context.Context, raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
+	tlsConn, err := NewTLSConnContext(ctx, raw, handshakeTimeout, cfg)
+	if err != nil {
 		return nil, err
 	}
 	return NewTimeoutConn(tlsConn, idle), nil

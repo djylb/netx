@@ -13,14 +13,14 @@ func TestSetTCPKeepAliveRejectsInvalidValuesOnWindows(t *testing.T) {
 	client, _, cleanup := tcpPair(t)
 	defer cleanup()
 
-	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Interval: 3 * time.Second, Count: 1}); !errors.Is(err, errInvalidKeepAliveParams) {
-		t.Fatalf("idle=0 error = %v, want %v", err, errInvalidKeepAliveParams)
+	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Interval: 3 * time.Second, Count: 1}); !errors.Is(err, ErrInvalidTCPKeepAliveConfig) {
+		t.Fatalf("idle=0 error = %v, want %v", err, ErrInvalidTCPKeepAliveConfig)
 	}
-	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Idle: 10 * time.Second, Interval: -time.Second, Count: 1}); !errors.Is(err, errInvalidKeepAliveParams) {
-		t.Fatalf("interval=-1 error = %v, want %v", err, errInvalidKeepAliveParams)
+	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Idle: 10 * time.Second, Interval: -time.Second, Count: 1}); !errors.Is(err, ErrInvalidTCPKeepAliveConfig) {
+		t.Fatalf("interval=-1 error = %v, want %v", err, ErrInvalidTCPKeepAliveConfig)
 	}
-	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Idle: 10 * time.Second, Interval: 3 * time.Second}); !errors.Is(err, errInvalidKeepAliveParams) {
-		t.Fatalf("count=0 error = %v, want %v", err, errInvalidKeepAliveParams)
+	if err := SetTCPKeepAlive(client, TCPKeepAliveConfig{Idle: 10 * time.Second, Interval: 3 * time.Second}); !errors.Is(err, ErrInvalidTCPKeepAliveConfig) {
+		t.Fatalf("count=0 error = %v, want %v", err, ErrInvalidTCPKeepAliveConfig)
 	}
 }
 

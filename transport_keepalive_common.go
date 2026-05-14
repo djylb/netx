@@ -6,8 +6,11 @@ import (
 	"time"
 )
 
-var errInvalidKeepAliveParams = errors.New("tcp keepalive parameters must be positive")
-var errKeepAliveParamsUnsupported = errors.New("tcp keepalive parameters are not supported on this platform")
+// ErrInvalidTCPKeepAliveConfig is returned when TCP keepalive durations or count are not positive.
+var ErrInvalidTCPKeepAliveConfig = errors.New("tcp keepalive parameters must be positive")
+
+// ErrTCPKeepAliveUnsupported is returned when the current platform does not support custom TCP keepalive parameters.
+var ErrTCPKeepAliveUnsupported = errors.New("tcp keepalive parameters are not supported on this platform")
 
 // TCPKeepAliveConfig configures TCP keepalive probes.
 type TCPKeepAliveConfig struct {
@@ -21,7 +24,7 @@ func validateTCPKeepAliveConfig(tc *net.TCPConn, cfg TCPKeepAliveConfig) error {
 	case tc == nil:
 		return net.ErrClosed
 	case cfg.Idle <= 0 || cfg.Interval <= 0 || cfg.Count <= 0:
-		return errInvalidKeepAliveParams
+		return ErrInvalidTCPKeepAliveConfig
 	default:
 		return nil
 	}

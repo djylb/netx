@@ -193,8 +193,8 @@ func TestNewTimeoutTLSConnSuccess(t *testing.T) {
 		t.Fatalf("NewTimeoutTLSConn failed: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, ok := conn.(*TimeoutConn); !ok {
-		t.Fatalf("expected *TimeoutConn, got %T", conn)
+	if conn == nil {
+		t.Fatal("expected *TimeoutConn, got nil")
 	}
 
 	if _, err = conn.Write([]byte("ping")); err != nil {

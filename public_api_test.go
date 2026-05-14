@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestPublicConnectionHelpers(t *testing.T) {
@@ -18,21 +19,31 @@ func TestPublicConnectionHelpers(t *testing.T) {
 
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
 	local := &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 8080}
-	overridden := NewAddrOverrideFromAddr(&countedCloseConn{}, remote, local)
-	header := ProxyProtocolHeader(overridden, ProxyProtocolVersion1)
+	baseConn := &countedCloseConn{}
+	overridden := NewAddrOverrideConn(baseConn, remote, local)
+	if got := RawConnOf(overridden); got != baseConn {
+		t.Fatalf("RawConnOf() = %v, want base conn", got)
+	}
+	header := ProxyProtocolHeader(overridden, ProxyProtocolV1)
 	if string(header) != "PROXY TCP4 192.0.2.10 198.51.100.20 1234 8080\r\n" {
 		t.Fatalf("ProxyProtocolHeader() = %q", string(header))
 	}
 
-	stringOverride, err := NewAddrOverrideConn(&countedCloseConn{}, "203.0.113.10:443", "127.0.0.1:80")
+	stringRemote, err := ParseTCPAddr("203.0.113.10:443")
 	if err != nil {
-		t.Fatalf("NewAddrOverrideConn() error = %v", err)
+		t.Fatalf("ParseTCPAddr(remote) error = %v", err)
 	}
+	stringOverride := NewAddrOverrideConn(&countedCloseConn{}, stringRemote, nil)
 	if stringOverride.RemoteAddr().String() != "203.0.113.10:443" {
 		t.Fatalf("RemoteAddr() = %q", stringOverride.RemoteAddr().String())
 	}
 
 	base := &countedCloseConn{}
+	chain := NewFramedConn(NewTimeoutConn(NewTeeConn(base), time.Second))
+	if got := RawConnOf(chain); got != base {
+		t.Fatalf("RawConnOf(wrapper chain) = %v, want base conn", got)
+	}
+
 	wrapped := WrapConnWithoutParentClose(base, base)
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("WrapConnWithoutParentClose Close() error = %v", err)
