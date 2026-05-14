@@ -37,7 +37,7 @@ func WrapNetConnWithTrafficObserver(conn net.Conn, observer TrafficObserver) net
 	if conn == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return conn
 	}
-	return WrapConn(WrapReadWriteCloserWithTrafficObserver(conn, observer), conn)
+	return WrapConnWithoutParentClose(WrapReadWriteCloserWithTrafficObserver(conn, observer), conn)
 }
 
 func (c *observedReadWriteCloser) Read(p []byte) (int, error) {

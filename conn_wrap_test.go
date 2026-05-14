@@ -51,9 +51,25 @@ func TestWrapConnCloseAvoidsDoubleClosingObservedConn(t *testing.T) {
 	}
 }
 
-func TestWrapConnCloseAvoidsDoubleClosingRawWrapper(t *testing.T) {
+func TestWrapConnClosesWrappedAndParent(t *testing.T) {
+	rwc := &countedCloseConn{}
+	parent := &countedCloseConn{}
+	wrapped := WrapConn(rwc, parent)
+
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if calls := rwc.Calls(); calls != 1 {
+		t.Fatalf("rwc Close() calls = %d, want 1", calls)
+	}
+	if calls := parent.Calls(); calls != 1 {
+		t.Fatalf("parent Close() calls = %d, want 1", calls)
+	}
+}
+
+func TestWrapConnWithoutParentCloseAvoidsDoubleClosingRawWrapper(t *testing.T) {
 	base := &countedCloseConn{}
-	wrapped := WrapConn(&rawClosingRWC{raw: base}, base)
+	wrapped := WrapConnWithoutParentClose(&rawClosingRWC{raw: base}, base)
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
