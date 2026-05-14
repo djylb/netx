@@ -22,7 +22,7 @@ func (c *byteBufferConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestFramedConnWriteSplitsOversizedPayload(t *testing.T) {
 	raw := &byteBufferConn{}
-	fc := WrapFramed(raw)
+	fc := NewFramedConn(raw)
 	payload := bytes.Repeat([]byte("a"), MaxFramePayload+123)
 
 	n, err := fc.Write(payload)

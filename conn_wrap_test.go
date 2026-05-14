@@ -39,7 +39,7 @@ func (c *countedCloseConn) Calls() int {
 
 func TestWrapConnCloseAvoidsDoubleClosingObservedConn(t *testing.T) {
 	base := &countedCloseConn{}
-	wrapped := WrapNetConnWithTrafficObserver(base, TrafficObserver{
+	wrapped := ObserveConn(base, TrafficObserver{
 		OnRead: func(int64) error { return nil },
 	})
 

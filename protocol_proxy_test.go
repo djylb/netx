@@ -49,30 +49,30 @@ func TestNormalizeTargetIP(t *testing.T) {
 	}
 }
 
-func TestBuildProxyProtocolHeaderByAddr(t *testing.T) {
+func TestProxyProtocolHeaderFromAddrs(t *testing.T) {
 	clientAddr := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
 
-	if got := BuildProxyProtocolHeaderByAddr(clientAddr, nil, 0); got != nil {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(protocol=0) = %q, want nil", got)
+	if got := ProxyProtocolHeaderFromAddrs(clientAddr, nil, ProxyProtocolNone); got != nil {
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(protocol=0) = %q, want nil", got)
 	}
-	if got := BuildProxyProtocolHeaderByAddr(clientAddr, nil, 9); got != nil {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(protocol=9) = %q, want nil", got)
+	if got := ProxyProtocolHeaderFromAddrs(clientAddr, nil, ProxyProtocolVersion(9)); got != nil {
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(protocol=9) = %q, want nil", got)
 	}
 
-	v1 := BuildProxyProtocolHeaderByAddr(clientAddr, nil, 1)
+	v1 := ProxyProtocolHeaderFromAddrs(clientAddr, nil, ProxyProtocolVersion1)
 	wantV1 := "PROXY TCP4 192.0.2.10 0.0.0.0 1234 0\r\n"
 	if string(v1) != wantV1 {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(v1) = %q, want %q", string(v1), wantV1)
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(v1) = %q, want %q", string(v1), wantV1)
 	}
 
-	v2 := BuildProxyProtocolHeaderByAddr(&net.UDPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5353}, nil, 2)
+	v2 := ProxyProtocolHeaderFromAddrs(&net.UDPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5353}, nil, ProxyProtocolVersion2)
 	if len(v2) != 52 {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(v2) len = %d, want 52", len(v2))
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(v2) len = %d, want 52", len(v2))
 	}
 	if !bytes.HasPrefix(v2, []byte("\r\n\r\n\x00\r\nQUIT\n")) {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(v2) missing signature: %v", v2[:12])
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(v2) missing signature: %v", v2[:12])
 	}
 	if famProto := v2[13]; famProto != 0x22 {
-		t.Fatalf("BuildProxyProtocolHeaderByAddr(v2) fam/proto = 0x%x, want 0x22", famProto)
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(v2) fam/proto = 0x%x, want 0x22", famProto)
 	}
 }

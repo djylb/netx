@@ -6,25 +6,22 @@ import (
 	"strconv"
 )
 
-// ParseAddr converts host:port text into a TCP address, defaulting bad ports to 0.
-func ParseAddr(addr string) net.Addr {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return &net.TCPAddr{IP: net.ParseIP(addr), Port: 0}
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		ip = net.IPv4zero
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		port = 0
-	}
-	return &net.TCPAddr{IP: ip, Port: port}
+// ProxyProtocolVersion selects the Proxy Protocol header version.
+type ProxyProtocolVersion int
+
+const (
+	ProxyProtocolNone ProxyProtocolVersion = iota
+	ProxyProtocolVersion1
+	ProxyProtocolVersion2
+)
+
+// ParseTCPAddr converts host:port text into a TCP address.
+func ParseTCPAddr(addr string) (*net.TCPAddr, error) {
+	return net.ResolveTCPAddr("tcp", addr)
 }
 
-// BuildProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
-func BuildProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
+// ProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
+func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
@@ -35,8 +32,8 @@ func BuildProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	return []byte(header)
 }
 
-// BuildProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
-func BuildProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
+// ProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
+func ProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	const sig = "\r\n\r\n\000\r\nQUIT\n"
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
 	if !ok {
@@ -66,27 +63,27 @@ func BuildProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	return header
 }
 
-// BuildProxyProtocolHeader builds a Proxy Protocol header from a connection's remote and local addresses.
-func BuildProxyProtocolHeader(c net.Conn, proxyProtocol int) []byte {
-	if c == nil || proxyProtocol == 0 {
+// ProxyProtocolHeader builds a Proxy Protocol header from a connection's remote and local addresses.
+func ProxyProtocolHeader(c net.Conn, version ProxyProtocolVersion) []byte {
+	if c == nil || version == ProxyProtocolNone {
 		return nil
 	}
-	return BuildProxyProtocolHeaderByAddr(c.RemoteAddr(), c.LocalAddr(), proxyProtocol)
+	return ProxyProtocolHeaderFromAddrs(c.RemoteAddr(), c.LocalAddr(), version)
 }
 
-// BuildProxyProtocolHeaderByAddr builds a Proxy Protocol header from explicit addresses.
-func BuildProxyProtocolHeaderByAddr(clientAddr, targetAddr net.Addr, proxyProtocol int) []byte {
-	if proxyProtocol == 0 {
+// ProxyProtocolHeaderFromAddrs builds a Proxy Protocol header from explicit addresses.
+func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version ProxyProtocolVersion) []byte {
+	if version == ProxyProtocolNone {
 		return nil
 	}
 
 	targetAddr = normalizeTarget(clientAddr, targetAddr)
 
-	switch proxyProtocol {
-	case 2:
-		return BuildProxyProtocolV2Header(clientAddr, targetAddr)
-	case 1:
-		return BuildProxyProtocolV1Header(clientAddr, targetAddr)
+	switch version {
+	case ProxyProtocolVersion2:
+		return ProxyProtocolV2Header(clientAddr, targetAddr)
+	case ProxyProtocolVersion1:
+		return ProxyProtocolV1Header(clientAddr, targetAddr)
 	default:
 		return nil
 	}

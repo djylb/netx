@@ -7,9 +7,10 @@ import (
 	"net"
 )
 
-// ListenTCP listens on address; transparent TCP is not supported on Windows.
-func ListenTCP(address string, transparent bool) (net.Listener, error) {
-	if transparent {
+// ListenTCP listens on a TCP address; transparent TCP is not supported on Windows.
+func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
+	cfg := newListenOptions(opts)
+	if cfg.transparent {
 		return nil, errors.New("transparent tcp listener is not supported on Windows")
 	}
 	return net.Listen("tcp", address)

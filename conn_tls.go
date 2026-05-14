@@ -5,23 +5,22 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 )
 
-// TlsConn keeps access to both the TLS connection and its raw connection.
-type TlsConn struct {
+// TLSConn keeps access to both the TLS connection and its raw connection.
+type TLSConn struct {
 	*tls.Conn
 	rawConn net.Conn
 }
 
-// NewTlsConn performs a TLS client handshake with a temporary deadline.
-func NewTlsConn(rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TlsConn, error) {
-	return NewTlsConnContext(context.Background(), rawConn, timeout, tlsConfig)
+// NewTLSConn performs a TLS client handshake with a temporary deadline.
+func NewTLSConn(rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
+	return NewTLSConnContext(context.Background(), rawConn, timeout, tlsConfig)
 }
 
-// NewTlsConnContext performs a TLS client handshake using ctx and a temporary deadline.
-func NewTlsConnContext(ctx context.Context, rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TlsConn, error) {
+// NewTLSConnContext performs a TLS client handshake using ctx and a temporary deadline.
+func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
 	if rawConn == nil {
 		return nil, net.ErrClosed
 	}
@@ -47,41 +46,20 @@ func NewTlsConnContext(ctx context.Context, rawConn net.Conn, timeout time.Durat
 		return nil, fmt.Errorf("failed to clear TLS deadline after handshake: %w", err)
 	}
 
-	return &TlsConn{
+	return &TLSConn{
 		Conn:    tlsConn,
 		rawConn: rawConn,
 	}, nil
 }
 
-// GetTlsConn wraps c with TLS using sni and optional certificate verification.
-func GetTlsConn(c net.Conn, sni string, verifyCertificate bool) (net.Conn, error) {
-	if c == nil {
-		return nil, net.ErrClosed
-	}
-	return NewTlsConn(c, 0, &tls.Config{
-		InsecureSkipVerify: !verifyCertificate,
-		ServerName:         removePortFromHost(sni),
-	})
-}
-
-func removePortFromHost(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
-	}
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		return strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	}
-	return host
-}
-
-func (c *TlsConn) GetRawConn() net.Conn {
+func (c *TLSConn) GetRawConn() net.Conn {
 	if c == nil {
 		return nil
 	}
 	return c.rawConn
 }
 
-func (c *TlsConn) Close() error {
+func (c *TLSConn) Close() error {
 	if c == nil {
 		return nil
 	}
@@ -99,21 +77,21 @@ func (c *TlsConn) Close() error {
 	return nil
 }
 
-func (c *TlsConn) Read(b []byte) (n int, err error) {
+func (c *TLSConn) Read(b []byte) (n int, err error) {
 	if c == nil || c.Conn == nil {
 		return 0, net.ErrClosed
 	}
 	return c.Conn.Read(b)
 }
 
-func (c *TlsConn) Write(b []byte) (n int, err error) {
+func (c *TLSConn) Write(b []byte) (n int, err error) {
 	if c == nil || c.Conn == nil {
 		return 0, net.ErrClosed
 	}
 	return c.Conn.Write(b)
 }
 
-func (c *TlsConn) SetDeadline(t time.Time) error {
+func (c *TLSConn) SetDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil || c.rawConn == nil {
 		return net.ErrClosed
 	}
@@ -126,7 +104,7 @@ func (c *TlsConn) SetDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *TlsConn) SetReadDeadline(t time.Time) error {
+func (c *TLSConn) SetReadDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil || c.rawConn == nil {
 		return net.ErrClosed
 	}
@@ -139,7 +117,7 @@ func (c *TlsConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *TlsConn) SetWriteDeadline(t time.Time) error {
+func (c *TLSConn) SetWriteDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil || c.rawConn == nil {
 		return net.ErrClosed
 	}
@@ -152,7 +130,7 @@ func (c *TlsConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *TlsConn) LocalAddr() net.Addr {
+func (c *TLSConn) LocalAddr() net.Addr {
 	if c == nil {
 		return nil
 	}
@@ -165,7 +143,7 @@ func (c *TlsConn) LocalAddr() net.Addr {
 	return c.rawConn.LocalAddr()
 }
 
-func (c *TlsConn) RemoteAddr() net.Addr {
+func (c *TLSConn) RemoteAddr() net.Addr {
 	if c == nil {
 		return nil
 	}

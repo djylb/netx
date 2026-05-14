@@ -1,15 +1,13 @@
 package netx
 
 import (
-	"errors"
 	"net"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 const sioKeepaliveVals = 0x98000004
-
-var errInvalidKeepAliveParams = errors.New("tcp keepalive parameters must be positive")
 
 type tcpKeepalive struct {
 	OnOff             uint32
@@ -17,13 +15,10 @@ type tcpKeepalive struct {
 	KeepAliveInterval uint32
 }
 
-// SetTcpKeepAliveParams sets TCP keepalive parameters on tc.
-func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
-	switch {
-	case tc == nil:
-		return net.ErrClosed
-	case idle <= 0 || intvl <= 0 || probes <= 0:
-		return errInvalidKeepAliveParams
+// SetTCPKeepAlive sets TCP keepalive parameters on tc.
+func SetTCPKeepAlive(tc *net.TCPConn, cfg TCPKeepAliveConfig) error {
+	if err := validateTCPKeepAliveConfig(tc, cfg); err != nil {
+		return err
 	}
 	raw, err := tc.SyscallConn()
 	if err != nil {
@@ -31,8 +26,8 @@ func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	}
 	ka := tcpKeepalive{
 		OnOff:             1,
-		KeepAliveTime:     uint32(idle * 1000),
-		KeepAliveInterval: uint32(intvl * 1000),
+		KeepAliveTime:     durationMilliseconds(cfg.Idle),
+		KeepAliveInterval: durationMilliseconds(cfg.Interval),
 	}
 	var bytesReturned uint32
 	var serr error
@@ -48,4 +43,15 @@ func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 		return err
 	}
 	return serr
+}
+
+func durationMilliseconds(d time.Duration) uint32 {
+	milliseconds := d / time.Millisecond
+	if d%time.Millisecond != 0 {
+		milliseconds++
+	}
+	if milliseconds > time.Duration(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(milliseconds)
 }

@@ -20,8 +20,8 @@ type observedReadWriteCloser struct {
 	onWrite ByteObserver
 }
 
-// WrapReadWriteCloserWithTrafficObserver wraps rwc and reports transferred byte counts.
-func WrapReadWriteCloserWithTrafficObserver(rwc io.ReadWriteCloser, observer TrafficObserver) io.ReadWriteCloser {
+// ObserveReadWriteCloser wraps rwc and reports transferred byte counts.
+func ObserveReadWriteCloser(rwc io.ReadWriteCloser, observer TrafficObserver) io.ReadWriteCloser {
 	if rwc == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return rwc
 	}
@@ -32,12 +32,12 @@ func WrapReadWriteCloserWithTrafficObserver(rwc io.ReadWriteCloser, observer Tra
 	}
 }
 
-// WrapNetConnWithTrafficObserver wraps conn and reports transferred byte counts.
-func WrapNetConnWithTrafficObserver(conn net.Conn, observer TrafficObserver) net.Conn {
+// ObserveConn wraps conn and reports transferred byte counts.
+func ObserveConn(conn net.Conn, observer TrafficObserver) net.Conn {
 	if conn == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return conn
 	}
-	return WrapConnWithoutParentClose(WrapReadWriteCloserWithTrafficObserver(conn, observer), conn)
+	return WrapConnWithoutParentClose(ObserveReadWriteCloser(conn, observer), conn)
 }
 
 func (c *observedReadWriteCloser) Read(p []byte) (int, error) {

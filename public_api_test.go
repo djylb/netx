@@ -8,17 +8,20 @@ import (
 )
 
 func TestPublicConnectionHelpers(t *testing.T) {
-	parsed := ParseAddr("127.0.0.1:8080")
+	parsed, err := ParseTCPAddr("127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("ParseTCPAddr() error = %v", err)
+	}
 	if parsed.String() != "127.0.0.1:8080" {
-		t.Fatalf("ParseAddr() = %q, want %q", parsed.String(), "127.0.0.1:8080")
+		t.Fatalf("ParseTCPAddr() = %q, want %q", parsed.String(), "127.0.0.1:8080")
 	}
 
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
 	local := &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 8080}
 	overridden := NewAddrOverrideFromAddr(&countedCloseConn{}, remote, local)
-	header := BuildProxyProtocolHeader(overridden, 1)
+	header := ProxyProtocolHeader(overridden, ProxyProtocolVersion1)
 	if string(header) != "PROXY TCP4 192.0.2.10 198.51.100.20 1234 8080\r\n" {
-		t.Fatalf("BuildProxyProtocolHeader() = %q", string(header))
+		t.Fatalf("ProxyProtocolHeader() = %q", string(header))
 	}
 
 	stringOverride, err := NewAddrOverrideConn(&countedCloseConn{}, "203.0.113.10:443", "127.0.0.1:80")

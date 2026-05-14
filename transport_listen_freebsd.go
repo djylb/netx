@@ -14,9 +14,10 @@ const (
 	ipv6BindAny = 0x40
 )
 
-// ListenTCP listens on address and optionally enables transparent TCP support.
-func ListenTCP(address string, transparent bool) (net.Listener, error) {
-	if !transparent {
+// ListenTCP listens on a TCP address.
+func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
+	cfg := newListenOptions(opts)
+	if !cfg.transparent {
 		return net.Listen("tcp", address)
 	}
 

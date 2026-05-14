@@ -16,8 +16,8 @@ const (
 	diocNatLook = iocInOut | ((natLookLen & iocParmMask) << 16) | ('D' << 8) | 23
 )
 
-// GetAddress returns the original destination address for a transparent TCP connection.
-func GetAddress(conn net.Conn) (string, error) {
+// OriginalDestination returns the original destination address for a transparent TCP connection.
+func OriginalDestination(conn net.Conn) (string, error) {
 	if conn == nil {
 		return "", net.ErrClosed
 	}

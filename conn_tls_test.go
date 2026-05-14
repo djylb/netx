@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestNewTlsConnClearsHandshakeDeadline(t *testing.T) {
+func TestNewTLSConnClearsHandshakeDeadline(t *testing.T) {
 	cert := testSelfSignedCert(t)
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -26,12 +26,12 @@ func TestNewTlsConnClearsHandshakeDeadline(t *testing.T) {
 		errCh <- err
 	}()
 
-	tlsClient, err := NewTlsConn(clientConn, 300*time.Millisecond, &tls.Config{
+	tlsClient, err := NewTLSConn(clientConn, 300*time.Millisecond, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
 	})
 	if err != nil {
-		t.Fatalf("NewTlsConn() error = %v", err)
+		t.Fatalf("NewTLSConn() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
 
@@ -48,7 +48,7 @@ func TestNewTlsConnClearsHandshakeDeadline(t *testing.T) {
 	}
 }
 
-func TestNewTlsConnContextNormalizesNonPositiveTimeout(t *testing.T) {
+func TestNewTLSConnContextNormalizesNonPositiveTimeout(t *testing.T) {
 	cert := testSelfSignedCert(t)
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -65,12 +65,12 @@ func TestNewTlsConnContextNormalizesNonPositiveTimeout(t *testing.T) {
 		errCh <- err
 	}()
 
-	tlsClient, err := NewTlsConnContext(context.Background(), clientConn, 0, &tls.Config{
+	tlsClient, err := NewTLSConnContext(context.Background(), clientConn, 0, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
 	})
 	if err != nil {
-		t.Fatalf("NewTlsConnContext() error = %v", err)
+		t.Fatalf("NewTLSConnContext() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
 
@@ -87,33 +87,10 @@ func TestNewTlsConnContextNormalizesNonPositiveTimeout(t *testing.T) {
 	}
 }
 
-func TestGetTlsConn(t *testing.T) {
-	cert := testSelfSignedCert(t)
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
-	defer func() { _ = clientConn.Close() }()
-
-	errCh := make(chan error, 1)
-	go func() {
-		tlsServer := tls.Server(serverConn, &tls.Config{Certificates: []tls.Certificate{cert}})
-		errCh <- tlsServer.Handshake()
-	}()
-
-	tlsClient, err := GetTlsConn(clientConn, "localhost:443", false)
-	if err != nil {
-		t.Fatalf("GetTlsConn() error = %v", err)
-	}
-	defer func() { _ = tlsClient.Close() }()
-
-	if err := <-errCh; err != nil {
-		t.Fatalf("server TLS handshake error = %v", err)
-	}
-}
-
-func TestTlsConnHelpersHandleNilState(t *testing.T) {
-	var nilConn *TlsConn
+func TestTLSConnHelpersHandleNilState(t *testing.T) {
+	var nilConn *TLSConn
 	assertClosedRawConnState(t, "nil", nilConn)
 
-	malformed := &TlsConn{}
+	malformed := &TLSConn{}
 	assertClosedRawConnState(t, "malformed", malformed)
 }

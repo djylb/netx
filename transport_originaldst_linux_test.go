@@ -36,24 +36,24 @@ func TestTransparentDestinationFromLocalAddr(t *testing.T) {
 	}
 }
 
-func TestGetAddressFallsBackToLocalAddrForTransparentConn(t *testing.T) {
-	addr, err := GetAddress(stubTransparentConn{
+func TestOriginalDestinationFallsBackToLocalAddrForTransparentConn(t *testing.T) {
+	addr, err := OriginalDestination(stubTransparentConn{
 		local: &net.TCPAddr{
 			IP:   net.ParseIP("198.51.100.25"),
 			Port: 443,
 		},
 	})
 	if err != nil {
-		t.Fatalf("GetAddress error = %v", err)
+		t.Fatalf("OriginalDestination error = %v", err)
 	}
 	if addr != "198.51.100.25:443" {
-		t.Fatalf("GetAddress = %q, want %q", addr, "198.51.100.25:443")
+		t.Fatalf("OriginalDestination = %q, want %q", addr, "198.51.100.25:443")
 	}
 }
 
-func TestGetAddressRejectsNilConn(t *testing.T) {
-	if _, err := GetAddress(nil); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("GetAddress(nil) error = %v, want %v", err, net.ErrClosed)
+func TestOriginalDestinationRejectsNilConn(t *testing.T) {
+	if _, err := OriginalDestination(nil); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("OriginalDestination(nil) error = %v, want %v", err, net.ErrClosed)
 	}
 }
 

@@ -22,8 +22,8 @@ type FramedConn struct {
 	wmu sync.Mutex
 }
 
-// WrapFramed wraps c with length-prefixed framed I/O.
-func WrapFramed(c net.Conn) *FramedConn { return &FramedConn{Conn: c} }
+// NewFramedConn wraps c with length-prefixed framed I/O.
+func NewFramedConn(c net.Conn) *FramedConn { return &FramedConn{Conn: c} }
 
 func (fc *FramedConn) Read(p []byte) (int, error) {
 	if fc == nil || fc.Conn == nil {
