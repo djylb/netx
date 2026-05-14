@@ -28,6 +28,9 @@ func wrapConnWithoutParentClose(rwc io.ReadWriteCloser, parent net.Conn) net.Con
 }
 
 func wrapConnWithCloseMode(rwc io.ReadWriteCloser, parent net.Conn, closeParent bool) net.Conn {
+	if closeParent && parent != nil && rawConnOf(rwc) == parent {
+		closeParent = false
+	}
 	return &wrappedConn{rwc: rwc, parent: parent, closeParent: closeParent}
 }
 
@@ -48,9 +51,6 @@ func (w *wrappedConn) Write(b []byte) (int, error) {
 func (w *wrappedConn) Close() error {
 	if w == nil {
 		return nil
-	}
-	if w.closeParent && w.parent != nil && rawConnOf(w.rwc) == w.parent {
-		w.parent = nil
 	}
 	var err1, err2 error
 	if w.rwc != nil {
