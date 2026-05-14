@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -18,7 +16,6 @@ const (
 	sysPFOUT       = 0x2
 	sysPFFWD       = 0x3
 	sysDIOCNATLOOK = 0xc04c4417
-	tcpKeepIdle    = unix.TCP_KEEPIDLE
 )
 
 type pfiocNatlook struct {

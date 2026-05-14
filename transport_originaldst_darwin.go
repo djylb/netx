@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -16,7 +14,6 @@ const (
 	iocInOut    = 0x80000000
 	iocParmMask = 0x1FFF
 	diocNatLook = iocInOut | ((natLookLen & iocParmMask) << 16) | ('D' << 8) | 23
-	tcpKeepIdle = unix.TCP_KEEPALIVE
 )
 
 // GetAddress returns the original destination address for a transparent TCP connection.

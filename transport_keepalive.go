@@ -1,12 +1,11 @@
-//go:build !windows
+//go:build linux || freebsd || darwin
 
 package netx
 
 import (
 	"errors"
 	"net"
-
-	"golang.org/x/sys/unix"
+	"syscall"
 )
 
 var errInvalidKeepAliveParams = errors.New("tcp keepalive parameters must be positive")
@@ -25,13 +24,13 @@ func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	}
 	var sockErr error
 	err = raw.Control(func(fd uintptr) {
-		if sockErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, tcpKeepIdle, idle); sockErr != nil {
+		if sockErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, tcpKeepIdle, idle); sockErr != nil {
 			return
 		}
-		if sockErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, intvl); sockErr != nil {
+		if sockErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, tcpKeepIntvl, intvl); sockErr != nil {
 			return
 		}
-		sockErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPCNT, probes)
+		sockErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, tcpKeepCnt, probes)
 	})
 	if err != nil {
 		return err

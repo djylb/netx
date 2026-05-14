@@ -3,9 +3,8 @@ package netx
 import (
 	"errors"
 	"net"
+	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 const sioKeepaliveVals = 0x98000004
@@ -38,7 +37,7 @@ func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	var bytesReturned uint32
 	var serr error
 	err = raw.Control(func(fd uintptr) {
-		serr = windows.WSAIoctl(windows.Handle(fd),
+		serr = syscall.WSAIoctl(syscall.Handle(fd),
 			sioKeepaliveVals,
 			(*byte)(unsafe.Pointer(&ka)), uint32(unsafe.Sizeof(ka)),
 			nil, 0,

@@ -6,12 +6,9 @@ import (
 	"strconv"
 	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 const soOriginalDst = 80
-const tcpKeepIdle = unix.TCP_KEEPIDLE
 
 // GetAddress returns the original destination address for a transparent TCP connection.
 func GetAddress(conn net.Conn) (string, error) {
@@ -44,12 +41,12 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 
 	err = raw.Control(func(fd uintptr) {
 		// IPv4
-		var sa4 unix.RawSockaddrInet4
+		var sa4 syscall.RawSockaddrInet4
 		sz4 := uint32(unsafe.Sizeof(sa4))
-		_, _, errno4 := unix.Syscall6(
-			unix.SYS_GETSOCKOPT,
+		_, _, errno4 := syscall.Syscall6(
+			syscall.SYS_GETSOCKOPT,
 			fd,
-			uintptr(unix.SOL_IP),
+			uintptr(syscall.SOL_IP),
 			uintptr(soOriginalDst),
 			uintptr(unsafe.Pointer(&sa4)),
 			uintptr(unsafe.Pointer(&sz4)),
@@ -63,12 +60,12 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 		}
 
 		// IPv6
-		var sa6 unix.RawSockaddrInet6
+		var sa6 syscall.RawSockaddrInet6
 		sz6 := uint32(unsafe.Sizeof(sa6))
-		_, _, errno6 := unix.Syscall6(
-			unix.SYS_GETSOCKOPT,
+		_, _, errno6 := syscall.Syscall6(
+			syscall.SYS_GETSOCKOPT,
 			fd,
-			uintptr(unix.SOL_IPV6),
+			uintptr(syscall.SOL_IPV6),
 			uintptr(soOriginalDst),
 			uintptr(unsafe.Pointer(&sa6)),
 			uintptr(unsafe.Pointer(&sz6)),

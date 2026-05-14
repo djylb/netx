@@ -7,8 +7,11 @@ import (
 	"errors"
 	"net"
 	"syscall"
+)
 
-	"golang.org/x/sys/unix"
+const (
+	ipBindAny   = 0x18
+	ipv6BindAny = 0x40
 )
 
 // ListenTCP listens on address and optionally enables transparent TCP support.
@@ -37,10 +40,10 @@ func enableBindAnySocket(fd int) error {
 		level int
 		name  int
 	}{
-		{level: unix.IPPROTO_IP, name: unix.IP_BINDANY},
-		{level: unix.IPPROTO_IPV6, name: unix.IPV6_BINDANY},
+		{level: syscall.IPPROTO_IP, name: ipBindAny},
+		{level: syscall.IPPROTO_IPV6, name: ipv6BindAny},
 	} {
-		if err := unix.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableBindAnySockopt(err) {
+		if err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableBindAnySockopt(err) {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -50,7 +53,7 @@ func enableBindAnySocket(fd int) error {
 }
 
 func isIgnorableBindAnySockopt(err error) bool {
-	return errors.Is(err, unix.ENOPROTOOPT) ||
-		errors.Is(err, unix.EINVAL) ||
-		errors.Is(err, unix.EAFNOSUPPORT)
+	return errors.Is(err, syscall.ENOPROTOOPT) ||
+		errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.EAFNOSUPPORT)
 }

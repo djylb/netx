@@ -7,8 +7,13 @@ import (
 	"errors"
 	"net"
 	"syscall"
+)
 
-	"golang.org/x/sys/unix"
+const (
+	solIP           = 0x0
+	solIPv6         = 0x29
+	ipTransparent   = 0x13
+	ipv6Transparent = 0x4b
 )
 
 // ListenTCP listens on address and optionally enables transparent TCP support.
@@ -37,10 +42,10 @@ func enableTransparentSocket(fd int) error {
 		level int
 		name  int
 	}{
-		{level: unix.SOL_IP, name: unix.IP_TRANSPARENT},
-		{level: unix.SOL_IPV6, name: unix.IPV6_TRANSPARENT},
+		{level: solIP, name: ipTransparent},
+		{level: solIPv6, name: ipv6Transparent},
 	} {
-		if err := unix.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableTransparentSockopt(err) {
+		if err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableTransparentSockopt(err) {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -50,7 +55,7 @@ func enableTransparentSocket(fd int) error {
 }
 
 func isIgnorableTransparentSockopt(err error) bool {
-	return errors.Is(err, unix.ENOPROTOOPT) ||
-		errors.Is(err, unix.EINVAL) ||
-		errors.Is(err, unix.EAFNOSUPPORT)
+	return errors.Is(err, syscall.ENOPROTOOPT) ||
+		errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.EAFNOSUPPORT)
 }
