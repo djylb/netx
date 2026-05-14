@@ -18,6 +18,7 @@ type tcpKeepalive struct {
 	KeepAliveInterval uint32
 }
 
+// SetTcpKeepAliveParams sets TCP keepalive parameters on tc.
 func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	switch {
 	case tc == nil:

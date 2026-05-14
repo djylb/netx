@@ -11,6 +11,7 @@ import (
 
 var errInvalidKeepAliveParams = errors.New("tcp keepalive parameters must be positive")
 
+// SetTcpKeepAliveParams sets TCP keepalive parameters on tc.
 func SetTcpKeepAliveParams(tc *net.TCPConn, idle, intvl, probes int) error {
 	switch {
 	case tc == nil:

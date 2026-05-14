@@ -1,4 +1,4 @@
-//go:build linux
+//go:build freebsd
 
 package netx
 
@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ListenTCP listens on address and optionally enables transparent TCP support.
 func ListenTCP(address string, transparent bool) (net.Listener, error) {
 	if !transparent {
 		return net.Listen("tcp", address)
@@ -20,7 +21,7 @@ func ListenTCP(address string, transparent bool) (net.Listener, error) {
 		Control: func(_, _ string, raw syscall.RawConn) error {
 			var sockErr error
 			if err := raw.Control(func(fd uintptr) {
-				sockErr = enableTransparentSocket(int(fd))
+				sockErr = enableBindAnySocket(int(fd))
 			}); err != nil {
 				return err
 			}
@@ -30,16 +31,16 @@ func ListenTCP(address string, transparent bool) (net.Listener, error) {
 	return lc.Listen(context.Background(), "tcp", address)
 }
 
-func enableTransparentSocket(fd int) error {
+func enableBindAnySocket(fd int) error {
 	var firstErr error
 	for _, opt := range []struct {
 		level int
 		name  int
 	}{
-		{level: unix.SOL_IP, name: unix.IP_TRANSPARENT},
-		{level: unix.SOL_IPV6, name: unix.IPV6_TRANSPARENT},
+		{level: unix.IPPROTO_IP, name: unix.IP_BINDANY},
+		{level: unix.IPPROTO_IPV6, name: unix.IPV6_BINDANY},
 	} {
-		if err := unix.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableTransparentSockopt(err) {
+		if err := unix.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableBindAnySockopt(err) {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -48,7 +49,7 @@ func enableTransparentSocket(fd int) error {
 	return firstErr
 }
 
-func isIgnorableTransparentSockopt(err error) bool {
+func isIgnorableBindAnySockopt(err error) bool {
 	return errors.Is(err, unix.ENOPROTOOPT) ||
 		errors.Is(err, unix.EINVAL) ||
 		errors.Is(err, unix.EAFNOSUPPORT)

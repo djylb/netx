@@ -3,6 +3,7 @@
 package netx
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -60,5 +61,11 @@ func TestGetAddressFallsBackToLocalAddrForTransparentConn(t *testing.T) {
 	}
 	if addr != "198.51.100.25:443" {
 		t.Fatalf("GetAddress = %q, want %q", addr, "198.51.100.25:443")
+	}
+}
+
+func TestGetAddressRejectsNilConn(t *testing.T) {
+	if _, err := GetAddress(nil); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("GetAddress(nil) error = %v, want %v", err, net.ErrClosed)
 	}
 }

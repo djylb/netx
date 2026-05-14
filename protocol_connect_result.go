@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// ConnectResultStatus is the compact status code exchanged after dialing a target.
 type ConnectResultStatus byte
 
 const (
@@ -32,6 +33,7 @@ const (
 	ConnectResultServerFailure ConnectResultStatus = 255
 )
 
+// WriteConnectResult writes a connect result frame with a temporary write deadline.
 func WriteConnectResult(c net.Conn, status ConnectResultStatus, timeout time.Duration) error {
 	if c == nil {
 		return net.ErrClosed
@@ -43,6 +45,7 @@ func WriteConnectResult(c net.Conn, status ConnectResultStatus, timeout time.Dur
 	return err
 }
 
+// ReadConnectResult reads a connect result frame with a temporary read deadline.
 func ReadConnectResult(c net.Conn, timeout time.Duration) (ConnectResultStatus, error) {
 	if c == nil {
 		return ConnectResultServerFailure, net.ErrClosed
@@ -61,6 +64,7 @@ func ReadConnectResult(c net.Conn, timeout time.Duration) (ConnectResultStatus, 
 	return ConnectResultStatus(buf[1]), nil
 }
 
+// DialConnectResult maps a dial error to a ConnectResultStatus.
 func DialConnectResult(err error) ConnectResultStatus {
 	if err == nil {
 		return ConnectResultOK

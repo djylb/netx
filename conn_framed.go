@@ -9,16 +9,20 @@ import (
 	"time"
 )
 
+// MaxFramePayload is the maximum payload size of one framed message.
 const MaxFramePayload = 65535
 
+// ErrFrameTooLarge is returned when an incoming frame exceeds MaxFramePayload.
 var ErrFrameTooLarge = errors.New("framed: frame size exceeds MaxFramePayload")
 
+// FramedConn reads and writes length-prefixed frames over a net.Conn.
 type FramedConn struct {
 	net.Conn
 	rmu sync.Mutex
 	wmu sync.Mutex
 }
 
+// WrapFramed wraps c with length-prefixed framed I/O.
 func WrapFramed(c net.Conn) *FramedConn { return &FramedConn{Conn: c} }
 
 func (fc *FramedConn) Read(p []byte) (int, error) {

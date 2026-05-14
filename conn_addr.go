@@ -12,6 +12,7 @@ type AddrOverrideConn struct {
 	rAddr net.Addr
 }
 
+// NewAddrOverrideConn wraps base and overrides its local or remote address from strings.
 func NewAddrOverrideConn(base net.Conn, remote, local string) (*AddrOverrideConn, error) {
 	if base == nil {
 		return nil, fmt.Errorf("base conn is nil")
@@ -28,6 +29,7 @@ func NewAddrOverrideConn(base net.Conn, remote, local string) (*AddrOverrideConn
 	}, nil
 }
 
+// NewAddrOverrideFromAddr wraps base and overrides its local or remote address from net.Addr values.
 func NewAddrOverrideFromAddr(base net.Conn, remote, local net.Addr) *AddrOverrideConn {
 	return &AddrOverrideConn{
 		Conn:  base,

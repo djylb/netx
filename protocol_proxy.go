@@ -6,6 +6,7 @@ import (
 	"strconv"
 )
 
+// ParseAddr converts host:port text into a TCP address, defaulting bad ports to 0.
 func ParseAddr(addr string) net.Addr {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -22,6 +23,7 @@ func ParseAddr(addr string) net.Addr {
 	return &net.TCPAddr{IP: ip, Port: port}
 }
 
+// BuildProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
 func BuildProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
 	if !ok {
@@ -33,6 +35,7 @@ func BuildProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	return []byte(header)
 }
 
+// BuildProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
 func BuildProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	const sig = "\r\n\r\n\000\r\nQUIT\n"
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
@@ -63,6 +66,7 @@ func BuildProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	return header
 }
 
+// BuildProxyProtocolHeader builds a Proxy Protocol header from a connection's remote and local addresses.
 func BuildProxyProtocolHeader(c net.Conn, proxyProtocol int) []byte {
 	if c == nil || proxyProtocol == 0 {
 		return nil
@@ -70,6 +74,7 @@ func BuildProxyProtocolHeader(c net.Conn, proxyProtocol int) []byte {
 	return BuildProxyProtocolHeaderByAddr(c.RemoteAddr(), c.LocalAddr(), proxyProtocol)
 }
 
+// BuildProxyProtocolHeaderByAddr builds a Proxy Protocol header from explicit addresses.
 func BuildProxyProtocolHeaderByAddr(clientAddr, targetAddr net.Addr, proxyProtocol int) []byte {
 	if proxyProtocol == 0 {
 		return nil
@@ -116,7 +121,7 @@ func normalizeTargetIP(srcIP, dstIP net.IP) net.IP {
 	case srcIsV4 && !dstIsV4:
 		return net.IPv4zero
 	case !srcIsV4 && dstIsV4:
-		return append(net.IPv6zero[:12], dstIP.To4()...)
+		return ipv4MappedIPv6(dstIP)
 	case dstIP == nil || dstIP.IsUnspecified():
 		if srcIsV4 {
 			return net.IPv4zero
@@ -125,6 +130,16 @@ func normalizeTargetIP(srcIP, dstIP net.IP) net.IP {
 	default:
 		return dstIP
 	}
+}
+
+func ipv4MappedIPv6(ip net.IP) net.IP {
+	v4 := ip.To4()
+	if v4 == nil {
+		return nil
+	}
+	mapped := make(net.IP, net.IPv6len)
+	copy(mapped[12:], v4)
+	return mapped
 }
 
 type proxyAddrMeta struct {
@@ -162,6 +177,9 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcp bool
 	srcIsV4 := srcIP.To4() != nil
 	dstIsV4 := dstIP.To4() != nil
 	if srcIsV4 != dstIsV4 {
+		return proxyAddrMeta{}, false
+	}
+	if !srcIsV4 && (srcIP.To16() == nil || dstIP.To16() == nil) {
 		return proxyAddrMeta{}, false
 	}
 	meta := proxyAddrMeta{

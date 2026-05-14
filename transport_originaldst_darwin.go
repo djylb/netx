@@ -19,7 +19,11 @@ const (
 	tcpKeepIdle = unix.TCP_KEEPALIVE
 )
 
+// GetAddress returns the original destination address for a transparent TCP connection.
 func GetAddress(conn net.Conn) (string, error) {
+	if conn == nil {
+		return "", net.ErrClosed
+	}
 	fd, err := syscall.Open("/dev/pf", syscall.O_RDONLY, 0)
 	if err != nil {
 		return "", fmt.Errorf("failed to open /dev/pf: %v", err)

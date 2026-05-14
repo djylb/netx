@@ -13,10 +13,12 @@ type wrappedConn struct {
 	closeParent bool
 }
 
+// WrapConn exposes rwc as a net.Conn using parent for addresses and deadlines.
 func WrapConn(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
 	return wrapConnWithCloseMode(rwc, parent, true)
 }
 
+// WrapConnWithoutParentClose is like WrapConn but leaves parent open when closed.
 func WrapConnWithoutParentClose(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
 	return wrapConnWithoutParentClose(rwc, parent)
 }

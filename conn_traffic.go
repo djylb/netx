@@ -5,8 +5,10 @@ import (
 	"net"
 )
 
+// ByteObserver observes byte counts for successful reads or writes.
 type ByteObserver func(int64) error
 
+// TrafficObserver contains optional read and write observers.
 type TrafficObserver struct {
 	OnRead  ByteObserver
 	OnWrite ByteObserver
@@ -18,6 +20,7 @@ type observedReadWriteCloser struct {
 	onWrite ByteObserver
 }
 
+// WrapReadWriteCloserWithTrafficObserver wraps rwc and reports transferred byte counts.
 func WrapReadWriteCloserWithTrafficObserver(rwc io.ReadWriteCloser, observer TrafficObserver) io.ReadWriteCloser {
 	if rwc == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return rwc
@@ -29,6 +32,7 @@ func WrapReadWriteCloserWithTrafficObserver(rwc io.ReadWriteCloser, observer Tra
 	}
 }
 
+// WrapNetConnWithTrafficObserver wraps conn and reports transferred byte counts.
 func WrapNetConnWithTrafficObserver(conn net.Conn, observer TrafficObserver) net.Conn {
 	if conn == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return conn

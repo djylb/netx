@@ -1,113 +1,33 @@
 package netx
 
 import (
-	"crypto/tls"
+	"errors"
 	"net"
-	"sync"
+	"strings"
 	"time"
 )
 
-type TimeoutConn struct {
-	net.Conn
-	idleTimeout time.Duration
-	mu          sync.Mutex
-	lastSet     time.Time
+// DefaultTimeout is used when a helper receives a non-positive timeout.
+const DefaultTimeout = 5 * time.Second
+
+const defaultTimeOut = DefaultTimeout
+
+func normalizeLinkTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return DefaultTimeout
+	}
+	return timeout
 }
 
-func NewTimeoutConn(c net.Conn, idle time.Duration) net.Conn {
-	return &TimeoutConn{Conn: c, idleTimeout: normalizeLinkTimeout(idle)}
-}
-
-func (c *TimeoutConn) Read(b []byte) (int, error) {
-	if c == nil || c.Conn == nil {
-		return 0, net.ErrClosed
+// IsTimeout reports whether err is a timeout.
+func IsTimeout(err error) bool {
+	if err == nil {
+		return false
 	}
-	c.refreshDeadline()
-	return c.Conn.Read(b)
-}
-
-func (c *TimeoutConn) Write(b []byte) (int, error) {
-	if c == nil || c.Conn == nil {
-		return 0, net.ErrClosed
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
 	}
-	c.refreshDeadline()
-	return c.Conn.Write(b)
-}
-
-func (c *TimeoutConn) refreshDeadline() {
-	if c == nil || c.Conn == nil {
-		return
-	}
-	deadline := time.Now().Add(c.idleTimeout)
-	c.mu.Lock()
-	if !c.lastSet.IsZero() && !deadline.After(c.lastSet) {
-		deadline = c.lastSet.Add(time.Nanosecond)
-	}
-	c.lastSet = deadline
-	c.mu.Unlock()
-	_ = c.SetDeadline(deadline)
-}
-
-func (c *TimeoutConn) Close() error {
-	if c == nil || c.Conn == nil {
-		return nil
-	}
-	return c.Conn.Close()
-}
-
-func (c *TimeoutConn) LocalAddr() net.Addr {
-	if c == nil || c.Conn == nil {
-		return nil
-	}
-	return c.Conn.LocalAddr()
-}
-
-func (c *TimeoutConn) RemoteAddr() net.Addr {
-	if c == nil || c.Conn == nil {
-		return nil
-	}
-	return c.Conn.RemoteAddr()
-}
-
-func (c *TimeoutConn) SetDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetDeadline(t)
-}
-
-func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetReadDeadline(t)
-}
-
-func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetWriteDeadline(t)
-}
-
-func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (net.Conn, error) {
-	if raw == nil {
-		return nil, net.ErrClosed
-	}
-	idle = normalizeLinkTimeout(idle)
-	handshakeTimeout = normalizeLinkTimeout(handshakeTimeout)
-	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		_ = raw.Close()
-		return nil, err
-	}
-	tlsConn := tls.Client(raw, cfg)
-	if err := tlsConn.Handshake(); err != nil {
-		_ = tlsConn.Close()
-		return nil, err
-	}
-	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
-		_ = tlsConn.Close()
-		return nil, err
-	}
-	return NewTimeoutConn(tlsConn, idle), nil
+	s := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	return strings.Contains(s, "timeout")
 }

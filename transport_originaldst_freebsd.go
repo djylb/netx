@@ -45,7 +45,11 @@ func ioctl(s uintptr, ioc int, b []byte) error {
 	return nil
 }
 
+// GetAddress returns the original destination address for a transparent TCP connection.
 func GetAddress(conn net.Conn) (string, error) {
+	if conn == nil {
+		return "", net.ErrClosed
+	}
 	dst, err := redirectedDestinationFromPF(conn)
 	if err == nil {
 		return dst, nil

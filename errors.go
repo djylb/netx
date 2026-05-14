@@ -10,6 +10,7 @@ import (
 	"syscall"
 )
 
+// IsConnReset reports whether err looks like a connection reset.
 func IsConnReset(err error) bool {
 	if err == nil {
 		return false
@@ -22,6 +23,7 @@ func IsConnReset(err error) bool {
 		strings.Contains(msg, "forciblyclosedbytheremotehost")
 }
 
+// IsConnAborted reports whether err looks like an aborted connection.
 func IsConnAborted(err error) bool {
 	if err == nil {
 		return false
@@ -34,6 +36,7 @@ func IsConnAborted(err error) bool {
 		strings.Contains(msg, "softwarecausedconnectionabort")
 }
 
+// IsBrokenPipe reports whether err looks like a broken pipe.
 func IsBrokenPipe(err error) bool {
 	if err == nil {
 		return false
@@ -45,6 +48,7 @@ func IsBrokenPipe(err error) bool {
 	return strings.Contains(msg, "brokenpipe")
 }
 
+// NetErrorKind returns a stable string category for common network errors.
 func NetErrorKind(err error) string {
 	switch {
 	case err == nil:
@@ -68,6 +72,7 @@ func NetErrorKind(err error) string {
 	}
 }
 
+// DescribeNetError returns a compact diagnostic string for a network error.
 func DescribeNetError(err error, c net.Conn) string {
 	if err == nil {
 		return "kind=none"

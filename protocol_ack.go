@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
+// ConnACK is the fixed acknowledgement payload used by WriteACK and ReadACK.
 const ConnACK = "ACK"
 
+// WriteACK writes ConnACK with a temporary write deadline.
 func WriteACK(c net.Conn, timeout time.Duration) error {
 	if c == nil {
 		return net.ErrClosed
@@ -19,6 +21,7 @@ func WriteACK(c net.Conn, timeout time.Duration) error {
 	return err
 }
 
+// ReadACK reads ConnACK with a temporary read deadline.
 func ReadACK(c net.Conn, timeout time.Duration) error {
 	if c == nil {
 		return net.ErrClosed

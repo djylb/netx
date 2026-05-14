@@ -9,6 +9,7 @@ import (
 
 const defaultMaxBufBytes = 64 * 1024
 
+// TeeConn records bytes read from an underlying net.Conn until buffering is stopped.
 type TeeConn struct {
 	underlying  net.Conn
 	buf         *bytes.Buffer
@@ -17,6 +18,7 @@ type TeeConn struct {
 	maxBufBytes int
 }
 
+// NewTeeConn wraps conn and stores up to maxBufBytes read bytes.
 func NewTeeConn(conn net.Conn, maxBufBytes ...int) *TeeConn {
 	size := defaultMaxBufBytes
 	if len(maxBufBytes) > 0 && maxBufBytes[0] > 0 {

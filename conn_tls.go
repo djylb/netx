@@ -9,15 +9,18 @@ import (
 	"time"
 )
 
+// TlsConn keeps access to both the TLS connection and its raw connection.
 type TlsConn struct {
 	*tls.Conn
 	rawConn net.Conn
 }
 
+// NewTlsConn performs a TLS client handshake with a temporary deadline.
 func NewTlsConn(rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TlsConn, error) {
 	return NewTlsConnContext(context.Background(), rawConn, timeout, tlsConfig)
 }
 
+// NewTlsConnContext performs a TLS client handshake using ctx and a temporary deadline.
 func NewTlsConnContext(ctx context.Context, rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TlsConn, error) {
 	if rawConn == nil {
 		return nil, net.ErrClosed
@@ -50,6 +53,7 @@ func NewTlsConnContext(ctx context.Context, rawConn net.Conn, timeout time.Durat
 	}, nil
 }
 
+// GetTlsConn wraps c with TLS using sni and optional certificate verification.
 func GetTlsConn(c net.Conn, sni string, verifyCertificate bool) (net.Conn, error) {
 	if c == nil {
 		return nil, net.ErrClosed

@@ -8,6 +8,12 @@ Reusable Go networking helpers.
 go get github.com/djylb/netx
 ```
 
+## Includes
+
+- Connection adapters: framed I/O, timeout, TLS, tee, address override, traffic observer.
+- Protocol helpers: ACK, connect result, Proxy Protocol v1/v2.
+- Transport helpers: transparent TCP listen, original destination lookup, TCP keepalive options.
+
 ## Usage
 
 ```go
