@@ -1,7 +1,6 @@
 package netx
 
 import (
-	"bytes"
 	"net"
 	"sync"
 	"time"
@@ -12,7 +11,7 @@ const defaultMaxBufBytes = 64 * 1024
 // TeeConn records bytes read from an underlying net.Conn until buffering is stopped.
 type TeeConn struct {
 	underlying  net.Conn
-	buf         *bytes.Buffer
+	buf         []byte
 	mu          sync.Mutex
 	detached    bool
 	maxBufBytes int
@@ -26,7 +25,6 @@ func NewTeeConn(conn net.Conn, maxBufBytes ...int) *TeeConn {
 	}
 	return &TeeConn{
 		underlying:  conn,
-		buf:         new(bytes.Buffer),
 		maxBufBytes: size,
 	}
 }
@@ -39,17 +37,7 @@ func (t *TeeConn) Read(p []byte) (n int, err error) {
 	n, err = conn.Read(p)
 	if n > 0 {
 		t.mu.Lock()
-		if !t.detached {
-			buf := t.bufferLocked()
-			available := t.bufferLimit() - buf.Len()
-			if available > 0 {
-				if n > available {
-					buf.Write(p[:available])
-				} else {
-					buf.Write(p[:n])
-				}
-			}
-		}
+		t.captureLocked(p[:n])
 		t.mu.Unlock()
 	}
 	return n, err
@@ -141,10 +129,7 @@ func (t *TeeConn) Buffered() []byte {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.buf == nil {
-		return nil
-	}
-	return append([]byte(nil), t.buf.Bytes()...)
+	return append([]byte(nil), t.buf...)
 }
 
 func (t *TeeConn) ResetBuffer() {
@@ -153,9 +138,7 @@ func (t *TeeConn) ResetBuffer() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.buf != nil {
-		t.buf.Reset()
-	}
+	t.buf = t.buf[:0]
 }
 
 func (t *TeeConn) ExtractAndReset() []byte {
@@ -164,11 +147,8 @@ func (t *TeeConn) ExtractAndReset() []byte {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.buf == nil {
-		return nil
-	}
-	data := append([]byte(nil), t.buf.Bytes()...)
-	t.buf.Reset()
+	data := append([]byte(nil), t.buf...)
+	t.buf = t.buf[:0]
 	return data
 }
 
@@ -181,10 +161,7 @@ func (t *TeeConn) Release() (net.Conn, []byte) {
 	conn := t.underlying
 	t.underlying = nil
 	t.detached = true
-	var data []byte
-	if t.buf != nil {
-		data = append([]byte(nil), t.buf.Bytes()...)
-	}
+	data := append([]byte(nil), t.buf...)
 	t.buf = nil
 	return conn, data
 }
@@ -196,7 +173,7 @@ func (t *TeeConn) DiscardBuffer() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.detached = true
-	t.buf = new(bytes.Buffer)
+	t.buf = nil
 }
 
 func (t *TeeConn) conn() net.Conn {
@@ -215,9 +192,16 @@ func (t *TeeConn) bufferLimit() int {
 	return t.maxBufBytes
 }
 
-func (t *TeeConn) bufferLocked() *bytes.Buffer {
-	if t.buf == nil {
-		t.buf = new(bytes.Buffer)
+func (t *TeeConn) captureLocked(p []byte) {
+	if t.detached || len(p) == 0 {
+		return
 	}
-	return t.buf
+	available := t.bufferLimit() - len(t.buf)
+	if available <= 0 {
+		return
+	}
+	if len(p) > available {
+		p = p[:available]
+	}
+	t.buf = append(t.buf, p...)
 }

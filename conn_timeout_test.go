@@ -62,6 +62,25 @@ func (c *closeSpyConn) isClosed() bool {
 	return c.closed
 }
 
+type deadlineRecordConn struct {
+	countedCloseConn
+	mu       sync.Mutex
+	deadline []time.Time
+}
+
+func (d *deadlineRecordConn) SetDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.deadline = append(d.deadline, t)
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *deadlineRecordConn) deadlines() []time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]time.Time(nil), d.deadline...)
+}
+
 func TestTimeoutConnReadWriteSetsDeadline(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -124,6 +143,34 @@ func TestTimeoutConnReadWriteSetsDeadline(t *testing.T) {
 	}
 	if !secondDeadline.After(firstDeadline) {
 		t.Fatalf("expected write deadline to refresh, first=%v second=%v", firstDeadline, secondDeadline)
+	}
+}
+
+func TestTimeoutConnRefreshDeadlineDoesNotMoveBackward(t *testing.T) {
+	raw := &deadlineRecordConn{}
+	conn := NewTimeoutConn(raw, time.Second)
+
+	const goroutines = 64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			if err := conn.refreshDeadline(); err != nil {
+				t.Errorf("refreshDeadline() error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got := raw.deadlines()
+	if len(got) != goroutines {
+		t.Fatalf("deadline calls = %d, want %d", len(got), goroutines)
+	}
+	for i := 1; i < len(got); i++ {
+		if !got[i].After(got[i-1]) {
+			t.Fatalf("deadline[%d] = %v, want after previous %v", i, got[i], got[i-1])
+		}
 	}
 }
 

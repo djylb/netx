@@ -127,6 +127,25 @@ func (r *rawClosingRWC) RawConn() net.Conn {
 	return r.raw
 }
 
+type rawProviderOnly struct {
+	raw net.Conn
+}
+
+func (r rawProviderOnly) RawConn() net.Conn {
+	return r.raw
+}
+
+func TestRawConnOfRecursivelyUnwrapsProviders(t *testing.T) {
+	base := &countedCloseConn{}
+	provider := rawProviderOnly{
+		raw: NewTimeoutConn(base, time.Second),
+	}
+
+	if got := RawConnOf(provider); got != base {
+		t.Fatalf("RawConnOf() = %v, want base conn", got)
+	}
+}
+
 func TestWrappedConnHelpersHandleNilState(t *testing.T) {
 	var nilWrapped *wrappedConn
 	assertClosedConnState(t, "nil", nilWrapped)

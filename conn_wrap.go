@@ -132,11 +132,28 @@ func (w *wrappedConn) RawConn() net.Conn {
 }
 
 func rawConnOf(v any) net.Conn {
+	return rawConnOfDepth(v, 0)
+}
+
+func rawConnOfDepth(v any, depth int) net.Conn {
 	if v == nil {
 		return nil
 	}
 	if getter, ok := v.(interface{ RawConn() net.Conn }); ok {
-		return getter.RawConn()
+		raw := getter.RawConn()
+		if raw == nil {
+			return nil
+		}
+		if conn, ok := v.(net.Conn); ok && sameNetConn(raw, conn) {
+			return raw
+		}
+		if depth >= 16 {
+			return raw
+		}
+		if unwrapped := rawConnOfDepth(raw, depth+1); unwrapped != nil {
+			return unwrapped
+		}
+		return raw
 	}
 	if conn, ok := v.(net.Conn); ok {
 		return conn

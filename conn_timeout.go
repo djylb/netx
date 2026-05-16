@@ -47,12 +47,15 @@ func (c *TimeoutConn) refreshDeadline() error {
 	}
 	deadline := time.Now().Add(c.idleTimeout)
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.lastSet.IsZero() && !deadline.After(c.lastSet) {
 		deadline = c.lastSet.Add(time.Nanosecond)
 	}
+	if err := c.Conn.SetDeadline(deadline); err != nil {
+		return err
+	}
 	c.lastSet = deadline
-	c.mu.Unlock()
-	return c.SetDeadline(deadline)
+	return nil
 }
 
 func (c *TimeoutConn) Close() error {
