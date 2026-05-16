@@ -22,16 +22,8 @@ func ParseTCPAddr(addr string) (*net.TCPAddr, error) {
 
 // ProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
 func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
-	clientTCP, ok := clientAddr.(*net.TCPAddr)
-	if !ok || clientTCP == nil {
-		return []byte("PROXY UNKNOWN\r\n")
-	}
-	targetTCP, ok := targetAddr.(*net.TCPAddr)
-	if !ok || targetTCP == nil {
-		return []byte("PROXY UNKNOWN\r\n")
-	}
-
-	meta, ok := proxyAddrMetaFromIPs(clientTCP.IP, targetTCP.IP, clientTCP.Port, targetTCP.Port, true)
+	// Keep the historical UDP behavior: emit TCP4/TCP6 family tokens for v1 text headers.
+	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
 	}

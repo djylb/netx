@@ -74,8 +74,9 @@ func TestProxyProtocolHeaderFromAddrs(t *testing.T) {
 		t.Fatalf("ProxyProtocolHeaderFromAddrs mutated target addr: %v", targetAddr)
 	}
 	udpV1 := ProxyProtocolHeaderFromAddrs(&net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 53}, nil, ProxyProtocolV1)
-	if string(udpV1) != "PROXY UNKNOWN\r\n" {
-		t.Fatalf("ProxyProtocolHeaderFromAddrs(udp v1) = %q, want UNKNOWN", string(udpV1))
+	wantUDPV1 := "PROXY TCP4 192.0.2.10 0.0.0.0 53 0\r\n"
+	if string(udpV1) != wantUDPV1 {
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(udp v1) = %q, want %q", string(udpV1), wantUDPV1)
 	}
 
 	v2 := ProxyProtocolHeaderFromAddrs(&net.UDPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5353}, nil, ProxyProtocolV2)
