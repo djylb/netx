@@ -2,6 +2,7 @@ package netx
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -13,6 +14,8 @@ type protocolDeadlineSpyConn struct {
 	writeBuf           bytes.Buffer
 	firstReadDeadline  time.Time
 	firstWriteDeadline time.Time
+	readDeadlineErr    error
+	writeDeadlineErr   error
 }
 
 func newProtocolDeadlineSpyConn(readPayload []byte) *protocolDeadlineSpyConn {
@@ -41,12 +44,18 @@ func (c *protocolDeadlineSpyConn) SetReadDeadline(t time.Time) error {
 	if c.firstReadDeadline.IsZero() && !t.IsZero() {
 		c.firstReadDeadline = t
 	}
+	if c.readDeadlineErr != nil {
+		return c.readDeadlineErr
+	}
 	return nil
 }
 
 func (c *protocolDeadlineSpyConn) SetWriteDeadline(t time.Time) error {
 	if c.firstWriteDeadline.IsZero() && !t.IsZero() {
 		c.firstWriteDeadline = t
+	}
+	if c.writeDeadlineErr != nil {
+		return c.writeDeadlineErr
 	}
 	return nil
 }
@@ -71,6 +80,37 @@ func TestACKHelpersNormalizeNonPositiveTimeouts(t *testing.T) {
 	}
 	if reader.firstReadDeadline.Before(startedRead.Add(defaultTimeOut - 250*time.Millisecond)) {
 		t.Fatalf("ReadACK() first read deadline = %v, want normalized timeout near now+%s", reader.firstReadDeadline, defaultTimeOut)
+	}
+}
+
+func TestProtocolHelpersReturnDeadlineErrors(t *testing.T) {
+	deadlineErr := errors.New("deadline failed")
+
+	writer := newProtocolDeadlineSpyConn(nil)
+	writer.writeDeadlineErr = deadlineErr
+	if err := WriteACK(writer, time.Second); !errors.Is(err, deadlineErr) {
+		t.Fatalf("WriteACK() error = %v, want %v", err, deadlineErr)
+	}
+	if got := writer.writeBuf.String(); got != "" {
+		t.Fatalf("WriteACK() wrote %q despite deadline error", got)
+	}
+
+	reader := newProtocolDeadlineSpyConn([]byte(ConnACK))
+	reader.readDeadlineErr = deadlineErr
+	if err := ReadACK(reader, time.Second); !errors.Is(err, deadlineErr) {
+		t.Fatalf("ReadACK() error = %v, want %v", err, deadlineErr)
+	}
+
+	writer = newProtocolDeadlineSpyConn(nil)
+	writer.writeDeadlineErr = deadlineErr
+	if err := WriteConnectResult(writer, ConnectResultOK, time.Second); !errors.Is(err, deadlineErr) {
+		t.Fatalf("WriteConnectResult() error = %v, want %v", err, deadlineErr)
+	}
+
+	reader = newProtocolDeadlineSpyConn([]byte{connectResultFrameVersion, byte(ConnectResultOK)})
+	reader.readDeadlineErr = deadlineErr
+	if _, err := ReadConnectResult(reader, time.Second); !errors.Is(err, deadlineErr) {
+		t.Fatalf("ReadConnectResult() error = %v, want %v", err, deadlineErr)
 	}
 }
 

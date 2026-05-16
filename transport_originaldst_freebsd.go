@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -43,9 +42,9 @@ func ioctl(s uintptr, ioc int, b []byte) error {
 }
 
 // OriginalDestination returns the original destination address for a transparent TCP connection.
-func OriginalDestination(conn net.Conn) (string, error) {
+func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
-		return "", net.ErrClosed
+		return nil, net.ErrClosed
 	}
 	dst, err := redirectedDestinationFromPF(conn)
 	if err == nil {
@@ -55,13 +54,13 @@ func OriginalDestination(conn net.Conn) (string, error) {
 	if localErr == nil {
 		return localDst, nil
 	}
-	return "", fmt.Errorf("failed to get transparent address: pf=%v local=%v", err, localErr)
+	return nil, fmt.Errorf("failed to get transparent address: pf=%v local=%v", err, localErr)
 }
 
-func redirectedDestinationFromPF(conn net.Conn) (string, error) {
+func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 	f, err := os.Open("/dev/pf")
 	if err != nil {
-		return "", fmt.Errorf("failed to open /dev/pf: %v", err)
+		return nil, fmt.Errorf("failed to open /dev/pf: %v", err)
 	}
 	defer f.Close()
 
@@ -122,7 +121,7 @@ func redirectedDestinationFromPF(conn net.Conn) (string, error) {
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("ioctl failed: %v", err)
+		return nil, fmt.Errorf("ioctl failed: %v", err)
 	}
 
 	odPort := nl.Rdport
@@ -134,7 +133,9 @@ func redirectedDestinationFromPF(conn net.Conn) (string, error) {
 	case syscall.AF_INET6:
 		odIP = make(net.IP, net.IPv6len)
 		copy(odIP, nl.Rdaddr[:])
+	default:
+		return nil, fmt.Errorf("unsupported address family: %d", nl.Af)
 	}
 
-	return net.JoinHostPort(odIP.String(), strconv.Itoa(int(odPort))), nil
+	return &net.TCPAddr{IP: odIP, Port: int(odPort)}, nil
 }

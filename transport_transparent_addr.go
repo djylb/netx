@@ -5,16 +5,19 @@ package netx
 import (
 	"fmt"
 	"net"
-	"strconv"
 )
 
-func transparentDestinationFromLocalAddr(addr net.Addr) (string, error) {
+func transparentDestinationFromLocalAddr(addr net.Addr) (*net.TCPAddr, error) {
 	tcpAddr, ok := addr.(*net.TCPAddr)
 	if !ok || tcpAddr == nil {
-		return "", fmt.Errorf("local address is not tcp: %T", addr)
+		return nil, fmt.Errorf("local address is not tcp: %T", addr)
 	}
 	if tcpAddr.IP == nil || tcpAddr.IP.IsUnspecified() || tcpAddr.Port <= 0 {
-		return "", fmt.Errorf("invalid local address %v", addr)
+		return nil, fmt.Errorf("invalid local address %v", addr)
 	}
-	return net.JoinHostPort(tcpAddr.IP.String(), strconv.Itoa(tcpAddr.Port)), nil
+	return &net.TCPAddr{
+		IP:   append(net.IP(nil), tcpAddr.IP...),
+		Port: tcpAddr.Port,
+		Zone: tcpAddr.Zone,
+	}, nil
 }

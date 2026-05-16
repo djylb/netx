@@ -3,7 +3,6 @@ package netx
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -17,13 +16,13 @@ const (
 )
 
 // OriginalDestination returns the original destination address for a transparent TCP connection.
-func OriginalDestination(conn net.Conn) (string, error) {
+func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
-		return "", net.ErrClosed
+		return nil, net.ErrClosed
 	}
 	fd, err := syscall.Open("/dev/pf", syscall.O_RDONLY, 0)
 	if err != nil {
-		return "", fmt.Errorf("failed to open /dev/pf: %v", err)
+		return nil, fmt.Errorf("failed to open /dev/pf: %v", err)
 	}
 	defer syscall.Close(fd)
 
@@ -81,7 +80,7 @@ func OriginalDestination(conn net.Conn) (string, error) {
 
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), diocNatLook, uintptr(unsafe.Pointer(&nl)))
 	if errno != 0 {
-		return "", fmt.Errorf("failed to get redirected address: %v", errno)
+		return nil, fmt.Errorf("failed to get redirected address: %v", errno)
 	}
 
 	odPort := nl.rdxport
@@ -93,7 +92,9 @@ func OriginalDestination(conn net.Conn) (string, error) {
 	case syscall.AF_INET6:
 		odIP = make(net.IP, net.IPv6len)
 		copy(odIP, nl.rdaddr[:])
+	default:
+		return nil, fmt.Errorf("unsupported address family: %d", nl.af)
 	}
 
-	return net.JoinHostPort(odIP.String(), strconv.Itoa(int(odPort[0]<<8|odPort[1]))), nil
+	return &net.TCPAddr{IP: odIP, Port: int(odPort[0]<<8 | odPort[1])}, nil
 }

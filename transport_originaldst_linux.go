@@ -3,7 +3,6 @@ package netx
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -11,9 +10,9 @@ import (
 const soOriginalDst = 80
 
 // OriginalDestination returns the original destination address for a transparent TCP connection.
-func OriginalDestination(conn net.Conn) (string, error) {
+func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
-		return "", net.ErrClosed
+		return nil, net.ErrClosed
 	}
 	dst, err := redirectedDestinationFromConn(conn)
 	if err == nil {
@@ -23,20 +22,20 @@ func OriginalDestination(conn net.Conn) (string, error) {
 	if localErr == nil {
 		return localDst, nil
 	}
-	return "", fmt.Errorf("failed to get transparent address: redirect=%v local=%v", err, localErr)
+	return nil, fmt.Errorf("failed to get transparent address: redirect=%v local=%v", err, localErr)
 }
 
-func redirectedDestinationFromConn(conn net.Conn) (string, error) {
+func redirectedDestinationFromConn(conn net.Conn) (*net.TCPAddr, error) {
 	sysconn, ok := conn.(syscall.Conn)
 	if !ok {
-		return "", fmt.Errorf("connection does not support SyscallConn")
+		return nil, fmt.Errorf("connection does not support SyscallConn")
 	}
 	raw, err := sysconn.SyscallConn()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	var dst string
+	var dst *net.TCPAddr
 	var opErr error
 
 	err = raw.Control(func(fd uintptr) {
@@ -55,7 +54,7 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 		if errno4 == 0 {
 			ip := net.IPv4(sa4.Addr[0], sa4.Addr[1], sa4.Addr[2], sa4.Addr[3])
 			port := int(sa4.Port>>8)&0xff | int(sa4.Port&0xff)<<8
-			dst = ip.String() + ":" + strconv.Itoa(port)
+			dst = &net.TCPAddr{IP: ip, Port: port}
 			return
 		}
 
@@ -72,9 +71,9 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 			0,
 		)
 		if errno6 == 0 {
-			ip := net.IP(sa6.Addr[:])
+			ip := append(net.IP(nil), sa6.Addr[:]...)
 			port := int(sa6.Port>>8)&0xff | int(sa6.Port&0xff)<<8
-			dst = "[" + ip.String() + "]:" + strconv.Itoa(port)
+			dst = &net.TCPAddr{IP: ip, Port: port}
 			return
 		}
 
@@ -82,10 +81,10 @@ func redirectedDestinationFromConn(conn net.Conn) (string, error) {
 	})
 
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if opErr != nil {
-		return "", opErr
+		return nil, opErr
 	}
 	return dst, nil
 }

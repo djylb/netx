@@ -31,8 +31,8 @@ func TestTransparentDestinationFromLocalAddr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transparentDestinationFromLocalAddr error = %v", err)
 	}
-	if addr != "203.0.113.10:8443" {
-		t.Fatalf("transparentDestinationFromLocalAddr = %q, want %q", addr, "203.0.113.10:8443")
+	if addr.String() != "203.0.113.10:8443" {
+		t.Fatalf("transparentDestinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
 	}
 }
 
@@ -46,8 +46,8 @@ func TestOriginalDestinationFallsBackToLocalAddrForTransparentConn(t *testing.T)
 	if err != nil {
 		t.Fatalf("OriginalDestination error = %v", err)
 	}
-	if addr != "198.51.100.25:443" {
-		t.Fatalf("OriginalDestination = %q, want %q", addr, "198.51.100.25:443")
+	if addr.String() != "198.51.100.25:443" {
+		t.Fatalf("OriginalDestination = %q, want %q", addr.String(), "198.51.100.25:443")
 	}
 }
 

@@ -1,5 +1,10 @@
 package netx
 
+import "errors"
+
+// ErrTransparentListenUnsupported is returned when transparent listening is unavailable.
+var ErrTransparentListenUnsupported = errors.New("transparent tcp listener is not supported on this platform")
+
 type listenOptions struct {
 	transparent bool
 }

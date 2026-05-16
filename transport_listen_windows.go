@@ -3,7 +3,6 @@
 package netx
 
 import (
-	"errors"
 	"net"
 )
 
@@ -11,7 +10,7 @@ import (
 func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
 	cfg := newListenOptions(opts)
 	if cfg.transparent {
-		return nil, errors.New("transparent tcp listener is not supported on Windows")
+		return nil, ErrTransparentListenUnsupported
 	}
 	return net.Listen("tcp", address)
 }

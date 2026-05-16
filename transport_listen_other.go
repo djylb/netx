@@ -4,7 +4,11 @@ package netx
 
 import "net"
 
-// ListenTCP listens on a TCP address; transparent TCP is ignored on this platform.
-func ListenTCP(address string, _ ...ListenOption) (net.Listener, error) {
+// ListenTCP listens on a TCP address.
+func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
+	cfg := newListenOptions(opts)
+	if cfg.transparent {
+		return nil, ErrTransparentListenUnsupported
+	}
 	return net.Listen("tcp", address)
 }

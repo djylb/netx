@@ -38,11 +38,11 @@ func WriteConnectResult(c net.Conn, status ConnectResultStatus, timeout time.Dur
 	if c == nil {
 		return net.ErrClosed
 	}
-	timeout = normalizeLinkTimeout(timeout)
-	_ = c.SetWriteDeadline(time.Now().Add(timeout))
+	if err := setWriteDeadline(c, timeout); err != nil {
+		return err
+	}
 	_, err := c.Write([]byte{connectResultFrameVersion, byte(status)})
-	_ = c.SetWriteDeadline(time.Time{})
-	return err
+	return clearWriteDeadline(c, err)
 }
 
 // ReadConnectResult reads a connect result frame with a temporary read deadline.
@@ -50,18 +50,18 @@ func ReadConnectResult(c net.Conn, timeout time.Duration) (ConnectResultStatus, 
 	if c == nil {
 		return ConnectResultServerFailure, net.ErrClosed
 	}
-	timeout = normalizeLinkTimeout(timeout)
-	_ = c.SetReadDeadline(time.Now().Add(timeout))
-	var buf [2]byte
-	_, err := io.ReadFull(c, buf[:])
-	_ = c.SetReadDeadline(time.Time{})
-	if err != nil {
+	if err := setReadDeadline(c, timeout); err != nil {
 		return ConnectResultServerFailure, err
 	}
-	if buf[0] != connectResultFrameVersion {
-		return ConnectResultServerFailure, io.ErrUnexpectedEOF
+	var buf [2]byte
+	_, err := io.ReadFull(c, buf[:])
+	if err != nil {
+		return ConnectResultServerFailure, clearReadDeadline(c, err)
 	}
-	return ConnectResultStatus(buf[1]), nil
+	if buf[0] != connectResultFrameVersion {
+		return ConnectResultServerFailure, clearReadDeadline(c, io.ErrUnexpectedEOF)
+	}
+	return ConnectResultStatus(buf[1]), clearReadDeadline(c, nil)
 }
 
 // DialConnectResult maps a dial error to a ConnectResultStatus.

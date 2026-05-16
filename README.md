@@ -39,6 +39,12 @@ func tlsClient(c net.Conn) (net.Conn, error) {
 }
 ```
 
+```go
+framed := netx.NewFramedConn(conn)
+_ = framed.WriteFrame(packet)
+packet, err := framed.ReadFrame()
+```
+
 ## Address Wrapping
 
 ```go
@@ -73,6 +79,7 @@ err := netx.SetTCPKeepAlive(tcpConn, netx.TCPKeepAliveConfig{
 
 ```go
 dst, err := netx.OriginalDestination(conn)
+target := dst.String()
 ```
 
 ## Small Protocol Helpers

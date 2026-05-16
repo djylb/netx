@@ -12,85 +12,123 @@ import (
 // MaxFramePayload is the maximum payload size of one framed message.
 const MaxFramePayload = 65535
 
-// ErrFrameTooLarge is returned when an incoming frame exceeds MaxFramePayload.
+// ErrFrameTooLarge is returned when a frame exceeds MaxFramePayload.
 var ErrFrameTooLarge = errors.New("framed: frame size exceeds MaxFramePayload")
 
-// FramedConn reads and writes length-prefixed frames over a net.Conn.
+// FramedConn reads and writes length-prefixed messages over a reliable stream.
 type FramedConn struct {
 	net.Conn
-	rmu sync.Mutex
-	wmu sync.Mutex
+	rmu     sync.Mutex
+	wmu     sync.Mutex
+	pending []byte
 }
 
-// NewFramedConn wraps c with length-prefixed framed I/O.
+// NewFramedConn wraps c with length-prefixed message I/O.
 func NewFramedConn(c net.Conn) *FramedConn { return &FramedConn{Conn: c} }
 
 func (fc *FramedConn) Read(p []byte) (int, error) {
 	if fc == nil || fc.Conn == nil {
 		return 0, net.ErrClosed
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 	fc.rmu.Lock()
 	defer fc.rmu.Unlock()
 
-	var hdr [2]byte
-	if _, err := io.ReadFull(fc.Conn, hdr[:]); err != nil {
+	if len(fc.pending) > 0 {
+		return fc.readPending(p), nil
+	}
+
+	frame, err := fc.readFrameLocked()
+	if err != nil {
 		return 0, err
 	}
-	n := int(binary.BigEndian.Uint16(hdr[:]))
-
-	if n == 0 {
+	if len(frame) == 0 {
 		return 0, nil
 	}
+	n := copy(p, frame)
+	if n < len(frame) {
+		fc.pending = append(fc.pending[:0], frame[n:]...)
+	}
+	return n, nil
+}
+
+// ReadFrame reads and returns one complete frame.
+// If Read has already partially consumed a frame, ReadFrame returns the remaining bytes.
+func (fc *FramedConn) ReadFrame() ([]byte, error) {
+	if fc == nil || fc.Conn == nil {
+		return nil, net.ErrClosed
+	}
+	fc.rmu.Lock()
+	defer fc.rmu.Unlock()
+
+	if len(fc.pending) > 0 {
+		frame := append([]byte(nil), fc.pending...)
+		fc.pending = nil
+		return frame, nil
+	}
+	return fc.readFrameLocked()
+}
+
+func (fc *FramedConn) readFrameLocked() ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(fc.Conn, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[:]))
 	if n > MaxFramePayload {
-		return 0, ErrFrameTooLarge
+		return nil, ErrFrameTooLarge
 	}
+	if n == 0 {
+		return []byte{}, nil
+	}
+	frame := make([]byte, n)
+	if _, err := io.ReadFull(fc.Conn, frame); err != nil {
+		return nil, err
+	}
+	return frame, nil
+}
 
-	if len(p) >= n {
-		_, err := io.ReadFull(fc.Conn, p[:n])
-		return n, err
+func (fc *FramedConn) readPending(p []byte) int {
+	n := copy(p, fc.pending)
+	if n == len(fc.pending) {
+		fc.pending = nil
+		return n
 	}
-
-	read := 0
-	if len(p) > 0 {
-		if _, err := io.ReadFull(fc.Conn, p[:]); err != nil {
-			return 0, err
-		}
-		read = len(p)
-	}
-	remain := n - read
-	if remain > 0 {
-		if _, err := io.CopyN(io.Discard, fc.Conn, int64(remain)); err != nil {
-			return read, err
-		}
-	}
-	return read, nil
+	copy(fc.pending, fc.pending[n:])
+	fc.pending = fc.pending[:len(fc.pending)-n]
+	return n
 }
 
 func (fc *FramedConn) Write(p []byte) (int, error) {
 	if fc == nil || fc.Conn == nil {
 		return 0, net.ErrClosed
 	}
+	if len(p) > MaxFramePayload {
+		return 0, ErrFrameTooLarge
+	}
 	fc.wmu.Lock()
 	defer fc.wmu.Unlock()
 
-	if len(p) == 0 {
-		return 0, fc.writeFrame(nil)
+	if err := fc.writeFrameLocked(p); err != nil {
+		return 0, err
 	}
+	return len(p), nil
+}
 
-	written := 0
-	for len(p) > 0 {
-		chunk := p
-		if len(chunk) > MaxFramePayload {
-			chunk = chunk[:MaxFramePayload]
-		}
-		if err := fc.writeFrame(chunk); err != nil {
-			return written, err
-		}
-		written += len(chunk)
-		p = p[len(chunk):]
+// WriteFrame writes one complete frame.
+func (fc *FramedConn) WriteFrame(p []byte) error {
+	if fc == nil || fc.Conn == nil {
+		return net.ErrClosed
 	}
+	if len(p) > MaxFramePayload {
+		return ErrFrameTooLarge
+	}
+	fc.wmu.Lock()
+	defer fc.wmu.Unlock()
 
-	return written, nil
+	return fc.writeFrameLocked(p)
 }
 
 func (fc *FramedConn) SetDeadline(t time.Time) error {
@@ -142,7 +180,7 @@ func (fc *FramedConn) RawConn() net.Conn {
 	return rawConnOf(fc.Conn)
 }
 
-func (fc *FramedConn) writeFrame(p []byte) error {
+func (fc *FramedConn) writeFrameLocked(p []byte) error {
 	if fc == nil || fc.Conn == nil {
 		return net.ErrClosed
 	}
