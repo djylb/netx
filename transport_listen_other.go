@@ -2,13 +2,16 @@
 
 package netx
 
-import "net"
+import (
+	"context"
+	"net"
+)
 
-// ListenTCP listens on a TCP address.
-func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
+func listenTCPContext(ctx context.Context, address string, opts ...ListenOption) (net.Listener, error) {
 	cfg := newListenOptions(opts)
 	if cfg.transparent {
 		return nil, ErrTransparentListenUnsupported
 	}
-	return net.Listen("tcp", address)
+	var lc net.ListenConfig
+	return lc.Listen(ctx, "tcp", address)
 }

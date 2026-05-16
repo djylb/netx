@@ -78,6 +78,11 @@ func TestProxyProtocolHeaderFromAddrs(t *testing.T) {
 	if string(udpV1) != wantUDPV1 {
 		t.Fatalf("ProxyProtocolHeaderFromAddrs(udp v1) = %q, want %q", string(udpV1), wantUDPV1)
 	}
+	udpV1IPv6 := ProxyProtocolHeaderFromAddrs(&net.UDPAddr{IP: net.ParseIP("2001:db8::10"), Port: 53}, nil, ProxyProtocolV1)
+	wantUDPV1IPv6 := "PROXY TCP6 2001:db8::10 :: 53 0\r\n"
+	if string(udpV1IPv6) != wantUDPV1IPv6 {
+		t.Fatalf("ProxyProtocolHeaderFromAddrs(udp v1 ipv6) = %q, want %q", string(udpV1IPv6), wantUDPV1IPv6)
+	}
 
 	v2 := ProxyProtocolHeaderFromAddrs(&net.UDPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5353}, nil, ProxyProtocolV2)
 	if len(v2) != 52 {

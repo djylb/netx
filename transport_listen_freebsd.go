@@ -14,11 +14,11 @@ const (
 	ipv6BindAny = 0x40
 )
 
-// ListenTCP listens on a TCP address.
-func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
+func listenTCPContext(ctx context.Context, address string, opts ...ListenOption) (net.Listener, error) {
 	cfg := newListenOptions(opts)
 	if !cfg.transparent {
-		return net.Listen("tcp", address)
+		var lc net.ListenConfig
+		return lc.Listen(ctx, "tcp", address)
 	}
 
 	lc := net.ListenConfig{
@@ -32,7 +32,7 @@ func ListenTCP(address string, opts ...ListenOption) (net.Listener, error) {
 			return sockErr
 		},
 	}
-	return lc.Listen(context.Background(), "tcp", address)
+	return lc.Listen(ctx, "tcp", address)
 }
 
 func enableBindAnySocket(fd int) error {

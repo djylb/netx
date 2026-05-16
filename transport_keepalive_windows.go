@@ -46,12 +46,5 @@ func SetTCPKeepAlive(tc *net.TCPConn, cfg TCPKeepAliveConfig) error {
 }
 
 func durationMilliseconds(d time.Duration) uint32 {
-	milliseconds := d / time.Millisecond
-	if d%time.Millisecond != 0 {
-		milliseconds++
-	}
-	if milliseconds > time.Duration(^uint32(0)) {
-		return ^uint32(0)
-	}
-	return uint32(milliseconds)
+	return uint32(ceilDuration(d, time.Millisecond, int64(^uint32(0))))
 }

@@ -30,14 +30,18 @@ func validateTCPKeepAliveConfig(tc *net.TCPConn, cfg TCPKeepAliveConfig) error {
 	}
 }
 
+func ceilDuration(d, unit time.Duration, max int64) int64 {
+	units := d / unit
+	if d%unit != 0 {
+		units++
+	}
+	if units > time.Duration(max) {
+		return max
+	}
+	return int64(units)
+}
+
 func durationSeconds(d time.Duration) int {
-	seconds := d / time.Second
-	if d%time.Second != 0 {
-		seconds++
-	}
 	maxInt := int(^uint(0) >> 1)
-	if seconds > time.Duration(maxInt) {
-		return maxInt
-	}
-	return int(seconds)
+	return int(ceilDuration(d, time.Second, int64(maxInt)))
 }

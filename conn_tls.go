@@ -92,42 +92,24 @@ func (c *TLSConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *TLSConn) SetDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil || c.rawConn == nil {
+	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	if err := c.Conn.SetDeadline(t); err != nil {
-		return err
-	}
-	if err := c.rawConn.SetDeadline(t); err != nil {
-		return err
-	}
-	return nil
+	return c.Conn.SetDeadline(t)
 }
 
 func (c *TLSConn) SetReadDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil || c.rawConn == nil {
+	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	if err := c.Conn.SetReadDeadline(t); err != nil {
-		return err
-	}
-	if err := c.rawConn.SetReadDeadline(t); err != nil {
-		return err
-	}
-	return nil
+	return c.Conn.SetReadDeadline(t)
 }
 
 func (c *TLSConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil || c.rawConn == nil {
+	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	if err := c.Conn.SetWriteDeadline(t); err != nil {
-		return err
-	}
-	if err := c.rawConn.SetWriteDeadline(t); err != nil {
-		return err
-	}
-	return nil
+	return c.Conn.SetWriteDeadline(t)
 }
 
 func (c *TLSConn) LocalAddr() net.Addr {

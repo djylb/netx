@@ -65,6 +65,7 @@ header = netx.ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr, netx.ProxyPro
 
 ```go
 ln, err := netx.ListenTCP("0.0.0.0:8080")
+ln, err = netx.ListenTCPContext(ctx, "0.0.0.0:8080")
 transparentLn, err := netx.ListenTCP("0.0.0.0:8080", netx.WithTransparent())
 ```
 

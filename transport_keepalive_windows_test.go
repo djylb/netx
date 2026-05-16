@@ -38,3 +38,9 @@ func TestSetTCPKeepAliveSuccessOnWindows(t *testing.T) {
 		t.Fatalf("SetTCPKeepAlive() error = %v", err)
 	}
 }
+
+func TestDurationMillisecondsOnWindows(t *testing.T) {
+	if got := durationMilliseconds(1500 * time.Microsecond); got != 2 {
+		t.Fatalf("durationMilliseconds(1.5ms) = %d, want 2", got)
+	}
+}
