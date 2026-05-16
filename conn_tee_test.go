@@ -2,6 +2,7 @@ package netx
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -56,7 +57,7 @@ func TestTeeConnHelpersHandleNilState(t *testing.T) {
 		t.Fatalf("nil Release() = (%v, %v), want (nil, nil)", raw, data)
 	}
 	nilConn.StopBuffering()
-	nilConn.StopAndClean()
+	nilConn.DiscardBuffer()
 
 	malformed := &TeeConn{}
 	assertClosedConnState(t, "malformed", malformed)
@@ -75,5 +76,49 @@ func TestTeeConnHelpersHandleNilState(t *testing.T) {
 	}
 	if got := string(lazy.Buffered()); got != "abc" {
 		t.Fatalf("lazy Buffered() = %q, want %q", got, "abc")
+	}
+}
+
+func TestTeeConnReleaseTransfersOwnership(t *testing.T) {
+	base := &teeTestConn{readBuf: bytes.NewBufferString("abcdef")}
+	tee := NewTeeConn(base, 8)
+	buf := make([]byte, 3)
+	if n, err := tee.Read(buf); err != nil || n != 3 {
+		t.Fatalf("Read() = %d, %v; want 3, nil", n, err)
+	}
+
+	raw, data := tee.Release()
+	if raw != base {
+		t.Fatalf("Release() raw = %v, want base", raw)
+	}
+	if string(data) != "abc" {
+		t.Fatalf("Release() data = %q, want %q", string(data), "abc")
+	}
+	if err := tee.Close(); err != nil {
+		t.Fatalf("Close() after Release() error = %v", err)
+	}
+	if base.closed {
+		t.Fatal("Close() after Release() closed released conn")
+	}
+	if _, err := tee.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read() after Release() error = %v, want %v", err, net.ErrClosed)
+	}
+}
+
+func TestTeeConnDiscardBufferStopsCapture(t *testing.T) {
+	tee := NewTeeConn(&teeTestConn{readBuf: bytes.NewBufferString("abcdef")}, 8)
+	buf := make([]byte, 3)
+	if n, err := tee.Read(buf); err != nil || n != 3 {
+		t.Fatalf("Read() = %d, %v; want 3, nil", n, err)
+	}
+	tee.DiscardBuffer()
+	if got := tee.Buffered(); got != nil && len(got) != 0 {
+		t.Fatalf("Buffered() after DiscardBuffer() = %q, want empty", string(got))
+	}
+	if n, err := tee.Read(buf); err != nil && err != io.EOF || n != 3 {
+		t.Fatalf("Read() after DiscardBuffer() = %d, %v; want 3, nil/eof", n, err)
+	}
+	if got := tee.Buffered(); got != nil && len(got) != 0 {
+		t.Fatalf("Buffered() after stopped capture = %q, want empty", string(got))
 	}
 }

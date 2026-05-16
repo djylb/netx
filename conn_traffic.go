@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"errors"
 	"io"
 	"net"
 )
@@ -37,7 +38,7 @@ func ObserveConn(conn net.Conn, observer TrafficObserver) net.Conn {
 	if conn == nil || (observer.OnRead == nil && observer.OnWrite == nil) {
 		return conn
 	}
-	return WrapConnWithoutParentClose(ObserveReadWriteCloser(conn, observer), conn)
+	return WrapConn(ObserveReadWriteCloser(conn, observer), conn)
 }
 
 func (c *observedReadWriteCloser) Read(p []byte) (int, error) {
@@ -47,7 +48,7 @@ func (c *observedReadWriteCloser) Read(p []byte) (int, error) {
 	n, err := c.rwc.Read(p)
 	if c.onRead != nil && n > 0 {
 		if observeErr := c.onRead(int64(n)); observeErr != nil {
-			return n, observeErr
+			return n, errors.Join(err, observeErr)
 		}
 	}
 	return n, err
@@ -60,7 +61,7 @@ func (c *observedReadWriteCloser) Write(p []byte) (int, error) {
 	n, err := c.rwc.Write(p)
 	if c.onWrite != nil && n > 0 {
 		if observeErr := c.onWrite(int64(n)); observeErr != nil {
-			return n, observeErr
+			return n, errors.Join(err, observeErr)
 		}
 	}
 	return n, err

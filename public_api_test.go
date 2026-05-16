@@ -44,9 +44,9 @@ func TestPublicConnectionHelpers(t *testing.T) {
 		t.Fatalf("RawConnOf(wrapper chain) = %v, want base conn", got)
 	}
 
-	wrapped := WrapConnWithoutParentClose(base, base)
+	wrapped := WrapConn(base, base)
 	if err := wrapped.Close(); err != nil {
-		t.Fatalf("WrapConnWithoutParentClose Close() error = %v", err)
+		t.Fatalf("WrapConn Close() error = %v", err)
 	}
 	if calls := base.Calls(); calls != 1 {
 		t.Fatalf("base Close() calls = %d, want 1", calls)

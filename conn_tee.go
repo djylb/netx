@@ -32,10 +32,11 @@ func NewTeeConn(conn net.Conn, maxBufBytes ...int) *TeeConn {
 }
 
 func (t *TeeConn) Read(p []byte) (n int, err error) {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return 0, net.ErrClosed
 	}
-	n, err = t.underlying.Read(p)
+	n, err = conn.Read(p)
 	if n > 0 {
 		t.mu.Lock()
 		if !t.detached {
@@ -55,52 +56,58 @@ func (t *TeeConn) Read(p []byte) (n int, err error) {
 }
 
 func (t *TeeConn) Write(p []byte) (n int, err error) {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return 0, net.ErrClosed
 	}
-	return t.underlying.Write(p)
+	return conn.Write(p)
 }
 
 func (t *TeeConn) LocalAddr() net.Addr {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return nil
 	}
-	return t.underlying.LocalAddr()
+	return conn.LocalAddr()
 }
 
 func (t *TeeConn) RemoteAddr() net.Addr {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return nil
 	}
-	return t.underlying.RemoteAddr()
+	return conn.RemoteAddr()
 }
 
 func (t *TeeConn) SetDeadline(deadline time.Time) error {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return net.ErrClosed
 	}
-	return t.underlying.SetDeadline(deadline)
+	return conn.SetDeadline(deadline)
 }
 
 func (t *TeeConn) SetReadDeadline(deadline time.Time) error {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return net.ErrClosed
 	}
-	return t.underlying.SetReadDeadline(deadline)
+	return conn.SetReadDeadline(deadline)
 }
 
 func (t *TeeConn) SetWriteDeadline(deadline time.Time) error {
-	if t == nil || t.underlying == nil {
+	conn := t.conn()
+	if conn == nil {
 		return net.ErrClosed
 	}
-	return t.underlying.SetWriteDeadline(deadline)
+	return conn.SetWriteDeadline(deadline)
 }
 
 func (t *TeeConn) RawConn() net.Conn {
 	if t == nil {
 		return nil
 	}
-	return rawConnOf(t.underlying)
+	return rawConnOf(t.conn())
 }
 
 func (t *TeeConn) StopBuffering() {
@@ -113,11 +120,19 @@ func (t *TeeConn) StopBuffering() {
 }
 
 func (t *TeeConn) Close() error {
-	if t == nil || t.underlying == nil {
+	if t == nil {
 		return nil
 	}
-	t.StopBuffering()
-	return t.underlying.Close()
+	t.mu.Lock()
+	conn := t.underlying
+	t.underlying = nil
+	t.detached = true
+	t.buf = nil
+	t.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
 }
 
 func (t *TeeConn) Buffered() []byte {
@@ -163,16 +178,18 @@ func (t *TeeConn) Release() (net.Conn, []byte) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	conn := t.underlying
+	t.underlying = nil
 	t.detached = true
 	var data []byte
 	if t.buf != nil {
 		data = append([]byte(nil), t.buf.Bytes()...)
 	}
-	t.buf = new(bytes.Buffer)
-	return t.underlying, data
+	t.buf = nil
+	return conn, data
 }
 
-func (t *TeeConn) StopAndClean() {
+func (t *TeeConn) DiscardBuffer() {
 	if t == nil {
 		return
 	}
@@ -180,6 +197,15 @@ func (t *TeeConn) StopAndClean() {
 	defer t.mu.Unlock()
 	t.detached = true
 	t.buf = new(bytes.Buffer)
+}
+
+func (t *TeeConn) conn() net.Conn {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.underlying
 }
 
 func (t *TeeConn) bufferLimit() int {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"time"
 )
 
@@ -13,9 +14,23 @@ type wrappedConn struct {
 	closeParent bool
 }
 
+type wrapOptions struct {
+	closeParent bool
+}
+
 // RawConnProvider is implemented by wrappers that can expose their underlying net.Conn.
 type RawConnProvider interface {
 	RawConn() net.Conn
+}
+
+// WrapOption configures WrapConn.
+type WrapOption func(*wrapOptions)
+
+// WithParentClose makes WrapConn close parent after closing rwc.
+func WithParentClose() WrapOption {
+	return func(o *wrapOptions) {
+		o.closeParent = true
+	}
 }
 
 // RawConnOf returns v's underlying net.Conn when it is available.
@@ -24,23 +39,23 @@ func RawConnOf(v any) net.Conn {
 }
 
 // WrapConn exposes rwc as a net.Conn using parent for addresses and deadlines.
-// Closing the returned connection closes rwc and parent.
-func WrapConn(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
-	return wrapConnWithCloseMode(rwc, parent, true)
+// Closing the returned connection closes rwc. Use WithParentClose to also close parent.
+func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.Conn {
+	cfg := newWrapOptions(opts)
+	if parent == nil {
+		parent = rawConnOf(rwc)
+	}
+	return &wrappedConn{rwc: rwc, parent: parent, closeParent: cfg.closeParent}
 }
 
-// WrapConnWithoutParentClose is like WrapConn but leaves parent open when closed.
-// Use it when rwc already owns parent and closes it itself.
-func WrapConnWithoutParentClose(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
-	return wrapConnWithoutParentClose(rwc, parent)
-}
-
-func wrapConnWithoutParentClose(rwc io.ReadWriteCloser, parent net.Conn) net.Conn {
-	return wrapConnWithCloseMode(rwc, parent, false)
-}
-
-func wrapConnWithCloseMode(rwc io.ReadWriteCloser, parent net.Conn, closeParent bool) net.Conn {
-	return &wrappedConn{rwc: rwc, parent: parent, closeParent: closeParent}
+func newWrapOptions(opts []WrapOption) wrapOptions {
+	var cfg wrapOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
 }
 
 func (w *wrappedConn) Read(b []byte) (int, error) {
@@ -65,7 +80,7 @@ func (w *wrappedConn) Close() error {
 	if w.rwc != nil {
 		err1 = w.rwc.Close()
 	}
-	if w.closeParent && w.parent != nil {
+	if w.closeParent && w.parent != nil && !sameWrappedParent(w.rwc, w.parent) {
 		err2 = w.parent.Close()
 	}
 	return errors.Join(err1, err2)
@@ -127,4 +142,26 @@ func rawConnOf(v any) net.Conn {
 		return conn
 	}
 	return nil
+}
+
+func sameWrappedParent(rwc io.ReadWriteCloser, parent net.Conn) bool {
+	if rwc == nil || parent == nil {
+		return false
+	}
+	if conn, ok := rwc.(net.Conn); ok && sameNetConn(conn, parent) {
+		return true
+	}
+	return sameNetConn(rawConnOf(rwc), parent)
+}
+
+func sameNetConn(a, b net.Conn) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	av := reflect.ValueOf(a)
+	bv := reflect.ValueOf(b)
+	if av.Type() != bv.Type() || !av.Type().Comparable() {
+		return false
+	}
+	return av.Equal(bv)
 }

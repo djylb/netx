@@ -45,6 +45,11 @@ _ = framed.WriteFrame(packet)
 packet, err := framed.ReadFrame()
 ```
 
+```go
+wrapped := netx.WrapConn(rwc, conn)
+wrapped = netx.WrapConn(rwc, conn, netx.WithParentClose())
+```
+
 ## Address Wrapping
 
 ```go
