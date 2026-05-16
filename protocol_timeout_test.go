@@ -18,6 +18,11 @@ type protocolDeadlineSpyConn struct {
 	writeDeadlineErr   error
 }
 
+type chunkedProtocolWriteConn struct {
+	*protocolDeadlineSpyConn
+	maxWrite int
+}
+
 func newProtocolDeadlineSpyConn(readPayload []byte) *protocolDeadlineSpyConn {
 	return &protocolDeadlineSpyConn{readBuf: bytes.NewReader(readPayload)}
 }
@@ -30,6 +35,13 @@ func (c *protocolDeadlineSpyConn) Read(p []byte) (int, error) {
 }
 
 func (c *protocolDeadlineSpyConn) Write(p []byte) (int, error) {
+	return c.writeBuf.Write(p)
+}
+
+func (c *chunkedProtocolWriteConn) Write(p []byte) (int, error) {
+	if c.maxWrite > 0 && len(p) > c.maxWrite {
+		p = p[:c.maxWrite]
+	}
 	return c.writeBuf.Write(p)
 }
 
@@ -111,6 +123,31 @@ func TestProtocolHelpersReturnDeadlineErrors(t *testing.T) {
 	reader.readDeadlineErr = deadlineErr
 	if _, err := ReadConnectResult(reader, time.Second); !errors.Is(err, deadlineErr) {
 		t.Fatalf("ReadConnectResult() error = %v, want %v", err, deadlineErr)
+	}
+}
+
+func TestProtocolWritersHandleShortWrites(t *testing.T) {
+	ackWriter := &chunkedProtocolWriteConn{
+		protocolDeadlineSpyConn: newProtocolDeadlineSpyConn(nil),
+		maxWrite:                1,
+	}
+	if err := WriteACK(ackWriter, time.Second); err != nil {
+		t.Fatalf("WriteACK() error = %v", err)
+	}
+	if got := ackWriter.writeBuf.String(); got != ConnACK {
+		t.Fatalf("WriteACK() payload = %q, want %q", got, ConnACK)
+	}
+
+	resultWriter := &chunkedProtocolWriteConn{
+		protocolDeadlineSpyConn: newProtocolDeadlineSpyConn(nil),
+		maxWrite:                1,
+	}
+	if err := WriteConnectResult(resultWriter, ConnectResultNotAllowed, time.Second); err != nil {
+		t.Fatalf("WriteConnectResult() error = %v", err)
+	}
+	want := []byte{connectResultFrameVersion, byte(ConnectResultNotAllowed)}
+	if got := resultWriter.writeBuf.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("WriteConnectResult() payload = %v, want %v", got, want)
 	}
 }
 

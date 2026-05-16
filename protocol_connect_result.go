@@ -41,7 +41,8 @@ func WriteConnectResult(c net.Conn, status ConnectResultStatus, timeout time.Dur
 	if err := setWriteDeadline(c, timeout); err != nil {
 		return err
 	}
-	_, err := c.Write([]byte{connectResultFrameVersion, byte(status)})
+	buf := [2]byte{connectResultFrameVersion, byte(status)}
+	err := writeAll(c, buf[:])
 	return clearWriteDeadline(c, err)
 }
 

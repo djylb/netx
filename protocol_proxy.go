@@ -27,10 +27,22 @@ func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
 	}
+	clientIP := meta.srcIP.String()
+	targetIP := meta.dstIP.String()
 
-	header := "PROXY " + meta.v1Protocol + " " + meta.clientIP + " " + meta.targetIP + " " +
-		strconv.Itoa(int(meta.srcPort)) + " " + strconv.Itoa(int(meta.dstPort)) + "\r\n"
-	return []byte(header)
+	header := make([]byte, 0, proxyProtocolV1HeaderLen(meta, clientIP, targetIP))
+	header = append(header, "PROXY "...)
+	header = append(header, meta.v1Protocol...)
+	header = append(header, ' ')
+	header = append(header, clientIP...)
+	header = append(header, ' ')
+	header = append(header, targetIP...)
+	header = append(header, ' ')
+	header = strconv.AppendUint(header, uint64(meta.srcPort), 10)
+	header = append(header, ' ')
+	header = strconv.AppendUint(header, uint64(meta.dstPort), 10)
+	header = append(header, '\r', '\n')
+	return header
 }
 
 // ProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
@@ -170,8 +182,6 @@ type proxyAddrMeta struct {
 	addrBytes  uint16
 	srcIP      net.IP
 	dstIP      net.IP
-	clientIP   string
-	targetIP   string
 	srcPort    uint16
 	dstPort    uint16
 }
@@ -208,12 +218,10 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (
 		return proxyAddrMeta{}, false
 	}
 	meta := proxyAddrMeta{
-		srcIP:    srcIP,
-		dstIP:    dstIP,
-		clientIP: srcIP.String(),
-		targetIP: dstIP.String(),
-		srcPort:  uint16(srcPort),
-		dstPort:  uint16(dstPort),
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		srcPort: uint16(srcPort),
+		dstPort: uint16(dstPort),
 	}
 	if tcp {
 		if srcIsV4 {
@@ -242,4 +250,27 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (
 
 func validTCPPort(port int) bool {
 	return port >= 0 && port <= 65535
+}
+
+func proxyProtocolV1HeaderLen(meta proxyAddrMeta, clientIP, targetIP string) int {
+	return len("PROXY ") + len(meta.v1Protocol) + 1 +
+		len(clientIP) + 1 +
+		len(targetIP) + 1 +
+		decimalLenUint16(meta.srcPort) + 1 +
+		decimalLenUint16(meta.dstPort) + len("\r\n")
+}
+
+func decimalLenUint16(v uint16) int {
+	switch {
+	case v >= 10000:
+		return 5
+	case v >= 1000:
+		return 4
+	case v >= 100:
+		return 3
+	case v >= 10:
+		return 2
+	default:
+		return 1
+	}
 }

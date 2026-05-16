@@ -17,7 +17,8 @@ func WriteACK(c net.Conn, timeout time.Duration) error {
 	if err := setWriteDeadline(c, timeout); err != nil {
 		return err
 	}
-	_, err := c.Write([]byte(ConnACK))
+	buf := [len(ConnACK)]byte{'A', 'C', 'K'}
+	err := writeAll(c, buf[:])
 	return clearWriteDeadline(c, err)
 }
 
@@ -29,12 +30,12 @@ func ReadACK(c net.Conn, timeout time.Duration) error {
 	if err := setReadDeadline(c, timeout); err != nil {
 		return err
 	}
-	buf := make([]byte, len(ConnACK))
-	_, err := io.ReadFull(c, buf)
+	var buf [len(ConnACK)]byte
+	_, err := io.ReadFull(c, buf[:])
 	if err != nil {
 		return clearReadDeadline(c, err)
 	}
-	if string(buf) != ConnACK {
+	if buf != [len(ConnACK)]byte{'A', 'C', 'K'} {
 		return clearReadDeadline(c, io.ErrUnexpectedEOF)
 	}
 	return clearReadDeadline(c, nil)

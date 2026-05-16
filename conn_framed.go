@@ -186,6 +186,9 @@ func (fc *FramedConn) writeFrameLocked(p []byte) error {
 	}
 	var hdr [2]byte
 	binary.BigEndian.PutUint16(hdr[:], uint16(len(p)))
+	if _, ok := fc.Conn.(*net.TCPConn); ok {
+		return writeBuffers(fc.Conn, hdr[:], p)
+	}
 	if err := writeAll(fc.Conn, hdr[:]); err != nil {
 		return err
 	}
@@ -207,6 +210,19 @@ func writeAll(w io.Writer, p []byte) error {
 		if n == 0 {
 			return io.ErrShortWrite
 		}
+	}
+	return nil
+}
+
+func writeBuffers(w io.Writer, first, second []byte) error {
+	want := int64(len(first) + len(second))
+	buffers := net.Buffers{first, second}
+	n, err := buffers.WriteTo(w)
+	if err != nil {
+		return err
+	}
+	if n != want {
+		return io.ErrShortWrite
 	}
 	return nil
 }
