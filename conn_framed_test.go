@@ -88,6 +88,30 @@ func TestFramedConnReadKeepsFrameTailForSmallBuffer(t *testing.T) {
 	}
 }
 
+func TestFramedConnReadFrameReturnsPendingTail(t *testing.T) {
+	raw := &byteBufferConn{}
+	fc := NewFramedConn(raw)
+	if err := fc.WriteFrame([]byte("abcdef")); err != nil {
+		t.Fatalf("WriteFrame() error = %v", err)
+	}
+
+	buf := make([]byte, 2)
+	n, err := fc.Read(buf)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got := string(buf[:n]); got != "ab" {
+		t.Fatalf("Read() = %q, want %q", got, "ab")
+	}
+	frame, err := fc.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame() error = %v", err)
+	}
+	if got := string(frame); got != "cdef" {
+		t.Fatalf("ReadFrame() = %q, want %q", got, "cdef")
+	}
+}
+
 func TestFramedConnReadWriteFrame(t *testing.T) {
 	raw := &byteBufferConn{}
 	fc := NewFramedConn(raw)

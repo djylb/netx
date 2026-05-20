@@ -3,6 +3,7 @@ package netx
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -27,16 +28,13 @@ func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
 	}
-	clientIP := meta.srcIP.String()
-	targetIP := meta.dstIP.String()
-
-	header := make([]byte, 0, proxyProtocolV1HeaderLen(meta, clientIP, targetIP))
+	header := make([]byte, 0, proxyProtocolV1HeaderLen(meta))
 	header = append(header, "PROXY "...)
 	header = append(header, meta.v1Protocol...)
 	header = append(header, ' ')
-	header = append(header, clientIP...)
+	header = appendIPText(header, meta.srcIP)
 	header = append(header, ' ')
-	header = append(header, targetIP...)
+	header = appendIPText(header, meta.dstIP)
 	header = append(header, ' ')
 	header = strconv.AppendUint(header, uint64(meta.srcPort), 10)
 	header = append(header, ' ')
@@ -252,12 +250,32 @@ func validTCPPort(port int) bool {
 	return port >= 0 && port <= 65535
 }
 
-func proxyProtocolV1HeaderLen(meta proxyAddrMeta, clientIP, targetIP string) int {
+func proxyProtocolV1HeaderLen(meta proxyAddrMeta) int {
 	return len("PROXY ") + len(meta.v1Protocol) + 1 +
-		len(clientIP) + 1 +
-		len(targetIP) + 1 +
+		maxIPTextLen(meta.srcIP) + 1 +
+		maxIPTextLen(meta.dstIP) + 1 +
 		decimalLenUint16(meta.srcPort) + 1 +
 		decimalLenUint16(meta.dstPort) + len("\r\n")
+}
+
+func appendIPText(dst []byte, ip net.IP) []byte {
+	if v4 := ip.To4(); v4 != nil {
+		return netip.AddrFrom4([4]byte{v4[0], v4[1], v4[2], v4[3]}).AppendTo(dst)
+	}
+	v6 := ip.To16()
+	if v6 == nil {
+		return dst
+	}
+	var a16 [16]byte
+	copy(a16[:], v6)
+	return netip.AddrFrom16(a16).AppendTo(dst)
+}
+
+func maxIPTextLen(ip net.IP) int {
+	if ip.To4() != nil {
+		return len("255.255.255.255")
+	}
+	return len("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
 }
 
 func decimalLenUint16(v uint16) int {

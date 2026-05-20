@@ -40,18 +40,7 @@ func (fc *FramedConn) Read(p []byte) (int, error) {
 		return fc.readPending(p), nil
 	}
 
-	frame, err := fc.readFrameLocked()
-	if err != nil {
-		return 0, err
-	}
-	if len(frame) == 0 {
-		return 0, nil
-	}
-	n := copy(p, frame)
-	if n < len(frame) {
-		fc.pending = append(fc.pending[:0], frame[n:]...)
-	}
-	return n, nil
+	return fc.readFrameIntoLocked(p)
 }
 
 // ReadFrame reads and returns one complete frame.
@@ -88,6 +77,35 @@ func (fc *FramedConn) readFrameLocked() ([]byte, error) {
 		return nil, err
 	}
 	return frame, nil
+}
+
+func (fc *FramedConn) readFrameIntoLocked(p []byte) (int, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(fc.Conn, hdr[:]); err != nil {
+		return 0, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[:]))
+	if n > MaxFramePayload {
+		return 0, ErrFrameTooLarge
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if n <= len(p) {
+		if _, err := io.ReadFull(fc.Conn, p[:n]); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	if _, err := io.ReadFull(fc.Conn, p); err != nil {
+		return 0, err
+	}
+	fc.pending = make([]byte, n-len(p))
+	if _, err := io.ReadFull(fc.Conn, fc.pending); err != nil {
+		fc.pending = nil
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func (fc *FramedConn) readPending(p []byte) int {
