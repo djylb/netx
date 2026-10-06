@@ -44,6 +44,27 @@ func BenchmarkFramedConnRead(b *testing.B) {
 	}
 }
 
+func BenchmarkFramedConnReadSmallBuffer(b *testing.B) {
+	payload := bytes.Repeat([]byte("x"), MaxFramePayload)
+	wire := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(wire[:2], uint16(len(payload)))
+	copy(wire[2:], payload)
+	raw := &loopReadConn{data: wire}
+	conn := NewFramedConn(raw)
+	buf := make([]byte, 16)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		for read := 0; read < len(payload); {
+			n, err := conn.Read(buf)
+			if err != nil {
+				b.Fatal(err)
+			}
+			read += n
+		}
+	}
+}
+
 func BenchmarkProxyProtocolV1Header(b *testing.B) {
 	clientAddr := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 54321}
 	targetAddr := &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 443}

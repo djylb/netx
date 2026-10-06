@@ -11,19 +11,22 @@ import (
 type ProxyProtocolVersion int
 
 const (
+	// ProxyProtocolNone sends no header.
 	ProxyProtocolNone ProxyProtocolVersion = iota
+	// ProxyProtocolV1 is the text header format.
 	ProxyProtocolV1
+	// ProxyProtocolV2 is the binary header format.
 	ProxyProtocolV2
 )
 
-// ParseTCPAddr converts host:port text into a TCP address.
-func ParseTCPAddr(addr string) (*net.TCPAddr, error) {
-	return net.ResolveTCPAddr("tcp", addr)
-}
-
 // ProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
+//
+// Both addresses must be *net.TCPAddr or both *net.UDPAddr. v1 has no UDP
+// token, so UDP pairs are emitted with the TCP4/TCP6 tokens (historical nps
+// behavior); use v2 to signal UDP. As in HAProxy, an IPv4 and an IPv6 address
+// are sent as TCP6 with the IPv4 side in its IPv4-mapped form (::ffff:a.b.c.d).
+// Anything else yields "PROXY UNKNOWN\r\n".
 func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
-	// Keep the historical UDP behavior: emit TCP4/TCP6 family tokens for v1 text headers.
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
 	if !ok {
 		return []byte("PROXY UNKNOWN\r\n")
@@ -44,6 +47,10 @@ func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
 }
 
 // ProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
+//
+// The address rules match ProxyProtocolV1Header, except that UDP pairs are
+// sent as DGRAM and mixed families as AF_INET6. Unsupported addresses yield a
+// LOCAL header.
 func ProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	const sig = "\r\n\r\n\000\r\nQUIT\n"
 	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
@@ -74,7 +81,8 @@ func ProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
 	return header
 }
 
-// ProxyProtocolHeader builds a Proxy Protocol header from a connection's remote and local addresses.
+// ProxyProtocolHeader builds a Proxy Protocol header from a connection's remote
+// and local addresses, as ProxyProtocolHeaderFromAddrs does.
 func ProxyProtocolHeader(c net.Conn, version ProxyProtocolVersion) []byte {
 	if c == nil || version == ProxyProtocolNone {
 		return nil
@@ -83,6 +91,11 @@ func ProxyProtocolHeader(c net.Conn, version ProxyProtocolVersion) []byte {
 }
 
 // ProxyProtocolHeaderFromAddrs builds a Proxy Protocol header from explicit addresses.
+//
+// A target that is nil, unspecified or not of the client's address type is sent
+// as the zero address of the client's family (0.0.0.0 or ::). Otherwise the
+// rules of ProxyProtocolV1Header and ProxyProtocolV2Header apply. It returns
+// nil for ProxyProtocolNone and for unknown versions.
 func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version ProxyProtocolVersion) []byte {
 	if version == ProxyProtocolNone {
 		return nil
@@ -103,6 +116,9 @@ func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version Proxy
 func normalizeTarget(src, dst net.Addr) net.Addr {
 	switch s := src.(type) {
 	case *net.TCPAddr:
+		if s == nil {
+			return dst
+		}
 		d := cloneTCPAddr(dst)
 		if d == nil {
 			d = &net.TCPAddr{Port: 0}
@@ -110,6 +126,9 @@ func normalizeTarget(src, dst net.Addr) net.Addr {
 		d.IP = normalizeTargetIP(s.IP, d.IP)
 		return d
 	case *net.UDPAddr:
+		if s == nil {
+			return dst
+		}
 		d := cloneUDPAddr(dst)
 		if d == nil {
 			d = &net.UDPAddr{Port: 0}
@@ -146,32 +165,13 @@ func cloneUDPAddr(addr net.Addr) *net.UDPAddr {
 }
 
 func normalizeTargetIP(srcIP, dstIP net.IP) net.IP {
-	srcIsV4 := srcIP.To4() != nil
-	dstIsV4 := dstIP != nil && dstIP.To4() != nil
-
-	switch {
-	case srcIsV4 && !dstIsV4:
-		return net.IPv4zero
-	case !srcIsV4 && dstIsV4:
-		return ipv4MappedIPv6(dstIP)
-	case dstIP == nil || dstIP.IsUnspecified():
-		if srcIsV4 {
-			return net.IPv4zero
-		}
-		return net.IPv6zero
-	default:
+	if dstIP != nil && !dstIP.IsUnspecified() {
 		return dstIP
 	}
-}
-
-func ipv4MappedIPv6(ip net.IP) net.IP {
-	v4 := ip.To4()
-	if v4 == nil {
-		return nil
+	if srcIP.To4() != nil {
+		return net.IPv4zero
 	}
-	mapped := make(net.IP, net.IPv6len)
-	copy(mapped[12:], v4)
-	return mapped
+	return net.IPv6zero
 }
 
 type proxyAddrMeta struct {
@@ -204,16 +204,21 @@ func buildProxyAddrMeta(clientAddr, targetAddr net.Addr) (proxyAddrMeta, bool) {
 }
 
 func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (proxyAddrMeta, bool) {
-	srcIsV4 := srcIP.To4() != nil
-	dstIsV4 := dstIP.To4() != nil
-	if srcIsV4 != dstIsV4 {
-		return proxyAddrMeta{}, false
-	}
-	if !srcIsV4 && (srcIP.To16() == nil || dstIP.To16() == nil) {
-		return proxyAddrMeta{}, false
-	}
 	if !validTCPPort(srcPort) || !validTCPPort(dstPort) {
 		return proxyAddrMeta{}, false
+	}
+	// As in HAProxy, the header is IPv4 only when both sides are IPv4.
+	// Otherwise both IPs are sent as 16 bytes, and To16 turns an IPv4 side
+	// into its IPv4-mapped form ::ffff:a.b.c.d.
+	src4, dst4 := srcIP.To4(), dstIP.To4()
+	ipv4 := src4 != nil && dst4 != nil
+	if ipv4 {
+		srcIP, dstIP = src4, dst4
+	} else {
+		srcIP, dstIP = srcIP.To16(), dstIP.To16()
+		if srcIP == nil || dstIP == nil {
+			return proxyAddrMeta{}, false
+		}
 	}
 	meta := proxyAddrMeta{
 		srcIP:   srcIP,
@@ -222,7 +227,7 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (
 		dstPort: uint16(dstPort),
 	}
 	if tcp {
-		if srcIsV4 {
+		if ipv4 {
 			meta.v1Protocol = "TCP4"
 			meta.famProto = 0x11
 			meta.addrBytes = 12
@@ -234,7 +239,7 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (
 		return meta, true
 	}
 
-	if srcIsV4 {
+	if ipv4 {
 		meta.v1Protocol = "TCP4"
 		meta.famProto = 0x12
 		meta.addrBytes = 12
@@ -258,21 +263,21 @@ func proxyProtocolV1HeaderLen(meta proxyAddrMeta) int {
 		decimalLenUint16(meta.dstPort) + len("\r\n")
 }
 
+// appendIPText formats ip in the family given by its length, so a 16-byte
+// IPv4-mapped address prints as ::ffff:a.b.c.d.
 func appendIPText(dst []byte, ip net.IP) []byte {
-	if v4 := ip.To4(); v4 != nil {
-		return netip.AddrFrom4([4]byte{v4[0], v4[1], v4[2], v4[3]}).AppendTo(dst)
-	}
-	v6 := ip.To16()
-	if v6 == nil {
+	switch len(ip) {
+	case net.IPv4len:
+		return netip.AddrFrom4([4]byte(ip)).AppendTo(dst)
+	case net.IPv6len:
+		return netip.AddrFrom16([16]byte(ip)).AppendTo(dst)
+	default:
 		return dst
 	}
-	var a16 [16]byte
-	copy(a16[:], v6)
-	return netip.AddrFrom16(a16).AppendTo(dst)
 }
 
 func maxIPTextLen(ip net.IP) int {
-	if ip.To4() != nil {
+	if len(ip) == net.IPv4len {
 		return len("255.255.255.255")
 	}
 	return len("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")

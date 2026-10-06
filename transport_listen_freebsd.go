@@ -14,8 +14,7 @@ const (
 	ipv6BindAny = 0x40
 )
 
-func listenTCPContext(ctx context.Context, address string, opts ...ListenOption) (net.Listener, error) {
-	cfg := newListenOptions(opts)
+func listenTCPContext(ctx context.Context, address string, cfg listenOptions) (net.Listener, error) {
 	if !cfg.transparent {
 		var lc net.ListenConfig
 		return lc.Listen(ctx, "tcp", address)

@@ -4,19 +4,12 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
 
 func TestPublicConnectionHelpers(t *testing.T) {
-	parsed, err := ParseTCPAddr("127.0.0.1:8080")
-	if err != nil {
-		t.Fatalf("ParseTCPAddr() error = %v", err)
-	}
-	if parsed.String() != "127.0.0.1:8080" {
-		t.Fatalf("ParseTCPAddr() = %q, want %q", parsed.String(), "127.0.0.1:8080")
-	}
-
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
 	local := &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 8080}
 	baseConn := &countedCloseConn{}
@@ -29,13 +22,12 @@ func TestPublicConnectionHelpers(t *testing.T) {
 		t.Fatalf("ProxyProtocolHeader() = %q", string(header))
 	}
 
-	stringRemote, err := ParseTCPAddr("203.0.113.10:443")
-	if err != nil {
-		t.Fatalf("ParseTCPAddr(remote) error = %v", err)
+	remoteOnly := NewAddrOverrideConn(&countedCloseConn{}, net.TCPAddrFromAddrPort(netip.MustParseAddrPort("203.0.113.10:443")), nil)
+	if remoteOnly.RemoteAddr().String() != "203.0.113.10:443" {
+		t.Fatalf("RemoteAddr() = %q", remoteOnly.RemoteAddr().String())
 	}
-	stringOverride := NewAddrOverrideConn(&countedCloseConn{}, stringRemote, nil)
-	if stringOverride.RemoteAddr().String() != "203.0.113.10:443" {
-		t.Fatalf("RemoteAddr() = %q", stringOverride.RemoteAddr().String())
+	if remoteOnly.LocalAddr() != dummyAddr("local") {
+		t.Fatalf("LocalAddr() = %v, want base local address", remoteOnly.LocalAddr())
 	}
 
 	base := &countedCloseConn{}

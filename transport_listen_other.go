@@ -1,4 +1,4 @@
-//go:build !linux && !freebsd && !windows
+//go:build !linux && !freebsd && !darwin && !windows
 
 package netx
 
@@ -7,8 +7,7 @@ import (
 	"net"
 )
 
-func listenTCPContext(ctx context.Context, address string, opts ...ListenOption) (net.Listener, error) {
-	cfg := newListenOptions(opts)
+func listenTCPContext(ctx context.Context, address string, cfg listenOptions) (net.Listener, error) {
 	if cfg.transparent {
 		return nil, ErrTransparentListenUnsupported
 	}

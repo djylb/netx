@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// AddrOverrideConn is a net.Conn that reports overridden local and remote
+// addresses. A nil override falls back to the wrapped connection's address.
 type AddrOverrideConn struct {
 	net.Conn
 	lAddr net.Addr
@@ -88,6 +90,7 @@ func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+// RawConn returns the innermost connection beneath c; see RawConnProvider.
 func (c *AddrOverrideConn) RawConn() net.Conn {
 	if c == nil {
 		return nil

@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -10,22 +11,23 @@ import (
 )
 
 const (
-	sysPFINOUT     = 0x0
-	sysPFIN        = 0x1
-	sysPFOUT       = 0x2
-	sysPFFWD       = 0x3
-	sysDIOCNATLOOK = 0xc04c4417
+	sysPFIN        = 0x1        // PF_IN
+	sysPFOUT       = 0x2        // PF_OUT
+	sysDIOCNATLOOK = 0xc04c4417 // _IOWR('D', 23, struct pfioc_natlook)
 )
 
+// pfiocNatlook mirrors struct pfioc_natlook. pf copies the port fields
+// to and from its state keys unchanged, so they hold ports in network byte
+// order, as on the wire.
 type pfiocNatlook struct {
 	Saddr     [16]byte /* pf_addr */
 	Daddr     [16]byte /* pf_addr */
 	Rsaddr    [16]byte /* pf_addr */
 	Rdaddr    [16]byte /* pf_addr */
-	Sport     uint16
-	Dport     uint16
-	Rsport    uint16
-	Rdport    uint16
+	Sport     [2]byte  /* u_int16_t */
+	Dport     [2]byte  /* u_int16_t */
+	Rsport    [2]byte  /* u_int16_t */
+	Rdport    [2]byte  /* u_int16_t */
 	Af        uint8
 	Proto     uint8
 	Direction uint8
@@ -34,14 +36,33 @@ type pfiocNatlook struct {
 
 const sizeofPfiocNatlook = 0x4c
 
-func ioctl(s uintptr, ioc int, b []byte) error {
+func (nl *pfiocNatlook) setPorts(src, dst int) {
+	binary.BigEndian.PutUint16(nl.Sport[:], uint16(src))
+	binary.BigEndian.PutUint16(nl.Dport[:], uint16(dst))
+}
+
+func (nl *pfiocNatlook) redirectPort() int {
+	return int(binary.BigEndian.Uint16(nl.Rdport[:]))
+}
+
+func pfIoctl(s uintptr, ioc int, b []byte) error {
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, s, uintptr(ioc), uintptr(unsafe.Pointer(&b[0]))); errno != 0 {
 		return error(errno)
 	}
 	return nil
 }
 
-// OriginalDestination returns the original destination address for a transparent TCP connection.
+// OriginalDestination returns the pre-redirect destination of an accepted
+// TCP connection.
+//
+// On Linux it reads SO_ORIGINAL_DST or IP6T_SO_ORIGINAL_DST (REDIRECT/DNAT),
+// and on FreeBSD it queries pf with DIOCNATLOOK. If that lookup fails, both
+// fall back to conn's local address, which is the target for TPROXY or
+// IP_BINDANY sockets. A direct, non-redirected connection therefore yields its
+// own local address rather than an error. On macOS it queries pf with
+// DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
+// platforms it returns ErrOriginalDestinationUnsupported. A nil conn returns
+// net.ErrClosed.
 func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
@@ -108,13 +129,12 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 		nl.Af = syscall.AF_INET6
 	}
 
-	nl.Sport = uint16(raPort)
-	nl.Dport = uint16(laPort)
+	nl.setPorts(raPort, laPort)
 
 	ioc := uintptr(sysDIOCNATLOOK)
 	for _, dir := range []byte{sysPFOUT, sysPFIN} {
 		nl.Direction = dir
-		err = ioctl(fd, int(ioc), b)
+		err = pfIoctl(fd, int(ioc), b)
 		if err == nil || !errors.Is(err, syscall.ENOENT) {
 			break
 		}
@@ -124,7 +144,7 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 		return nil, fmt.Errorf("ioctl failed: %v", err)
 	}
 
-	odPort := nl.Rdport
+	odPort := nl.redirectPort()
 	var odIP net.IP
 	switch nl.Af {
 	case syscall.AF_INET:
@@ -137,5 +157,5 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 		return nil, fmt.Errorf("unsupported address family: %d", nl.Af)
 	}
 
-	return &net.TCPAddr{IP: odIP, Port: int(odPort)}, nil
+	return &net.TCPAddr{IP: odIP, Port: odPort}, nil
 }

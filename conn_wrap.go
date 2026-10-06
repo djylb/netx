@@ -19,6 +19,8 @@ type wrapOptions struct {
 }
 
 // RawConnProvider is implemented by wrappers that can expose their underlying net.Conn.
+// RawConnOf also follows the standard library's NetConn() net.Conn method, as
+// implemented by *tls.Conn.
 type RawConnProvider interface {
 	RawConn() net.Conn
 }
@@ -27,6 +29,8 @@ type RawConnProvider interface {
 type WrapOption func(*wrapOptions)
 
 // WithParentClose makes WrapConn close parent after closing rwc.
+// parent is skipped when rwc unwraps to it through RawConn or NetConn, and
+// net.ErrClosed from parent is ignored because rwc may already have closed it.
 func WithParentClose() WrapOption {
 	return func(o *wrapOptions) {
 		o.closeParent = true
@@ -34,6 +38,7 @@ func WithParentClose() WrapOption {
 }
 
 // RawConnOf returns v's underlying net.Conn when it is available.
+// It follows RawConn() and NetConn() chains to the innermost connection.
 func RawConnOf(v any) net.Conn {
 	return rawConnOf(v)
 }
@@ -81,7 +86,10 @@ func (w *wrappedConn) Close() error {
 		err1 = w.rwc.Close()
 	}
 	if w.closeParent && w.parent != nil && !sameWrappedParent(w.rwc, w.parent) {
-		err2 = w.parent.Close()
+		// rwc may wrap parent without exposing it, so parent can already be closed.
+		if err2 = w.parent.Close(); errors.Is(err2, net.ErrClosed) {
+			err2 = nil
+		}
 	}
 	return errors.Join(err1, err2)
 }
@@ -135,19 +143,36 @@ func rawConnOf(v any) net.Conn {
 	return rawConnOfDepth(v, 0)
 }
 
+// maxUnwrapDepth bounds RawConn/NetConn chains so cyclic wrappers cannot loop forever.
+const maxUnwrapDepth = 16
+
+// nextConn returns the connection that v wraps, if v exposes one.
+func nextConn(v any) (net.Conn, bool) {
+	switch getter := v.(type) {
+	case RawConnProvider:
+		return getter.RawConn(), true
+	case interface{ NetConn() net.Conn }:
+		// *tls.Conn.NetConn does not accept a nil receiver.
+		if rv := reflect.ValueOf(getter); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return nil, true
+		}
+		return getter.NetConn(), true
+	}
+	return nil, false
+}
+
 func rawConnOfDepth(v any, depth int) net.Conn {
 	if v == nil {
 		return nil
 	}
-	if getter, ok := v.(interface{ RawConn() net.Conn }); ok {
-		raw := getter.RawConn()
+	if raw, ok := nextConn(v); ok {
 		if raw == nil {
 			return nil
 		}
 		if conn, ok := v.(net.Conn); ok && sameNetConn(raw, conn) {
 			return raw
 		}
-		if depth >= 16 {
+		if depth >= maxUnwrapDepth {
 			return raw
 		}
 		if unwrapped := rawConnOfDepth(raw, depth+1); unwrapped != nil {
@@ -161,14 +186,25 @@ func rawConnOfDepth(v any, depth int) net.Conn {
 	return nil
 }
 
+// sameWrappedParent reports whether parent is rwc itself or any connection
+// reachable from rwc through RawConn or NetConn, so closing rwc closes parent.
 func sameWrappedParent(rwc io.ReadWriteCloser, parent net.Conn) bool {
 	if rwc == nil || parent == nil {
 		return false
 	}
-	if conn, ok := rwc.(net.Conn); ok && sameNetConn(conn, parent) {
-		return true
+	var cur any = rwc
+	for depth := 0; depth <= maxUnwrapDepth; depth++ {
+		conn, isConn := cur.(net.Conn)
+		if isConn && sameNetConn(conn, parent) {
+			return true
+		}
+		next, ok := nextConn(cur)
+		if !ok || next == nil || (isConn && sameNetConn(next, conn)) {
+			return false
+		}
+		cur = next
 	}
-	return sameNetConn(rawConnOf(rwc), parent)
+	return false
 }
 
 func sameNetConn(a, b net.Conn) bool {

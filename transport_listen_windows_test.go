@@ -2,11 +2,14 @@
 
 package netx
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestListenTCPRejectsTransparentModeOnWindows(t *testing.T) {
-	if _, err := ListenTCP("127.0.0.1:0", WithTransparent()); err == nil {
-		t.Fatal("expected transparent listen to fail on Windows")
+	if _, err := ListenTCP("127.0.0.1:0", WithTransparent()); !errors.Is(err, ErrTransparentListenUnsupported) {
+		t.Fatalf("ListenTCP(WithTransparent) error = %v, want %v", err, ErrTransparentListenUnsupported)
 	}
 }
 

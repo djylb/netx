@@ -3,6 +3,8 @@ package netx
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -34,6 +36,9 @@ func TestNewTLSConnClearsHandshakeDeadline(t *testing.T) {
 		t.Fatalf("NewTLSConn() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
+	// Close the peer first so close_notify fails at once instead of
+	// blocking on the unread pipe until tls.Conn's 5s close deadline.
+	defer func() { _ = serverConn.Close() }()
 
 	buf := make([]byte, 1)
 	if _, err := tlsClient.Read(buf); err != nil {
@@ -73,6 +78,9 @@ func TestNewTLSConnContextNormalizesNonPositiveTimeout(t *testing.T) {
 		t.Fatalf("NewTLSConnContext() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
+	// Close the peer first so close_notify fails at once instead of
+	// blocking on the unread pipe until tls.Conn's 5s close deadline.
+	defer func() { _ = serverConn.Close() }()
 
 	buf := make([]byte, 1)
 	if _, err := tlsClient.Read(buf); err != nil {
@@ -93,4 +101,57 @@ func TestTLSConnHelpersHandleNilState(t *testing.T) {
 
 	malformed := &TLSConn{}
 	assertClosedRawConnState(t, "malformed", malformed)
+}
+
+// deadlineIgnoringConn accepts deadlines but never enforces them, like a
+// tunnelled stream without deadline support.
+type deadlineIgnoringConn struct {
+	net.Conn
+}
+
+func (c *deadlineIgnoringConn) SetDeadline(time.Time) error      { return nil }
+func (c *deadlineIgnoringConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *deadlineIgnoringConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestNewTLSConnContextBoundsHandshakeWhenDeadlinesIgnored(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+	// The peer swallows the ClientHello and never answers.
+	go func() { _, _ = io.Copy(io.Discard, serverConn) }()
+
+	started := time.Now()
+	tlsClient, err := NewTLSConnContext(context.Background(), &deadlineIgnoringConn{Conn: clientConn}, 200*time.Millisecond, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	elapsed := time.Since(started)
+	if err == nil {
+		_ = tlsClient.Close()
+		t.Fatal("NewTLSConnContext() error = nil, want handshake timeout")
+	}
+	if tlsClient != nil {
+		t.Fatalf("NewTLSConnContext() conn = %v, want nil on error", tlsClient)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("NewTLSConnContext() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("NewTLSConnContext() took %v, want about the 200ms timeout", elapsed)
+	}
+}
+
+func TestNewTLSConnContextHonorsCanceledContext(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, serverConn) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewTLSConnContext(ctx, &deadlineIgnoringConn{Conn: clientConn}, time.Minute, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewTLSConnContext() error = %v, want %v", err, context.Canceled)
+	}
 }

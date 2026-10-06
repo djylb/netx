@@ -7,20 +7,24 @@ import (
 	"net"
 	"os"
 	"strings"
-	"syscall"
 )
+
+// The classifiers below match the platform errno first, so they work whatever
+// the system language is, and then fall back to well-known English messages
+// for errors that only carry text.
 
 // IsConnReset reports whether err looks like a connection reset.
 func IsConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ECONNRESET) {
+	if errorIsAny(err, connResetErrnos) {
 		return true
 	}
 	msg := normalizeNetErrorText(err)
 	return strings.Contains(msg, "connectionresetbypeer") ||
-		strings.Contains(msg, "forciblyclosedbytheremotehost")
+		strings.Contains(msg, "forciblyclosedbytheremotehost") ||
+		strings.Contains(msg, "networknameisnolongeravailable")
 }
 
 // IsConnAborted reports whether err looks like an aborted connection.
@@ -28,11 +32,12 @@ func IsConnAborted(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ECONNABORTED) {
+	if errorIsAny(err, connAbortedErrnos) {
 		return true
 	}
 	msg := normalizeNetErrorText(err)
 	return strings.Contains(msg, "connectionaborted") ||
+		strings.Contains(msg, "connectionwasaborted") ||
 		strings.Contains(msg, "softwarecausedconnectionabort")
 }
 
@@ -41,14 +46,77 @@ func IsBrokenPipe(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.EPIPE) {
+	if errorIsAny(err, brokenPipeErrnos) {
 		return true
 	}
 	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "brokenpipe")
+	return strings.Contains(msg, "brokenpipe") ||
+		strings.Contains(msg, "sockethadalreadybeenshutdown")
 }
 
-// NetErrorKind returns a stable string category for common network errors.
+// IsConnRefused reports whether err looks like a refused connection attempt.
+func IsConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errorIsAny(err, connRefusedErrnos) {
+		return true
+	}
+	msg := normalizeNetErrorText(err)
+	return strings.Contains(msg, "connectionrefused") ||
+		strings.Contains(msg, "activelyrefusedit")
+}
+
+// IsHostUnreachable reports whether err looks like an unreachable host.
+// DNS lookup failures are not included; check for *net.DNSError separately.
+func IsHostUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errorIsAny(err, hostUnreachErrnos) {
+		return true
+	}
+	msg := normalizeNetErrorText(err)
+	return strings.Contains(msg, "noroutetohost") ||
+		strings.Contains(msg, "hostunreachable") ||
+		strings.Contains(msg, "hostisunreachable") ||
+		strings.Contains(msg, "unreachablehost")
+}
+
+// IsNetworkUnreachable reports whether err looks like an unreachable network.
+func IsNetworkUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errorIsAny(err, netUnreachErrnos) {
+		return true
+	}
+	msg := normalizeNetErrorText(err)
+	return strings.Contains(msg, "networkunreachable") ||
+		strings.Contains(msg, "networkisunreachable") ||
+		strings.Contains(msg, "unreachablenetwork")
+}
+
+// IsPermissionDenied reports whether err looks like a permission failure
+// (EACCES or EPERM), such as a connect blocked by a local firewall rule.
+func IsPermissionDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errorIsAny(err, accessErrnos) || errorIsAny(err, permErrnos) {
+		return true
+	}
+	msg := normalizeNetErrorText(err)
+	return strings.Contains(msg, "permissiondenied") ||
+		strings.Contains(msg, "operationnotpermitted") ||
+		strings.Contains(msg, "accessisdenied") ||
+		strings.Contains(msg, "forbiddenbyitsaccesspermissions")
+}
+
+// NetErrorKind returns a stable string category for common network errors:
+// "none", "rst", "aborted", "broken_pipe", "refused", "host_unreachable",
+// "network_unreachable", "permission_denied", "timeout", "unexpected_eof",
+// "eof", "closed" or "other".
 func NetErrorKind(err error) string {
 	switch {
 	case err == nil:
@@ -59,6 +127,14 @@ func NetErrorKind(err error) string {
 		return "aborted"
 	case IsBrokenPipe(err):
 		return "broken_pipe"
+	case IsConnRefused(err):
+		return "refused"
+	case IsHostUnreachable(err):
+		return "host_unreachable"
+	case IsNetworkUnreachable(err):
+		return "network_unreachable"
+	case IsPermissionDenied(err):
+		return "permission_denied"
 	case IsTimeout(err):
 		return "timeout"
 	case errors.Is(err, io.ErrUnexpectedEOF):
@@ -73,6 +149,10 @@ func NetErrorKind(err error) string {
 }
 
 // DescribeNetError returns a compact diagnostic string for a network error.
+// For the errno classes recognised by NetErrorKind it adds errno_name with the
+// POSIX name (ECONNRESET also for WSAECONNRESET, for example), which does not
+// depend on the platform or the system language. Other errnos are reported as
+// errno=<number> only; their system message is part of err.
 func DescribeNetError(err error, c net.Conn) string {
 	if err == nil {
 		return "kind=none"
@@ -92,14 +172,7 @@ func DescribeNetError(err error, c net.Conn) string {
 		}
 	}
 
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		parts = append(parts,
-			fmt.Sprintf("timeout=%t", netErr.Timeout()),
-		)
-	} else {
-		parts = append(parts, fmt.Sprintf("timeout=%t", IsTimeout(err)))
-	}
+	parts = append(parts, fmt.Sprintf("timeout=%t", IsTimeout(err)))
 
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
@@ -122,12 +195,7 @@ func DescribeNetError(err error, c net.Conn) string {
 		parts = append(parts, fmt.Sprintf("syscall=%s", sysErr.Syscall))
 	}
 
-	if errno, ok := extractErrno(err); ok {
-		parts = append(parts,
-			fmt.Sprintf("errno=%d", errno),
-			fmt.Sprintf("errno_name=%s", errnoName(errno)),
-		)
-	}
+	parts = append(parts, errnoParts(err)...)
 
 	return strings.Join(parts, " ")
 }
@@ -140,27 +208,12 @@ func normalizeNetErrorText(err error) string {
 	return s
 }
 
-func extractErrno(err error) (syscall.Errno, bool) {
-	if err == nil {
-		return 0, false
+// errorIsAny reports whether errors.Is(err, target) holds for any target.
+func errorIsAny(err error, targets []error) bool {
+	for _, target := range targets {
+		if errors.Is(err, target) {
+			return true
+		}
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		return errno, true
-	}
-	return 0, false
-}
-
-func errnoName(errno syscall.Errno) string {
-	err := error(errno)
-	switch {
-	case errors.Is(err, syscall.ECONNRESET):
-		return "ECONNRESET"
-	case errors.Is(err, syscall.ECONNABORTED):
-		return "ECONNABORTED"
-	case errors.Is(err, syscall.EPIPE):
-		return "EPIPE"
-	default:
-		return errno.Error()
-	}
+	return false
 }

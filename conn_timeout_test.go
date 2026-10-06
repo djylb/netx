@@ -205,10 +205,36 @@ func TestNewTimeoutConnNormalizesNonPositiveIdle(t *testing.T) {
 			if calls == 0 {
 				t.Fatal("expected SetDeadline to be called")
 			}
-			if firstDeadline.Before(started.Add(defaultTimeOut - 250*time.Millisecond)) {
-				t.Fatalf("deadline = %v, want normalized idle near now+%s", firstDeadline, defaultTimeOut)
+			if firstDeadline.Before(started.Add(DefaultTimeout - 250*time.Millisecond)) {
+				t.Fatalf("deadline = %v, want normalized idle near now+%s", firstDeadline, DefaultTimeout)
 			}
 		})
+	}
+}
+
+func TestTimeoutConnStructLiteralUsesDefaultTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	spy := &deadlineSpyConn{Conn: client}
+	conn := &TimeoutConn{Conn: spy}
+	defer func() { _ = conn.Close() }()
+
+	started := time.Now()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = server.Write([]byte("x"))
+	}()
+
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatalf("Read() error = %v, want data despite zero idle timeout", err)
+	}
+	deadline, calls := spy.snapshot()
+	if calls == 0 {
+		t.Fatal("expected SetDeadline to be called")
+	}
+	if deadline.Before(started.Add(DefaultTimeout - 250*time.Millisecond)) {
+		t.Fatalf("deadline = %v, want near now+%s", deadline, DefaultTimeout)
 	}
 }
 
@@ -240,6 +266,9 @@ func TestNewTimeoutTLSConnSuccess(t *testing.T) {
 		t.Fatalf("NewTimeoutTLSConn failed: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
+	// Close the peer first so neither side's close_notify blocks on the unread
+	// pipe until tls.Conn's 5s close deadline.
+	defer func() { _ = serverRaw.Close() }()
 	if conn == nil {
 		t.Fatal("expected *TimeoutConn, got nil")
 	}

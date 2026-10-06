@@ -9,6 +9,8 @@ import (
 )
 
 // TimeoutConn refreshes the deadline before each read or write.
+// Construct it with NewTimeoutConn; a zero idle timeout, including one left by
+// a struct literal, uses DefaultTimeout.
 type TimeoutConn struct {
 	net.Conn
 	idleTimeout time.Duration
@@ -45,7 +47,7 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	deadline := time.Now().Add(c.idleTimeout)
+	deadline := time.Now().Add(normalizeLinkTimeout(c.idleTimeout))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.lastSet.IsZero() && !deadline.After(c.lastSet) {
@@ -100,6 +102,7 @@ func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+// RawConn returns the innermost connection beneath c; see RawConnProvider.
 func (c *TimeoutConn) RawConn() net.Conn {
 	if c == nil {
 		return nil
@@ -107,12 +110,16 @@ func (c *TimeoutConn) RawConn() net.Conn {
 	return rawConnOf(c.Conn)
 }
 
-// NewTimeoutTLSConn performs a TLS handshake and returns a timeout-wrapped connection.
+// NewTimeoutTLSConn performs a TLS client handshake bounded by handshakeTimeout
+// and returns a connection with an idle timeout. On failure raw is closed and
+// the returned *TimeoutConn is nil; callers that return it as a net.Conn should
+// return an untyped nil on error.
 func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
 	return NewTimeoutTLSConnContext(context.Background(), raw, cfg, idle, handshakeTimeout)
 }
 
-// NewTimeoutTLSConnContext performs a TLS handshake using ctx and returns a timeout-wrapped connection.
+// NewTimeoutTLSConnContext is like NewTimeoutTLSConn but also stops the
+// handshake when ctx is done. On failure the returned *TimeoutConn is nil.
 func NewTimeoutTLSConnContext(ctx context.Context, raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
 	tlsConn, err := NewTLSConnContext(ctx, raw, handshakeTimeout, cfg)
 	if err != nil {

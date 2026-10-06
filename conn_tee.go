@@ -91,6 +91,8 @@ func (t *TeeConn) SetWriteDeadline(deadline time.Time) error {
 	return conn.SetWriteDeadline(deadline)
 }
 
+// RawConn returns the innermost connection beneath t, or nil after Close or
+// Release; see RawConnProvider.
 func (t *TeeConn) RawConn() net.Conn {
 	if t == nil {
 		return nil
@@ -98,6 +100,7 @@ func (t *TeeConn) RawConn() net.Conn {
 	return rawConnOf(t.conn())
 }
 
+// StopBuffering stops recording reads. Bytes already buffered are kept.
 func (t *TeeConn) StopBuffering() {
 	if t == nil {
 		return
@@ -123,6 +126,7 @@ func (t *TeeConn) Close() error {
 	return conn.Close()
 }
 
+// Buffered returns a copy of the bytes recorded so far.
 func (t *TeeConn) Buffered() []byte {
 	if t == nil {
 		return nil
@@ -132,6 +136,8 @@ func (t *TeeConn) Buffered() []byte {
 	return append([]byte(nil), t.buf...)
 }
 
+// ResetBuffer empties the buffer. It does not change whether reads are
+// recorded, so it does not undo StopBuffering.
 func (t *TeeConn) ResetBuffer() {
 	if t == nil {
 		return
@@ -141,6 +147,8 @@ func (t *TeeConn) ResetBuffer() {
 	t.buf = t.buf[:0]
 }
 
+// ExtractAndReset returns a copy of the buffered bytes and empties the buffer,
+// as Buffered followed by ResetBuffer.
 func (t *TeeConn) ExtractAndReset() []byte {
 	if t == nil {
 		return nil
@@ -152,6 +160,10 @@ func (t *TeeConn) ExtractAndReset() []byte {
 	return data
 }
 
+// Release detaches the underlying connection and returns it with a copy of
+// the buffered bytes. The caller then owns the connection: the TeeConn reports
+// net.ErrClosed from Read, Write and the deadline methods, and its Close does
+// not close the returned connection.
 func (t *TeeConn) Release() (net.Conn, []byte) {
 	if t == nil {
 		return nil, nil
@@ -166,6 +178,7 @@ func (t *TeeConn) Release() (net.Conn, []byte) {
 	return conn, data
 }
 
+// DiscardBuffer stops recording reads and frees the buffer.
 func (t *TeeConn) DiscardBuffer() {
 	if t == nil {
 		return

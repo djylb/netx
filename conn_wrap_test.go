@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"crypto/tls"
 	"io"
 	"net"
 	"sync"
@@ -160,4 +161,130 @@ func TestAddrOverrideConnHelpersHandleNilState(t *testing.T) {
 
 	malformed := &AddrOverrideConn{}
 	assertClosedRawConnState(t, "malformed", malformed)
+}
+
+// pipeCloseCounter counts Close calls on one end of a net.Pipe.
+type pipeCloseCounter struct {
+	net.Conn
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *pipeCloseCounter) Close() error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *pipeCloseCounter) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func newPipeCloseCounter(t *testing.T) *pipeCloseCounter {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	return &pipeCloseCounter{Conn: client}
+}
+
+func TestRawConnOfUnwrapsNetConn(t *testing.T) {
+	base := newPipeCloseCounter(t)
+	tlsConn := tls.Client(base, &tls.Config{InsecureSkipVerify: true})
+
+	if got := RawConnOf(tlsConn); got != base {
+		t.Fatalf("RawConnOf(*tls.Conn) = %T, want base conn", got)
+	}
+	if got := RawConnOf(NewTimeoutConn(tlsConn, time.Second)); got != base {
+		t.Fatalf("RawConnOf(TimeoutConn(*tls.Conn)) = %T, want base conn", got)
+	}
+	if got := RawConnOf((*tls.Conn)(nil)); got != nil {
+		t.Fatalf("RawConnOf(nil *tls.Conn) = %v, want nil", got)
+	}
+	if got := NewTimeoutConn((*tls.Conn)(nil), time.Second).RawConn(); got != nil {
+		t.Fatalf("TimeoutConn(nil *tls.Conn).RawConn() = %v, want nil", got)
+	}
+}
+
+func TestWrapConnWithParentCloseAvoidsDoubleClosingTLSParent(t *testing.T) {
+	base := newPipeCloseCounter(t)
+	wrapped := WrapConn(tls.Client(base, &tls.Config{InsecureSkipVerify: true}), base, WithParentClose())
+
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if calls := base.Calls(); calls != 1 {
+		t.Fatalf("base Close() calls = %d, want 1", calls)
+	}
+}
+
+func TestWrapConnWithParentCloseAvoidsDoubleClosingParentBelowTLS(t *testing.T) {
+	base := &countedCloseConn{}
+	parent := NewTimeoutConn(base, time.Second)
+	wrapped := WrapConn(tls.Client(parent, &tls.Config{InsecureSkipVerify: true}), parent, WithParentClose())
+
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if calls := base.Calls(); calls != 1 {
+		t.Fatalf("base Close() calls = %d, want 1", calls)
+	}
+}
+
+func TestWrapConnWithParentCloseIgnoresParentClosedThroughRWC(t *testing.T) {
+	t.Run("sibling wrapper", func(t *testing.T) {
+		base := &countedCloseConn{}
+		wrapped := WrapConn(NewTimeoutConn(base, time.Second), NewAddrOverrideConn(base, nil, nil), WithParentClose())
+
+		if err := wrapped.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		// The parent is a different wrapper, so its own Close must still run.
+		if calls := base.Calls(); calls != 2 {
+			t.Fatalf("base Close() calls = %d, want 2", calls)
+		}
+	})
+
+	t.Run("tls parent", func(t *testing.T) {
+		base := &countedCloseConn{}
+		tlsConn := tls.Client(base, &tls.Config{InsecureSkipVerify: true})
+		wrapped := WrapConn(NewTimeoutConn(tlsConn, time.Second), tlsConn, WithParentClose())
+
+		if err := wrapped.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if calls := base.Calls(); calls != 1 {
+			t.Fatalf("base Close() calls = %d, want 1", calls)
+		}
+	})
+}
+
+// cyclicRawConn exposes a RawConn chain that loops back on itself.
+type cyclicRawConn struct {
+	countedCloseConn
+	next net.Conn
+}
+
+func (c *cyclicRawConn) RawConn() net.Conn { return c.next }
+
+func TestRawConnOfStopsOnCyclicProviders(t *testing.T) {
+	a := &cyclicRawConn{}
+	b := &cyclicRawConn{next: a}
+	a.next = b
+
+	if got := RawConnOf(a); got == nil {
+		t.Fatal("RawConnOf(cycle) = nil, want a conn from the cycle")
+	}
+	parent := &countedCloseConn{}
+	if err := WrapConn(a, parent, WithParentClose()).Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if calls := parent.Calls(); calls != 1 {
+		t.Fatalf("parent Close() calls = %d, want 1", calls)
+	}
 }

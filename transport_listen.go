@@ -16,7 +16,15 @@ type listenOptions struct {
 // ListenOption configures ListenTCP.
 type ListenOption func(*listenOptions)
 
-// WithTransparent enables transparent TCP listener socket options when supported.
+// WithTransparent prepares the listener for transparent proxying.
+//
+// On Linux it sets IP_TRANSPARENT and IPV6_TRANSPARENT, and on FreeBSD
+// IP_BINDANY and IPV6_BINDANY; both usually require elevated privileges.
+// On macOS no socket option is needed: pf rdr rules redirect traffic to an
+// ordinary listener and OriginalDestination recovers the target from pf,
+// which XNU only allows for root.
+// On other platforms, including Windows, ListenTCP returns
+// ErrTransparentListenUnsupported.
 func WithTransparent() ListenOption {
 	return func(o *listenOptions) {
 		o.transparent = true
@@ -43,5 +51,5 @@ func ListenTCPContext(ctx context.Context, address string, opts ...ListenOption)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return listenTCPContext(ctx, address, opts...)
+	return listenTCPContext(ctx, address, newListenOptions(opts))
 }

@@ -14,12 +14,19 @@ type TLSConn struct {
 	rawConn net.Conn
 }
 
-// NewTLSConn performs a TLS client handshake with a temporary deadline.
+// NewTLSConn performs a TLS client handshake bounded by timeout.
+// A non-positive timeout uses DefaultTimeout. On failure rawConn is closed and
+// the returned *TLSConn is nil; callers that return it as a net.Conn should
+// return an untyped nil on error.
 func NewTLSConn(rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
 	return NewTLSConnContext(context.Background(), rawConn, timeout, tlsConfig)
 }
 
-// NewTLSConnContext performs a TLS client handshake using ctx and a temporary deadline.
+// NewTLSConnContext performs a TLS client handshake that stops when ctx is done
+// or timeout elapses. The timeout is applied both as a deadline on rawConn and
+// as a context deadline, so it also holds when rawConn ignores deadlines.
+// A non-positive timeout uses DefaultTimeout. On failure rawConn is closed and
+// the returned *TLSConn is nil.
 func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
 	if rawConn == nil {
 		return nil, net.ErrClosed
@@ -37,7 +44,9 @@ func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Durat
 
 	tlsConn := tls.Client(rawConn, tlsConfig)
 
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	hsCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 		_ = tlsConn.Close()
 		return nil, fmt.Errorf("TLS handshake failed: %w", err)
 	}
@@ -52,6 +61,8 @@ func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Durat
 	}, nil
 }
 
+// RawConn returns the connection the TLS handshake ran over; see
+// RawConnProvider.
 func (c *TLSConn) RawConn() net.Conn {
 	if c == nil {
 		return nil
