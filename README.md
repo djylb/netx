@@ -181,12 +181,12 @@ func target(conn net.Conn) (string, error) {
 }
 ```
 
-| Platform | `ListenTCP(addr, WithTransparent())` | `OriginalDestination` |
-| --- | --- | --- |
+| Platform       | `ListenTCP(addr, WithTransparent())`                             | `OriginalDestination`                                              |
+|----------------|------------------------------------------------------------------|--------------------------------------------------------------------|
 | Linux, Android | sets `IP_TRANSPARENT`/`IPV6_TRANSPARENT` (needs `CAP_NET_ADMIN`) | `SO_ORIGINAL_DST` (REDIRECT/DNAT), else the local address (TPROXY) |
-| FreeBSD | sets `IP_BINDANY`/`IPV6_BINDANY` | pf `DIOCNATLOOK`, else the local address |
-| macOS, iOS | plain listener (pf `rdr` needs no socket option) | pf `DIOCNATLOOK` (needs root) |
-| Others | `ErrTransparentListenUnsupported` | `ErrOriginalDestinationUnsupported` |
+| FreeBSD        | sets `IP_BINDANY`/`IPV6_BINDANY`                                 | pf `DIOCNATLOOK`, else the local address                           |
+| macOS, iOS     | plain listener (pf `rdr` needs no socket option)                 | pf `DIOCNATLOOK` (needs root)                                      |
+| Others         | `ErrTransparentListenUnsupported`                                | `ErrOriginalDestinationUnsupported`                                |
 
 `ListenTCP` without options is a plain TCP listener on every platform. For
 TCP keepalive tuning, use the standard library:

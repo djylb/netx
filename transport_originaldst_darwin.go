@@ -56,7 +56,10 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open /dev/pf: %v", err)
 	}
-	defer syscall.Close(fd)
+	defer func() {
+		// Closing the lookup descriptor must not replace the lookup result.
+		_ = syscall.Close(fd)
+	}()
 
 	var nl pfiocNatlook
 

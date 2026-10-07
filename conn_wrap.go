@@ -147,6 +147,7 @@ func rawConnOf(v any) net.Conn {
 const maxUnwrapDepth = 16
 
 // nextConn returns the connection that v wraps, if v exposes one.
+// The returned connection is borrowed; inspecting it does not transfer ownership.
 func nextConn(v any) (net.Conn, bool) {
 	switch getter := v.(type) {
 	case RawConnProvider:
@@ -165,6 +166,8 @@ func rawConnOfDepth(v any, depth int) net.Conn {
 	if v == nil {
 		return nil
 	}
+	// Unwrapping only borrows connections; their owner remains responsible for closing them.
+	//noinspection GoResourceLeak
 	if raw, ok := nextConn(v); ok {
 		if raw == nil {
 			return nil
@@ -198,6 +201,8 @@ func sameWrappedParent(rwc io.ReadWriteCloser, parent net.Conn) bool {
 		if isConn && sameNetConn(conn, parent) {
 			return true
 		}
+		// This ownership check must not close the borrowed connection.
+		//noinspection GoResourceLeak
 		next, ok := nextConn(cur)
 		if !ok || next == nil || (isConn && sameNetConn(next, conn)) {
 			return false

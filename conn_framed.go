@@ -42,12 +42,12 @@ var ErrFrameDesync = errors.New("framed: stream desynchronized by a partial fram
 // Reads and writes may run concurrently with each other.
 type FramedConn struct {
 	net.Conn
+	rerr     error
+	werr     error
+	pending  []byte
 	rmu      sync.Mutex
 	wmu      sync.Mutex
 	rhdr     [2]byte
-	pending  []byte
-	rerr     error
-	werr     error
 	datagram bool
 }
 

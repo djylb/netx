@@ -434,6 +434,8 @@ func TestFramedConnMidFrameReadErrorIsStickyDesync(t *testing.T) {
 				} else if !strings.Contains(err.Error(), "timeout") {
 					t.Fatalf("error = %q, want the timeout cause in the message", err)
 				}
+				// Sticky failures must return the same error object, not just a matching cause.
+				//noinspection GoDirectComparisonOfErrors
 				if err2 := read(); err2 != err {
 					t.Fatalf("second read error = %v, want sticky %v", err2, err)
 				}
@@ -478,6 +480,8 @@ func TestFramedConnDesyncKeepsNonTimeoutCause(t *testing.T) {
 			t.Fatalf("errors.Is(%v, %v) = false, want the cause matched", err, connResetErrnos[0])
 		}
 		var opErr *net.OpError
+		// Unwrapping must preserve the original cause object.
+		//noinspection GoDirectComparisonOfErrors
 		if !errors.As(err, &opErr) || opErr != cause {
 			t.Fatalf("errors.As(%v, *net.OpError) = %v, want the cause", err, opErr)
 		}
@@ -601,6 +605,8 @@ func TestFramedConnPartialWriteIsStickyDesync(t *testing.T) {
 	}
 
 	raw.limit = 1 << 20
+	// Sticky failures must return the same error object, not just a matching cause.
+	//noinspection GoDirectComparisonOfErrors
 	if err2 := fc.WriteFrame([]byte("next")); err2 != err {
 		t.Fatalf("WriteFrame() after desync error = %v, want sticky %v", err2, err)
 	}

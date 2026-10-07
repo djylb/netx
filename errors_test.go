@@ -156,8 +156,16 @@ func TestNetErrorKindGenericErrors(t *testing.T) {
 
 func TestDescribeNetErrorIncludesConnAndTimeout(t *testing.T) {
 	c, peer := net.Pipe()
-	defer c.Close()
-	defer peer.Close()
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close pipe connection: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if err := peer.Close(); err != nil {
+			t.Errorf("close pipe peer: %v", err)
+		}
+	})
 	err := &net.OpError{Op: "read", Net: "tcp", Err: fakeNetError{msg: "i/o timeout", timeout: true}}
 	got := DescribeNetError(err, c)
 	for _, want := range []string{"kind=timeout", "timeout=true", "local=pipe", "remote=pipe", "op=read", "net=tcp"} {
@@ -196,7 +204,11 @@ func TestNetErrorClassifiersOnLoopback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("listen: %v", err)
 		}
-		defer ln.Close()
+		t.Cleanup(func() {
+			if err := ln.Close(); err != nil {
+				t.Errorf("close listener: %v", err)
+			}
+		})
 		accepted := make(chan net.Conn, 1)
 		go func() {
 			c, err := ln.Accept()
@@ -210,7 +222,11 @@ func TestNetErrorClassifiersOnLoopback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		defer client.Close()
+		t.Cleanup(func() {
+			if err := client.Close(); err != nil {
+				t.Errorf("close client: %v", err)
+			}
+		})
 		server, ok := <-accepted
 		if !ok {
 			t.Fatal("accept failed")

@@ -176,12 +176,12 @@ func normalizeTargetIP(srcIP, dstIP net.IP) net.IP {
 
 type proxyAddrMeta struct {
 	v1Protocol string
-	famProto   byte
-	addrBytes  uint16
 	srcIP      net.IP
 	dstIP      net.IP
+	addrBytes  uint16
 	srcPort    uint16
 	dstPort    uint16
+	famProto   byte
 }
 
 func buildProxyAddrMeta(clientAddr, targetAddr net.Addr) (proxyAddrMeta, bool) {
