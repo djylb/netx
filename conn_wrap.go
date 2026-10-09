@@ -94,6 +94,14 @@ func (w *wrappedConn) Close() error {
 	return errors.Join(err1, err2)
 }
 
+// CloseWrite shuts down the writing side of rwc; see TimeoutConn.CloseWrite.
+func (w *wrappedConn) CloseWrite() error {
+	if w == nil || w.rwc == nil {
+		return net.ErrClosed
+	}
+	return closeWrite(w.rwc)
+}
+
 func (w *wrappedConn) LocalAddr() net.Addr {
 	if w == nil || w.parent == nil {
 		return nil

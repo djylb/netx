@@ -2,13 +2,16 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
 	"time"
 )
 
 // handshake runs fn on c with ctx's deadline as the connection deadline and
 // interrupts its I/O when ctx is canceled. On success it clears the
-// deadline; on failure it closes c and prefers ctx's error.
+// deadline; on failure it closes c and reports ctx's error when ctx ended
+// the handshake.
 func handshake(ctx context.Context, c net.Conn, fn func() (net.Conn, error)) (net.Conn, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(deadline)
@@ -29,27 +32,12 @@ func handshake(ctx context.Context, c net.Conn, fn func() (net.Conn, error)) (ne
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
+		// The connection deadline equals ctx's, so it can expire just before
+		// ctx reports it.
+		if _, ok := ctx.Deadline(); ok && errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, context.DeadlineExceeded
+		}
 		return nil, err
 	}
 	return out, nil
-}
-
-// prefixConn returns bytes the handshake read past its last message before
-// reading from the connection.
-type prefixConn struct {
-	net.Conn
-	prefix []byte
-}
-
-func (c *prefixConn) Read(b []byte) (int, error) {
-	if len(c.prefix) > 0 {
-		n := copy(b, c.prefix)
-		c.prefix = c.prefix[n:]
-		return n, nil
-	}
-	return c.Conn.Read(b)
-}
-
-func (c *prefixConn) RawConn() net.Conn {
-	return c.Conn
 }

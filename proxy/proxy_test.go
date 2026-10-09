@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"testing"
@@ -249,13 +250,16 @@ func TestFromURLErrors(t *testing.T) {
 		}
 	}
 	d := mustDialer(t, "SOCKS5://proxy")
-	if sd, ok := d.(*socks5Dialer); !ok || sd.proxyAddr != "proxy:1080" {
+	if sd, ok := d.(*SOCKS5Dialer); !ok || sd.ProxyAddr != "proxy:1080" || sd.Username != "" {
 		t.Errorf("SOCKS5 default address = %#v", d)
 	}
-	if hd := mustDialer(t, "http://proxy").(*httpDialer); hd.proxyAddr != "proxy:80" || hd.serverName != "" {
+	if sd := mustDialer(t, "socks5h://u:p@proxy:9").(*SOCKS5Dialer); sd.Username != "u" || sd.Password != "p" || sd.ProxyAddr != "proxy:9" {
+		t.Errorf("socks5h credentials = %#v", sd)
+	}
+	if hd := mustDialer(t, "http://proxy").(*HTTPDialer); hd.ProxyAddr != "proxy:80" || hd.TLSConfig != nil || hd.Header != nil {
 		t.Errorf("http defaults = %#v", hd)
 	}
-	if hd := mustDialer(t, "https://[2001:db8::1]").(*httpDialer); hd.proxyAddr != "[2001:db8::1]:443" || hd.serverName != "2001:db8::1" {
+	if hd := mustDialer(t, "https://[2001:db8::1]").(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" || hd.TLSConfig.ServerName != "2001:db8::1" {
 		t.Errorf("https defaults = %#v", hd)
 	}
 	if _, err := d.DialContext(context.Background(), "udp", "example.com:53"); !errors.Is(err, errNetwork) {
@@ -302,8 +306,8 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("no_proxy", "")
 	if d, err := FromEnvironment(nil); err != nil {
 		t.Fatal(err)
-	} else if _, ok := d.(*socks5Dialer); !ok {
-		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5Dialer", d)
+	} else if _, ok := d.(*SOCKS5Dialer); !ok {
+		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *SOCKS5Dialer", d)
 	}
 
 	t.Setenv("ALL_PROXY", "gopher://proxy")
@@ -390,5 +394,46 @@ func TestHTTPConnectReplyParsing(t *testing.T) {
 			t.Errorf("%s: tunnel read = %q, %v", tt.name, buf, err)
 		}
 		_ = conn.Close()
+	}
+}
+
+func TestHTTPDialerConfig(t *testing.T) {
+	gotReq := make(chan *http.Request, 1)
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotReq <- r
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
+	srv.StartTLS()
+	defer srv.Close()
+
+	// A custom TLS config reaches the HTTPS proxy, and Header adds fields.
+	d := &HTTPDialer{
+		ProxyAddr: srv.Listener.Addr().String(),
+		TLSConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		Header:    textproto.MIMEHeader{"User-Agent": {"netx-test"}, "X-Trace": {"1", "2"}},
+	}
+	conn, err := d.Dial("tcp", "example.com:443")
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	_ = conn.Close()
+	req := <-gotReq
+	if req.Method != http.MethodConnect || req.UserAgent() != "netx-test" || len(req.Header["X-Trace"]) != 2 {
+		t.Fatalf("request = %s %v", req.Method, req.Header)
+	}
+
+	for _, h := range []textproto.MIMEHeader{
+		{"X-Bad": {"a\r\nX-Injected: 1"}},
+		{"Bad Key": {"v"}},
+		{"": {"v"}},
+	} {
+		d := &HTTPDialer{ProxyAddr: "127.0.0.1:1", Header: h}
+		if _, err := d.DialContext(context.Background(), "tcp", "example.com:1"); err == nil || !strings.Contains(err.Error(), "invalid header") {
+			t.Errorf("header %q accepted: %v", h, err)
+		}
 	}
 }

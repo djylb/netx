@@ -112,13 +112,13 @@ func TestTeeConnDiscardBufferStopsCapture(t *testing.T) {
 		t.Fatalf("Read() = %d, %v; want 3, nil", n, err)
 	}
 	tee.DiscardBuffer()
-	if got := tee.Buffered(); got != nil && len(got) != 0 {
+	if got := tee.Buffered(); len(got) != 0 {
 		t.Fatalf("Buffered() after DiscardBuffer() = %q, want empty", string(got))
 	}
 	if n, err := tee.Read(buf); err != nil && err != io.EOF || n != 3 {
 		t.Fatalf("Read() after DiscardBuffer() = %d, %v; want 3, nil/eof", n, err)
 	}
-	if got := tee.Buffered(); got != nil && len(got) != 0 {
+	if got := tee.Buffered(); len(got) != 0 {
 		t.Fatalf("Buffered() after stopped capture = %q, want empty", string(got))
 	}
 }

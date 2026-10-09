@@ -86,3 +86,19 @@ func ExampleRelay() {
 	// ping
 	// 4 4 <nil>
 }
+
+// Hand a connection on after sniffing its first bytes.
+func ExampleNewPrefixConn() {
+	client, server := net.Pipe()
+	go func() {
+		_, _ = client.Write([]byte("GET / HTTP/1.1\r\n"))
+		_ = client.Close()
+	}()
+
+	head := make([]byte, 4)
+	_, _ = io.ReadFull(server, head)
+	c := netx.NewPrefixConn(server, head) // the next reader sees the whole request
+	all, _ := io.ReadAll(c)
+	fmt.Printf("%q\n", all)
+	// Output: "GET / HTTP/1.1\r\n"
+}

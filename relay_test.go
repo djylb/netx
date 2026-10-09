@@ -127,3 +127,56 @@ func TestRelayReportsFirstError(t *testing.T) {
 		t.Fatal("Relay() did not close b")
 	}
 }
+
+// With WithHalfClose a client can shut down its sending side and still read
+// the answer, which the backend sends after it has seen EOF.
+func TestRelayHalfClose(t *testing.T) {
+	client, relayA := tcpPair(t)
+	relayB, backend := tcpPair(t)
+	defer func() { _ = client.Close() }()
+	defer func() { _ = backend.Close() }()
+
+	go func() {
+		request, _ := io.ReadAll(backend) // until the relayed EOF
+		_, _ = backend.Write(append([]byte("echo:"), request...))
+		_ = backend.(*net.TCPConn).CloseWrite()
+	}()
+	done := make(chan error, 1)
+	var up, down int64
+	go func() {
+		var err error
+		up, down, err = Relay(relayA, relayB, WithHalfClose())
+		done <- err
+	}()
+
+	_, _ = client.Write([]byte("ping"))
+	_ = client.(*net.TCPConn).CloseWrite()
+	answer, err := io.ReadAll(client)
+	if err != nil || string(answer) != "echo:ping" {
+		t.Fatalf("answer = %q, %v", answer, err)
+	}
+	if err := <-done; err != nil || up != 4 || down != 9 {
+		t.Fatalf("Relay() = %d, %d, %v", up, down, err)
+	}
+}
+
+// Without CloseWrite support the half-close option falls back to closing both.
+func TestRelayHalfCloseFallsBackToClose(t *testing.T) {
+	client, a := net.Pipe()
+	b, backend := net.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, backend) }()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Relay(a, b, WithHalfClose())
+		done <- err
+	}()
+	_ = client.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Relay() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Relay() did not return")
+	}
+}

@@ -17,11 +17,12 @@ type TeeConn struct {
 	maxBufBytes int
 }
 
-// NewTeeConn wraps conn and stores up to maxBufBytes read bytes.
-func NewTeeConn(conn net.Conn, maxBufBytes ...int) *TeeConn {
+// NewTeeConn wraps conn and records up to maxBufBytes read bytes, 64 KiB if
+// maxBufBytes is not positive.
+func NewTeeConn(conn net.Conn, maxBufBytes int) *TeeConn {
 	size := defaultMaxBufBytes
-	if len(maxBufBytes) > 0 && maxBufBytes[0] > 0 {
-		size = maxBufBytes[0]
+	if maxBufBytes > 0 {
+		size = maxBufBytes
 	}
 	return &TeeConn{
 		underlying:  conn,
@@ -124,6 +125,16 @@ func (t *TeeConn) Close() error {
 		return nil
 	}
 	return conn.Close()
+}
+
+// CloseWrite shuts down the writing side of the underlying connection; see
+// TimeoutConn.CloseWrite.
+func (t *TeeConn) CloseWrite() error {
+	conn := t.conn()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	return closeWrite(conn)
 }
 
 // Buffered returns a copy of the bytes recorded so far.

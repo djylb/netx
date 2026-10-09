@@ -16,10 +16,14 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strings"
@@ -32,30 +36,42 @@ type ContextDialer interface {
 
 var errNetwork = errors.New("proxy: only tcp, tcp4 and tcp6 are supported")
 
-// FromURL returns a dialer that connects through the proxy at u, using
-// forward to reach the proxy, or a zero net.Dialer if forward is nil.
-//
-// Supported schemes are http (default port 80), https (default port 443,
-// with TLS to the proxy) and socks5 or socks5h (default port 1080). User
-// information in u is sent as Basic Proxy-Authorization for HTTP and as
-// RFC 1929 credentials for SOCKS5. Both SOCKS5 schemes send host names to the
-// proxy, which resolves them.
+// FromURL returns a dialer that connects through the proxy at u: an
+// *HTTPDialer for http (default port 80) and https (default port 443, with TLS
+// to the proxy), and a *SOCKS5Dialer for socks5 and socks5h (default port
+// 1080), which both let the proxy resolve host names. User information in u
+// becomes Basic Proxy-Authorization or SOCKS5 username/password credentials.
+// forward dials the proxy; nil means a zero net.Dialer.
 func FromURL(u *url.URL, forward ContextDialer) (ContextDialer, error) {
 	if u == nil {
 		return nil, errors.New("proxy: nil URL")
 	}
-	if forward == nil {
-		forward = &net.Dialer{}
-	}
-	if u.Hostname() == "" {
+	host := u.Hostname()
+	if host == "" {
 		return nil, fmt.Errorf("proxy: missing host in %s", u.Redacted())
 	}
-	scheme := strings.ToLower(u.Scheme)
-	switch scheme {
+	port := u.Port()
+	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return newHTTPDialer(u, scheme == "https", forward), nil
+		d := &HTTPDialer{Forward: forward}
+		if strings.EqualFold(u.Scheme, "https") {
+			d.TLSConfig = &tls.Config{ServerName: host}
+			port = cmp.Or(port, "443")
+		}
+		d.ProxyAddr = net.JoinHostPort(host, cmp.Or(port, "80"))
+		if u.User != nil {
+			password, _ := u.User.Password()
+			credentials := base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + password))
+			d.Header = textproto.MIMEHeader{"Proxy-Authorization": {"Basic " + credentials}}
+		}
+		return d, nil
 	case "socks5", "socks5h":
-		return newSOCKS5Dialer(u, forward), nil
+		d := &SOCKS5Dialer{ProxyAddr: net.JoinHostPort(host, cmp.Or(port, "1080")), Forward: forward}
+		if u.User != nil {
+			d.Username = u.User.Username()
+			d.Password, _ = u.User.Password()
+		}
+		return d, nil
 	default:
 		return nil, fmt.Errorf("proxy: unsupported scheme %q", u.Scheme)
 	}
@@ -121,11 +137,10 @@ func checkNetwork(network string) error {
 	}
 }
 
-// proxyAddress returns the host:port of the proxy in u.
-func proxyAddress(u *url.URL, defaultPort string) string {
-	port := u.Port()
-	if port == "" {
-		port = defaultPort
+// forwardOf returns forward, or a zero net.Dialer if it is nil.
+func forwardOf(forward ContextDialer) ContextDialer {
+	if forward == nil {
+		return &net.Dialer{}
 	}
-	return net.JoinHostPort(u.Hostname(), port)
+	return forward
 }

@@ -17,9 +17,8 @@ func TestPublicConnectionHelpers(t *testing.T) {
 	if got := RawConnOf(overridden); got != baseConn {
 		t.Fatalf("RawConnOf() = %v, want base conn", got)
 	}
-	header := ProxyProtocolHeader(overridden, ProxyProtocolV1)
-	if string(header) != "PROXY TCP4 192.0.2.10 198.51.100.20 1234 8080\r\n" {
-		t.Fatalf("ProxyProtocolHeader() = %q", string(header))
+	if overridden.RemoteAddr() != remote || overridden.LocalAddr() != local {
+		t.Fatalf("addresses = %v -> %v, want %v -> %v", overridden.LocalAddr(), overridden.RemoteAddr(), local, remote)
 	}
 
 	remoteOnly := NewAddrOverrideConn(&countedCloseConn{}, net.TCPAddrFromAddrPort(netip.MustParseAddrPort("203.0.113.10:443")), nil)
@@ -31,7 +30,7 @@ func TestPublicConnectionHelpers(t *testing.T) {
 	}
 
 	base := &countedCloseConn{}
-	chain := NewFramedConn(NewTimeoutConn(NewTeeConn(base), time.Second))
+	chain := NewFramedConn(NewTimeoutConn(NewTeeConn(base, 0), time.Second))
 	if got := RawConnOf(chain); got != base {
 		t.Fatalf("RawConnOf(wrapper chain) = %v, want base conn", got)
 	}

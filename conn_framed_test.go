@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -342,6 +343,9 @@ func TestFramedConnMidFrameReadErrorIsStickyDesync(t *testing.T) {
 		bufLen   int
 		steps    []framedReadStep
 		wantEOF  bool
+		// firstRead is the length a stream Read returns before the failure,
+		// which then surfaces on the next Read.
+		firstRead int
 	}{
 		{
 			name:  "timeout inside header",
@@ -356,9 +360,10 @@ func TestFramedConnMidFrameReadErrorIsStickyDesync(t *testing.T) {
 			steps: []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
 		},
 		{
-			name:   "timeout inside stream tail",
-			bufLen: 2,
-			steps:  []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
+			name:      "timeout inside stream tail",
+			bufLen:    2,
+			steps:     []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
+			firstRead: 2,
 		},
 		{
 			name:     "timeout inside datagram tail",
@@ -423,6 +428,12 @@ func TestFramedConnMidFrameReadErrorIsStickyDesync(t *testing.T) {
 						t.Fatalf("Read() n = %d, want 0 on a partial frame", n)
 					}
 					return err
+				}
+				if tt.firstRead > 0 && !useReadFrame {
+					// Read returns the start of the frame without waiting for the rest.
+					if n, err := fc.Read(make([]byte, bufLen)); n != tt.firstRead || err != nil {
+						t.Fatalf("first Read() = %d, %v; want %d, nil", n, err, tt.firstRead)
+					}
 				}
 
 				err := read()
@@ -779,3 +790,52 @@ func TestFramedConnConcurrentReadWrite(t *testing.T) {
 }
 
 var _ net.Error = (*frameDesyncError)(nil)
+
+func TestFramedConnReadBuffer(t *testing.T) {
+	var wire []byte
+	for _, s := range []string{"a", "bcdef", "", "ghi"} {
+		wire = append(wire, frameBytes(s)...)
+	}
+	for _, datagram := range []bool{false, true} {
+		opts := []FramedOption{WithReadBuffer(64)}
+		if datagram {
+			opts = append(opts, WithDatagramReads())
+		}
+		src := &countingReadConn{Conn: &teeTestConn{readBuf: bytes.NewBuffer(append([]byte(nil), wire...))}}
+		fc := NewFramedConn(src, opts...)
+		var got []string
+		buf := make([]byte, 3)
+		for range 4 {
+			n, err := fc.Read(buf)
+			if err != nil {
+				t.Fatalf("datagram=%v Read() error = %v", datagram, err)
+			}
+			got = append(got, string(buf[:n]))
+			if !datagram && string(buf[:n]) == "bcd" {
+				// The rest of "bcdef" in stream mode.
+				n, _ = fc.Read(buf)
+				got[len(got)-1] += string(buf[:n])
+			}
+		}
+		want := "a|bcdef||ghi"
+		if datagram {
+			want = "a|bcd||ghi"
+		}
+		if strings.Join(got, "|") != want {
+			t.Fatalf("datagram=%v frames = %q, want %q", datagram, strings.Join(got, "|"), want)
+		}
+		if src.reads.Load() > 1 {
+			t.Fatalf("datagram=%v underlying reads = %d, want the frames read in one go", datagram, src.reads.Load())
+		}
+	}
+}
+
+type countingReadConn struct {
+	net.Conn
+	reads atomic.Int32
+}
+
+func (c *countingReadConn) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.Conn.Read(p)
+}

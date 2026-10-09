@@ -1,6 +1,6 @@
 //go:build freebsd
 
-package netx
+package transparent
 
 import (
 	"io"
@@ -23,29 +23,29 @@ func (c stubFreeBSDTransparentConn) SetDeadline(time.Time) error      { return n
 func (c stubFreeBSDTransparentConn) SetReadDeadline(time.Time) error  { return nil }
 func (c stubFreeBSDTransparentConn) SetWriteDeadline(time.Time) error { return nil }
 
-func TestTransparentDestinationFromLocalAddrIPv4(t *testing.T) {
-	addr, err := transparentDestinationFromLocalAddr(&net.TCPAddr{
+func TestDestinationFromLocalAddrIPv4(t *testing.T) {
+	addr, err := destinationFromLocalAddr(&net.TCPAddr{
 		IP:   net.ParseIP("203.0.113.10"),
 		Port: 8443,
 	})
 	if err != nil {
-		t.Fatalf("transparentDestinationFromLocalAddr error = %v", err)
+		t.Fatalf("destinationFromLocalAddr error = %v", err)
 	}
 	if addr.String() != "203.0.113.10:8443" {
-		t.Fatalf("transparentDestinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
+		t.Fatalf("destinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
 	}
 }
 
-func TestTransparentDestinationFromLocalAddrIPv6(t *testing.T) {
-	addr, err := transparentDestinationFromLocalAddr(&net.TCPAddr{
+func TestDestinationFromLocalAddrIPv6(t *testing.T) {
+	addr, err := destinationFromLocalAddr(&net.TCPAddr{
 		IP:   net.ParseIP("2001:db8::25"),
 		Port: 9443,
 	})
 	if err != nil {
-		t.Fatalf("transparentDestinationFromLocalAddr error = %v", err)
+		t.Fatalf("destinationFromLocalAddr error = %v", err)
 	}
 	if addr.String() != "[2001:db8::25]:9443" {
-		t.Fatalf("transparentDestinationFromLocalAddr = %q, want %q", addr.String(), "[2001:db8::25]:9443")
+		t.Fatalf("destinationFromLocalAddr = %q, want %q", addr.String(), "[2001:db8::25]:9443")
 	}
 }
 

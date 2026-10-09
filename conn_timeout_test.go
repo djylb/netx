@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -123,6 +122,8 @@ func TestTimeoutConnReadWriteSetsDeadline(t *testing.T) {
 		serverRead <- tmp
 	}()
 
+	// Wait past the refresh slack (idle/16) so the write moves the deadline.
+	time.Sleep(40 * time.Millisecond)
 	if _, err = conn.Write([]byte("ok")); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
@@ -164,8 +165,8 @@ func TestTimeoutConnRefreshDeadlineDoesNotMoveBackward(t *testing.T) {
 	wg.Wait()
 
 	got := raw.deadlines()
-	if len(got) != goroutines {
-		t.Fatalf("deadline calls = %d, want %d", len(got), goroutines)
+	if len(got) == 0 || len(got) > goroutines {
+		t.Fatalf("deadline calls = %d, want 1..%d", len(got), goroutines)
 	}
 	for i := 1; i < len(got); i++ {
 		if !got[i].After(got[i-1]) {
@@ -238,97 +239,6 @@ func TestTimeoutConnStructLiteralUsesDefaultTimeout(t *testing.T) {
 	}
 }
 
-func TestNewTimeoutTLSConnSuccess(t *testing.T) {
-	cert := testSelfSignedCert(t)
-
-	clientRaw, serverRaw := net.Pipe()
-	defer func() { _ = serverRaw.Close() }()
-	serverErr := make(chan error, 1)
-	go func() {
-		tlsServer := tls.Server(serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}})
-		defer func() { _ = tlsServer.Close() }()
-		if err := tlsServer.Handshake(); err != nil {
-			serverErr <- err
-			return
-		}
-
-		buf := make([]byte, 4)
-		if _, err := io.ReadFull(tlsServer, buf); err != nil {
-			serverErr <- err
-			return
-		}
-		_, err := tlsServer.Write(buf)
-		serverErr <- err
-	}()
-
-	conn, err := NewTimeoutTLSConn(clientRaw, &tls.Config{InsecureSkipVerify: true}, 500*time.Millisecond, 2*time.Second)
-	if err != nil {
-		t.Fatalf("NewTimeoutTLSConn failed: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	// Close the peer first so neither side's close_notify blocks on the unread
-	// pipe until tls.Conn's 5s close deadline.
-	defer func() { _ = serverRaw.Close() }()
-	if conn == nil {
-		t.Fatal("expected *TimeoutConn, got nil")
-	}
-
-	if _, err = conn.Write([]byte("ping")); err != nil {
-		t.Fatalf("tls write failed: %v", err)
-	}
-	buf := make([]byte, 4)
-	if _, err = io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("tls read failed: %v", err)
-	}
-	if got := string(buf); got != "ping" {
-		t.Fatalf("echo mismatch: got %q", got)
-	}
-
-	if err = <-serverErr; err != nil {
-		t.Fatalf("server side failed: %v", err)
-	}
-}
-
-func TestNewTimeoutTLSConnHandshakeFailureClosesRaw(t *testing.T) {
-	cert := testSelfSignedCert(t)
-
-	clientRaw, serverRaw := net.Pipe()
-	spy := &closeSpyConn{Conn: clientRaw}
-	defer func() { _ = serverRaw.Close() }()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		tlsServer := tls.Server(serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}})
-		defer func() { _ = tlsServer.Close() }()
-		_ = tlsServer.Handshake()
-	}()
-
-	conn, err := NewTimeoutTLSConn(spy, &tls.Config{ServerName: "example.com"}, 200*time.Millisecond, 2*time.Second)
-	if err == nil {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		t.Fatal("expected handshake to fail")
-	}
-	if conn != nil {
-		t.Fatalf("expected nil conn on handshake failure, got %T", conn)
-	}
-	if !spy.isClosed() {
-		t.Fatal("expected raw conn to be closed on handshake failure")
-	}
-	<-done
-}
-
-func TestNewTimeoutTLSConnRejectsNilRawConn(t *testing.T) {
-	conn, err := NewTimeoutTLSConn(nil, &tls.Config{InsecureSkipVerify: true}, 200*time.Millisecond, 2*time.Second)
-	if !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("NewTimeoutTLSConn(nil) error = %v, want %v", err, net.ErrClosed)
-	}
-	if conn != nil {
-		t.Fatalf("NewTimeoutTLSConn(nil) conn = %v, want nil", conn)
-	}
-}
-
 func TestTimeoutConnHelpersHandleNilState(t *testing.T) {
 	var nilConn *TimeoutConn
 	assertClosedConnState(t, "nil", nilConn)
@@ -382,4 +292,31 @@ func testSelfSignedCert(t *testing.T) tls.Certificate {
 		testCert = generateSelfSignedCert(t)
 	})
 	return testCert
+}
+
+func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {
+	raw := &deadlineRecordConn{}
+	conn := NewTimeoutConn(raw, time.Minute)
+	for range 1000 {
+		if _, err := conn.Write([]byte("x")); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+	}
+	if got := len(raw.deadlines()); got != 1 {
+		t.Fatalf("deadline calls = %d, want 1", got)
+	}
+
+	// An explicit deadline stays until the next read or write sets the idle
+	// deadline again.
+	explicit := time.Now().Add(time.Hour)
+	if err := conn.SetDeadline(explicit); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	got := raw.deadlines()
+	if len(got) != 3 || !got[1].Equal(explicit) || !got[2].Before(explicit) {
+		t.Fatalf("deadlines = %v, want idle, explicit, idle", got)
+	}
 }

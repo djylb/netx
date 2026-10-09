@@ -43,6 +43,15 @@ func (c *AddrOverrideConn) Close() error {
 	return c.Conn.Close()
 }
 
+// CloseWrite shuts down the writing side of the wrapped connection; see
+// TimeoutConn.CloseWrite.
+func (c *AddrOverrideConn) CloseWrite() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	return closeWrite(c.Conn)
+}
+
 func (c *AddrOverrideConn) LocalAddr() net.Addr {
 	if c == nil {
 		return nil

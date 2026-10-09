@@ -1,13 +1,13 @@
 //go:build linux || freebsd
 
-package netx
+package transparent
 
 import (
 	"fmt"
 	"net"
 )
 
-func transparentDestinationFromLocalAddr(addr net.Addr) (*net.TCPAddr, error) {
+func destinationFromLocalAddr(addr net.Addr) (*net.TCPAddr, error) {
 	tcpAddr, ok := addr.(*net.TCPAddr)
 	if !ok || tcpAddr == nil {
 		return nil, fmt.Errorf("local address is not tcp: %T", addr)

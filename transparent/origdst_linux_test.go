@@ -1,6 +1,6 @@
 //go:build linux
 
-package netx
+package transparent
 
 import (
 	"errors"
@@ -25,16 +25,16 @@ func (c stubTransparentConn) SetDeadline(time.Time) error      { return nil }
 func (c stubTransparentConn) SetReadDeadline(time.Time) error  { return nil }
 func (c stubTransparentConn) SetWriteDeadline(time.Time) error { return nil }
 
-func TestTransparentDestinationFromLocalAddr(t *testing.T) {
-	addr, err := transparentDestinationFromLocalAddr(&net.TCPAddr{
+func TestDestinationFromLocalAddr(t *testing.T) {
+	addr, err := destinationFromLocalAddr(&net.TCPAddr{
 		IP:   net.ParseIP("203.0.113.10"),
 		Port: 8443,
 	})
 	if err != nil {
-		t.Fatalf("transparentDestinationFromLocalAddr error = %v", err)
+		t.Fatalf("destinationFromLocalAddr error = %v", err)
 	}
 	if addr.String() != "203.0.113.10:8443" {
-		t.Fatalf("transparentDestinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
+		t.Fatalf("destinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
 	}
 }
 
@@ -53,8 +53,8 @@ func TestOriginalDestinationFallsBackToLocalAddrForTransparentConn(t *testing.T)
 	}
 }
 
-func TestTransparentDestinationFromLocalAddrRejectsInvalidAddr(t *testing.T) {
-	if _, err := transparentDestinationFromLocalAddr(&net.TCPAddr{}); err == nil {
+func TestDestinationFromLocalAddrRejectsInvalidAddr(t *testing.T) {
+	if _, err := destinationFromLocalAddr(&net.TCPAddr{}); err == nil {
 		t.Fatal("expected error for empty local address")
 	}
 }

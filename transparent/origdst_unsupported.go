@@ -1,6 +1,6 @@
 //go:build !linux && !freebsd && !darwin
 
-package netx
+package transparent
 
 import "net"
 

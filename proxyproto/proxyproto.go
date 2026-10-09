@@ -1,113 +1,75 @@
-package netx
+// Package proxyproto builds and parses PROXY protocol v1 and v2 headers, as
+// specified by HAProxy, which carry the original client and destination
+// addresses of a proxied connection to the backend, and provides a Listener
+// that reports those addresses for the connections it accepts.
+package proxyproto
 
 import (
-	"encoding/binary"
 	"net"
 	"net/netip"
-	"strconv"
 )
 
-// ProxyProtocolVersion selects the Proxy Protocol header version.
-type ProxyProtocolVersion int
+// Version selects the PROXY protocol header version.
+type Version int
 
 const (
-	// ProxyProtocolNone sends no header.
-	ProxyProtocolNone ProxyProtocolVersion = iota
-	// ProxyProtocolV1 is the text header format.
-	ProxyProtocolV1
-	// ProxyProtocolV2 is the binary header format.
-	ProxyProtocolV2
+	// None sends no header.
+	None Version = iota
+	// V1 is the text header format.
+	V1
+	// V2 is the binary header format.
+	V2
 )
 
-// ProxyProtocolV1Header returns a Proxy Protocol v1 header for client and target addresses.
+// V1Header returns a PROXY protocol v1 header for client and target addresses.
 //
 // Both addresses must be *net.TCPAddr or both *net.UDPAddr. v1 has no UDP
 // token, so UDP pairs are emitted with the TCP4/TCP6 tokens (historical nps
 // behavior); use v2 to signal UDP. As in HAProxy, an IPv4 and an IPv6 address
 // are sent as TCP6 with the IPv4 side in its IPv4-mapped form (::ffff:a.b.c.d).
 // Anything else yields "PROXY UNKNOWN\r\n".
-func ProxyProtocolV1Header(clientAddr, targetAddr net.Addr) []byte {
-	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
-	if !ok {
-		return []byte("PROXY UNKNOWN\r\n")
-	}
-	header := make([]byte, 0, proxyProtocolV1HeaderLen(meta))
-	header = append(header, "PROXY "...)
-	header = append(header, meta.v1Protocol...)
-	header = append(header, ' ')
-	header = appendIPText(header, meta.srcIP)
-	header = append(header, ' ')
-	header = appendIPText(header, meta.dstIP)
-	header = append(header, ' ')
-	header = strconv.AppendUint(header, uint64(meta.srcPort), 10)
-	header = append(header, ' ')
-	header = strconv.AppendUint(header, uint64(meta.dstPort), 10)
-	header = append(header, '\r', '\n')
-	return header
+func V1Header(clientAddr, targetAddr net.Addr) []byte {
+	return appendV1(make([]byte, 0, maxV1Len), clientAddr, targetAddr)
 }
 
-// ProxyProtocolV2Header returns a Proxy Protocol v2 header for client and target addresses.
+// V2Header returns a PROXY protocol v2 header for client and target addresses.
 //
-// The address rules match ProxyProtocolV1Header, except that UDP pairs are
-// sent as DGRAM and mixed families as AF_INET6. Unsupported addresses yield a
-// LOCAL header.
-func ProxyProtocolV2Header(clientAddr, targetAddr net.Addr) []byte {
-	const sig = "\r\n\r\n\000\r\nQUIT\n"
-	meta, ok := buildProxyAddrMeta(clientAddr, targetAddr)
-	if !ok {
-		header := make([]byte, 16)
-		copy(header[:12], sig)
-		header[12] = 0x20
-		return header
-	}
-
-	header := make([]byte, 16+meta.addrBytes)
-	copy(header[:12], sig)
-	header[12] = 0x21
-	header[13] = meta.famProto
-	binary.BigEndian.PutUint16(header[14:16], meta.addrBytes)
-
-	if meta.addrBytes == 12 {
-		copy(header[16:20], meta.srcIP.To4())
-		copy(header[20:24], meta.dstIP.To4())
-		binary.BigEndian.PutUint16(header[24:26], meta.srcPort)
-		binary.BigEndian.PutUint16(header[26:28], meta.dstPort)
-	} else {
-		copy(header[16:32], meta.srcIP.To16())
-		copy(header[32:48], meta.dstIP.To16())
-		binary.BigEndian.PutUint16(header[48:50], meta.srcPort)
-		binary.BigEndian.PutUint16(header[50:52], meta.dstPort)
-	}
-	return header
+// The address rules match V1Header, except that UDP pairs are sent as DGRAM,
+// mixed families as AF_INET6, and *net.UnixAddr pairs as AF_UNIX. Unsupported
+// addresses yield a LOCAL header.
+func V2Header(clientAddr, targetAddr net.Addr) []byte {
+	h := Header{Version: V2, Source: clientAddr, Destination: targetAddr}
+	b, _ := appendV2(make([]byte, 0, v2HeadLen+2*unixPathLen), &h) // cannot fail without TLVs
+	return b
 }
 
-// ProxyProtocolHeader builds a Proxy Protocol header from a connection's remote
-// and local addresses, as ProxyProtocolHeaderFromAddrs does.
-func ProxyProtocolHeader(c net.Conn, version ProxyProtocolVersion) []byte {
-	if c == nil || version == ProxyProtocolNone {
+// HeaderFromConn builds a PROXY protocol header from a connection's remote
+// and local addresses, as HeaderFromAddrs does.
+func HeaderFromConn(c net.Conn, version Version) []byte {
+	if c == nil || version == None {
 		return nil
 	}
-	return ProxyProtocolHeaderFromAddrs(c.RemoteAddr(), c.LocalAddr(), version)
+	return HeaderFromAddrs(c.RemoteAddr(), c.LocalAddr(), version)
 }
 
-// ProxyProtocolHeaderFromAddrs builds a Proxy Protocol header from explicit addresses.
+// HeaderFromAddrs builds a PROXY protocol header from explicit addresses.
 //
 // A target that is nil, unspecified or not of the client's address type is sent
 // as the zero address of the client's family (0.0.0.0 or ::). Otherwise the
-// rules of ProxyProtocolV1Header and ProxyProtocolV2Header apply. It returns
-// nil for ProxyProtocolNone and for unknown versions.
-func ProxyProtocolHeaderFromAddrs(clientAddr, targetAddr net.Addr, version ProxyProtocolVersion) []byte {
-	if version == ProxyProtocolNone {
+// rules of V1Header and V2Header apply. It returns
+// nil for None and for unknown versions.
+func HeaderFromAddrs(clientAddr, targetAddr net.Addr, version Version) []byte {
+	if version == None {
 		return nil
 	}
 
 	targetAddr = normalizeTarget(clientAddr, targetAddr)
 
 	switch version {
-	case ProxyProtocolV2:
-		return ProxyProtocolV2Header(clientAddr, targetAddr)
-	case ProxyProtocolV1:
-		return ProxyProtocolV1Header(clientAddr, targetAddr)
+	case V2:
+		return V2Header(clientAddr, targetAddr)
+	case V1:
+		return V1Header(clientAddr, targetAddr)
 	default:
 		return nil
 	}
@@ -255,14 +217,6 @@ func validTCPPort(port int) bool {
 	return port >= 0 && port <= 65535
 }
 
-func proxyProtocolV1HeaderLen(meta proxyAddrMeta) int {
-	return len("PROXY ") + len(meta.v1Protocol) + 1 +
-		maxIPTextLen(meta.srcIP) + 1 +
-		maxIPTextLen(meta.dstIP) + 1 +
-		decimalLenUint16(meta.srcPort) + 1 +
-		decimalLenUint16(meta.dstPort) + len("\r\n")
-}
-
 // appendIPText formats ip in the family given by its length, so a 16-byte
 // IPv4-mapped address prints as ::ffff:a.b.c.d.
 func appendIPText(dst []byte, ip net.IP) []byte {
@@ -273,27 +227,5 @@ func appendIPText(dst []byte, ip net.IP) []byte {
 		return netip.AddrFrom16([16]byte(ip)).AppendTo(dst)
 	default:
 		return dst
-	}
-}
-
-func maxIPTextLen(ip net.IP) int {
-	if len(ip) == net.IPv4len {
-		return len("255.255.255.255")
-	}
-	return len("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
-}
-
-func decimalLenUint16(v uint16) int {
-	switch {
-	case v >= 10000:
-		return 5
-	case v >= 1000:
-		return 4
-	case v >= 100:
-		return 3
-	case v >= 10:
-		return 2
-	default:
-		return 1
 	}
 }

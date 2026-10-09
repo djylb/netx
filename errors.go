@@ -13,6 +13,40 @@ import (
 // the system language is, and then fall back to well-known English messages
 // for errors that only carry text.
 
+// IsTimeout reports whether err is a timeout. It matches ETIMEDOUT
+// (WSAETIMEDOUT on Windows) anywhere in the chain first, then the first
+// net.Error's Timeout method, and only then English timeout messages.
+func IsTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Checked first because Errno.Timeout is false for WSAETIMEDOUT on Windows.
+	if errorIsAny(err, timedOutErrnos) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	s := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	return strings.Contains(s, "timeout") ||
+		strings.Contains(s, "timedout") ||
+		strings.Contains(s, "didnotproperlyrespondafteraperiodoftime")
+}
+
+// IsClosed reports whether err comes from using a closed connection or
+// listener: net.ErrClosed, io.ErrClosedPipe, or the "use of closed network
+// connection" text that some wrappers pass on without the error value.
+func IsClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
 // IsConnReset reports whether err looks like a connection reset.
 func IsConnReset(err error) bool {
 	if err == nil {
@@ -141,7 +175,7 @@ func NetErrorKind(err error) string {
 		return "unexpected_eof"
 	case errors.Is(err, io.EOF):
 		return "eof"
-	case errors.Is(err, net.ErrClosed):
+	case IsClosed(err):
 		return "closed"
 	default:
 		return "other"

@@ -1,21 +1,37 @@
 package netx
 
 import (
-	"context"
-	"crypto/tls"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// TimeoutConn refreshes the deadline before each read or write.
-// Construct it with NewTimeoutConn; a zero idle timeout, including one left by
-// a struct literal, uses DefaultTimeout.
+// DefaultTimeout is used when a helper receives a non-positive timeout.
+const DefaultTimeout = 5 * time.Second
+
+func normalizeLinkTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return DefaultTimeout
+	}
+	return timeout
+}
+
+// TimeoutConn closes an idle connection: before each read or write it moves
+// the deadline of both directions to now plus the idle timeout. Construct it
+// with NewTimeoutConn; a zero idle timeout, including one left by a struct
+// literal, uses DefaultTimeout.
+//
+// To keep the per-call cost to an atomic load, the deadline is only moved once
+// it lags behind by more than a small slack (idle/16, at most one second), so
+// a connection may time out up to that slack early. SetDeadline,
+// SetReadDeadline and SetWriteDeadline pass through and stay in effect until
+// the next read or write moves the deadline again.
 type TimeoutConn struct {
 	net.Conn
 	idleTimeout time.Duration
-	mu          sync.Mutex
-	lastSet     time.Time
+	deadline    atomic.Int64 // unix nanoseconds last set on Conn, 0 to force an update
+	mu          sync.Mutex   // serializes deadline updates
 }
 
 // NewTimeoutConn wraps c and refreshes its deadline before each read or write.
@@ -44,19 +60,22 @@ func (c *TimeoutConn) Write(b []byte) (int, error) {
 }
 
 func (c *TimeoutConn) refreshDeadline() error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
+	idle := normalizeLinkTimeout(c.idleTimeout)
+	slack := int64(min(idle/16, time.Second))
+	if time.Now().UnixNano()+int64(idle)-c.deadline.Load() < slack {
+		return nil
 	}
-	deadline := time.Now().Add(normalizeLinkTimeout(c.idleTimeout))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.lastSet.IsZero() && !deadline.After(c.lastSet) {
-		deadline = c.lastSet.Add(time.Nanosecond)
+	// Recompute under the lock so a slower caller never moves the deadline back.
+	want := time.Now().UnixNano() + int64(idle)
+	if want-c.deadline.Load() < slack {
+		return nil
 	}
-	if err := c.Conn.SetDeadline(deadline); err != nil {
+	if err := c.Conn.SetDeadline(time.Unix(0, want)); err != nil {
 		return err
 	}
-	c.lastSet = deadline
+	c.deadline.Store(want)
 	return nil
 }
 
@@ -65,6 +84,16 @@ func (c *TimeoutConn) Close() error {
 		return nil
 	}
 	return c.Conn.Close()
+}
+
+// CloseWrite shuts down the writing side of the wrapped connection, so the
+// peer reads EOF while reads continue. It returns an error matching
+// errors.ErrUnsupported when the wrapped connection cannot do that.
+func (c *TimeoutConn) CloseWrite() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	return closeWrite(c.Conn)
 }
 
 func (c *TimeoutConn) LocalAddr() net.Addr {
@@ -85,6 +114,9 @@ func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetDeadline(t)
 }
 
@@ -92,6 +124,9 @@ func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetReadDeadline(t)
 }
 
@@ -99,6 +134,9 @@ func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetWriteDeadline(t)
 }
 
@@ -108,22 +146,4 @@ func (c *TimeoutConn) RawConn() net.Conn {
 		return nil
 	}
 	return rawConnOf(c.Conn)
-}
-
-// NewTimeoutTLSConn performs a TLS client handshake bounded by handshakeTimeout
-// and returns a connection with an idle timeout. On failure raw is closed and
-// the returned *TimeoutConn is nil; callers that return it as a net.Conn should
-// return an untyped nil on error.
-func NewTimeoutTLSConn(raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
-	return NewTimeoutTLSConnContext(context.Background(), raw, cfg, idle, handshakeTimeout)
-}
-
-// NewTimeoutTLSConnContext is like NewTimeoutTLSConn but also stops the
-// handshake when ctx is done. On failure the returned *TimeoutConn is nil.
-func NewTimeoutTLSConnContext(ctx context.Context, raw net.Conn, cfg *tls.Config, idle, handshakeTimeout time.Duration) (*TimeoutConn, error) {
-	tlsConn, err := NewTLSConnContext(ctx, raw, handshakeTimeout, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return NewTimeoutConn(tlsConn, idle), nil
 }

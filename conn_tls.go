@@ -3,148 +3,50 @@ package netx
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"time"
 )
 
-// TLSConn keeps access to both the TLS connection and its raw connection.
-type TLSConn struct {
-	*tls.Conn
-	rawConn net.Conn
-}
-
-// NewTLSConn performs a TLS client handshake bounded by timeout.
-// A non-positive timeout uses DefaultTimeout. On failure rawConn is closed and
-// the returned *TLSConn is nil; callers that return it as a net.Conn should
-// return an untyped nil on error.
-func NewTLSConn(rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
-	return NewTLSConnContext(context.Background(), rawConn, timeout, tlsConfig)
-}
-
-// NewTLSConnContext performs a TLS client handshake that stops when ctx is done
-// or timeout elapses. The timeout is applied both as a deadline on rawConn and
-// as a context deadline, so it also holds when rawConn ignores deadlines.
-// A non-positive timeout uses DefaultTimeout. On failure rawConn is closed and
-// the returned *TLSConn is nil.
-func NewTLSConnContext(ctx context.Context, rawConn net.Conn, timeout time.Duration, tlsConfig *tls.Config) (*TLSConn, error) {
-	if rawConn == nil {
+// TLSClient runs a TLS client handshake over raw and returns the connection
+// with no deadline set.
+//
+// The handshake stops when ctx is done or after timeout, DefaultTimeout if
+// non-positive. The timeout is applied both as a deadline on raw and as a
+// context deadline, so it also holds when raw ignores deadlines. On failure raw
+// is closed and the returned connection is nil. RawConnOf unwraps the result
+// through its NetConn method.
+func TLSClient(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration) (*tls.Conn, error) {
+	if raw == nil {
 		return nil, net.ErrClosed
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	return tlsHandshake(ctx, raw, cfg, timeout, tls.Client)
+}
+
+// TLSServer is TLSClient for the server side of the handshake.
+func TLSServer(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration) (*tls.Conn, error) {
+	if raw == nil {
+		return nil, net.ErrClosed
 	}
+	return tlsHandshake(ctx, raw, cfg, timeout, tls.Server)
+}
+
+func tlsHandshake(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration, newConn func(net.Conn, *tls.Config) *tls.Conn) (*tls.Conn, error) {
 	timeout = normalizeLinkTimeout(timeout)
-
-	err := rawConn.SetDeadline(time.Now().Add(timeout))
-	if err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("failed to set deadline for rawConn: %w", err)
+	if err := raw.SetDeadline(time.Now().Add(timeout)); err != nil {
+		_ = raw.Close()
+		return nil, err
 	}
-
-	tlsConn := tls.Client(rawConn, tlsConfig)
-
+	tc := newConn(raw, cfg)
 	hsCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
-		_ = tlsConn.Close()
-		return nil, fmt.Errorf("TLS handshake failed: %w", err)
+	err := tc.HandshakeContext(hsCtx)
+	if err == nil {
+		err = raw.SetDeadline(time.Time{})
 	}
-	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
-		_ = tlsConn.Close()
-		return nil, fmt.Errorf("failed to clear TLS deadline after handshake: %w", err)
+	if err != nil {
+		// Before a completed handshake this only closes raw.
+		_ = tc.Close()
+		return nil, err
 	}
-
-	return &TLSConn{
-		Conn:    tlsConn,
-		rawConn: rawConn,
-	}, nil
-}
-
-// RawConn returns the connection the TLS handshake ran over; see
-// RawConnProvider.
-func (c *TLSConn) RawConn() net.Conn {
-	if c == nil {
-		return nil
-	}
-	return c.rawConn
-}
-
-func (c *TLSConn) Close() error {
-	if c == nil {
-		return nil
-	}
-	if c.Conn != nil {
-		if err := c.Conn.Close(); err != nil {
-			return fmt.Errorf("failed to close tlsConn: %w", err)
-		}
-		return nil
-	}
-	if c.rawConn != nil {
-		if err := c.rawConn.Close(); err != nil {
-			return fmt.Errorf("failed to close rawConn: %w", err)
-		}
-	}
-	return nil
-}
-
-func (c *TLSConn) Read(b []byte) (n int, err error) {
-	if c == nil || c.Conn == nil {
-		return 0, net.ErrClosed
-	}
-	return c.Conn.Read(b)
-}
-
-func (c *TLSConn) Write(b []byte) (n int, err error) {
-	if c == nil || c.Conn == nil {
-		return 0, net.ErrClosed
-	}
-	return c.Conn.Write(b)
-}
-
-func (c *TLSConn) SetDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetDeadline(t)
-}
-
-func (c *TLSConn) SetReadDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetReadDeadline(t)
-}
-
-func (c *TLSConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
-	}
-	return c.Conn.SetWriteDeadline(t)
-}
-
-func (c *TLSConn) LocalAddr() net.Addr {
-	if c == nil {
-		return nil
-	}
-	if c.rawConn == nil {
-		if c.Conn == nil {
-			return nil
-		}
-		return c.Conn.LocalAddr()
-	}
-	return c.rawConn.LocalAddr()
-}
-
-func (c *TLSConn) RemoteAddr() net.Addr {
-	if c == nil {
-		return nil
-	}
-	if c.Conn != nil {
-		return c.Conn.RemoteAddr()
-	}
-	if c.rawConn == nil {
-		return nil
-	}
-	return c.rawConn.RemoteAddr()
+	return tc, nil
 }

@@ -195,6 +195,10 @@ func (c *singleConn) Close() error {
 	return err
 }
 
+func (c *singleConn) CloseWrite() error {
+	return closeWrite(c.Conn)
+}
+
 func (c *singleConn) RawConn() net.Conn {
 	return c.Conn
 }

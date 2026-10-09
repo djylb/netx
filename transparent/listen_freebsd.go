@@ -1,6 +1,6 @@
 //go:build freebsd
 
-package netx
+package transparent
 
 import (
 	"context"
@@ -14,12 +14,7 @@ const (
 	ipv6BindAny = 0x40
 )
 
-func listenTCPContext(ctx context.Context, address string, cfg listenOptions) (net.Listener, error) {
-	if !cfg.transparent {
-		var lc net.ListenConfig
-		return lc.Listen(ctx, "tcp", address)
-	}
-
+func listen(ctx context.Context, address string) (net.Listener, error) {
 	lc := net.ListenConfig{
 		Control: func(_, _ string, raw syscall.RawConn) error {
 			var sockErr error

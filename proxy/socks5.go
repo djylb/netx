@@ -4,26 +4,34 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/url"
 
 	"github.com/djylb/netx/socks5"
 )
 
-type socks5Dialer struct {
-	proxyAddr string
-	user      *url.Userinfo
-	forward   ContextDialer
+// SOCKS5Dialer dials through a SOCKS5 proxy with the CONNECT command. Host
+// names are sent to the proxy, which resolves them.
+type SOCKS5Dialer struct {
+	// ProxyAddr is the proxy's host:port.
+	ProxyAddr string
+	// Username and Password are offered with username/password
+	// authentication (RFC 1929) when Username is not empty; no
+	// authentication is offered as well.
+	Username string
+	Password string
+	// Forward dials the proxy; nil means a zero net.Dialer.
+	Forward ContextDialer
 }
 
-func newSOCKS5Dialer(u *url.URL, forward ContextDialer) *socks5Dialer {
-	return &socks5Dialer{
-		proxyAddr: proxyAddress(u, "1080"),
-		user:      u.User,
-		forward:   forward,
-	}
+// Dial is DialContext with a background context, matching the Dialer
+// interface of golang.org/x/net/proxy.
+func (d *SOCKS5Dialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
 }
 
-func (d *socks5Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+// DialContext connects to address through the proxy. ctx bounds the whole
+// dial, and the returned connection has no deadline set. A non-success reply
+// is returned as a *socks5.ReplyError.
+func (d *SOCKS5Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if err := checkNetwork(network); err != nil {
 		return nil, err
 	}
@@ -31,7 +39,7 @@ func (d *socks5Dialer) DialContext(ctx context.Context, network, address string)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: invalid target %q: %w", address, err)
 	}
-	c, err := d.forward.DialContext(ctx, "tcp", d.proxyAddr)
+	c, err := forwardOf(d.Forward).DialContext(ctx, "tcp", d.ProxyAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -49,9 +57,9 @@ func (d *socks5Dialer) DialContext(ctx context.Context, network, address string)
 	})
 }
 
-func (d *socks5Dialer) authenticate(c net.Conn) error {
+func (d *SOCKS5Dialer) authenticate(c net.Conn) error {
 	methods := []socks5.Method{socks5.MethodNoAuth}
-	if d.user != nil {
+	if d.Username != "" {
 		methods = append(methods, socks5.MethodUserPass)
 	}
 	if err := socks5.WriteMethods(c, methods...); err != nil {
@@ -64,9 +72,8 @@ func (d *socks5Dialer) authenticate(c net.Conn) error {
 	switch {
 	case method == socks5.MethodNoAuth:
 		return nil
-	case method == socks5.MethodUserPass && d.user != nil:
-		password, _ := d.user.Password()
-		if err := socks5.WriteUserPass(c, d.user.Username(), password); err != nil {
+	case method == socks5.MethodUserPass && d.Username != "":
+		if err := socks5.WriteUserPass(c, d.Username, d.Password); err != nil {
 			return err
 		}
 		return socks5.ReadUserPassStatus(c)

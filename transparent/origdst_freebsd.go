@@ -1,4 +1,4 @@
-package netx
+package transparent
 
 import (
 	"encoding/binary"
@@ -71,7 +71,7 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if err == nil {
 		return dst, nil
 	}
-	localDst, localErr := transparentDestinationFromLocalAddr(conn.LocalAddr())
+	localDst, localErr := destinationFromLocalAddr(conn.LocalAddr())
 	if localErr == nil {
 		return localDst, nil
 	}
