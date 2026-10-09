@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/proxyproto"
 )
 
@@ -43,4 +44,35 @@ func ExampleListener() {
 	_ = http.Serve(pl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintln(w, "client:", r.RemoteAddr) // from the header
 	}))
+}
+
+// Serve UDP behind a proxy that sends a PROXY protocol header in the first
+// datagram of each flow, as Minecraft Bedrock proxies do with version 1 TCP4
+// and TCP6 tokens.
+func ExampleListener_datagram() {
+	pc, err := net.ListenPacket("udp", ":19132")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	pl := &proxyproto.Listener{Listener: netx.NewPacketListener(pc), Datagram: true}
+	defer func() { _ = pl.Close() }()
+	for {
+		c, err := pl.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = c.Close() }()
+			buf := make([]byte, 1500)
+			for {
+				n, err := c.Read(buf) // one datagram, header removed
+				if err != nil {
+					return
+				}
+				// c.RemoteAddr() is the client's *net.UDPAddr from the header.
+				_, _ = c.Write(buf[:n])
+			}
+		}()
+	}
 }

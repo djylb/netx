@@ -1,12 +1,16 @@
-// Package transparent accepts TCP connections that a transparent proxy setup
-// redirects to a local listener, and recovers the destination they were
-// addressed to.
+// Package transparent accepts TCP connections and UDP datagrams that a
+// transparent proxy setup redirects to a local socket, and recovers the
+// destination they were addressed to.
 //
 //	Platform        Listen                                 OriginalDestination
 //	Linux, Android  IP_TRANSPARENT/IPV6_TRANSPARENT        SO_ORIGINAL_DST, else the local address
 //	FreeBSD         IP_BINDANY/IPV6_BINDANY                pf DIOCNATLOOK, else the local address
 //	macOS, iOS      plain listener (pf rdr)                pf DIOCNATLOOK (root only)
 //	others          ErrListenUnsupported                   ErrOriginalDestinationUnsupported
+//
+// For UDP, ListenPacket, ReadFromUDP and DialUDP implement Linux TPROXY:
+// datagrams carry their original destination, and replies are sent from it.
+// Elsewhere they return errors matching errors.ErrUnsupported.
 package transparent
 
 import (

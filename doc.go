@@ -9,11 +9,11 @@
 //     WrapConn and ObserveConn (traffic callbacks). The wrappers pass
 //     CloseWrite on, and RawConnOf unwraps them, and any connection with a
 //     NetConn method such as *tls.Conn, down to the innermost net.Conn.
-//   - TLSClient and TLSServer run a bounded handshake, and Relay copies
-//     between two connections in both directions, optionally passing
-//     half-closes on.
+//   - Relay copies between two connections in both directions, optionally
+//     passing half-closes on.
 //   - Listeners: ChanListener accepts connections that the program delivers or
-//     dials in memory, and NewSingleConnListener serves one connection.
+//     dials in memory, NewSingleConnListener serves one connection, and
+//     PacketListener splits a UDP socket into one connection per peer.
 //   - Error classification: IsTimeout, IsClosed, IsConnReset, IsConnRefused
 //     and the other Is* helpers, NetErrorKind and DescribeNetError. They match
 //     platform errnos, including Winsock codes on Windows, before English
@@ -21,8 +21,14 @@
 //
 // Helpers that take a timeout use DefaultTimeout for a non-positive value.
 //
-// Protocol and platform helpers live in subpackages: proxyproto builds, parses
-// and serves PROXY protocol headers, transparent listens for transparently
-// redirected connections, socks5 reads and writes SOCKS5 messages, and proxy
-// dials through HTTP CONNECT and SOCKS5 proxies.
+// Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
+// handshakes, proxyproto builds, parses and serves PROXY protocol headers,
+// transparent accepts transparently redirected TCP connections and UDP
+// datagrams, socks5 implements SOCKS5 and SOCKS4 with a client dialer and a
+// configurable server, and proxy dials through HTTP CONNECT, SOCKS5 and SOCKS4
+// proxies, also over TLS.
+//
+// Every package depends only on the standard library, and only tlsconn and
+// proxy import crypto/tls, which adds about 800 KB to a binary even when it is
+// not used.
 package netx

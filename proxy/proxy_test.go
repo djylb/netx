@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/socks5"
+	"github.com/djylb/netx/tlsconn"
 )
 
 // serveOnce accepts one connection on a loopback listener and runs handle.
@@ -243,17 +244,17 @@ func TestFromURLErrors(t *testing.T) {
 	if _, err := FromURL(nil, nil); err == nil {
 		t.Error("FromURL(nil) succeeded")
 	}
-	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks4://proxy:1080"} {
+	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks6://proxy", "https+tls://proxy", "ftp+tls://proxy"} {
 		u, _ := url.Parse(raw)
 		if _, err := FromURL(u, nil); err == nil {
 			t.Errorf("FromURL(%s) succeeded", raw)
 		}
 	}
 	d := mustDialer(t, "SOCKS5://proxy")
-	if sd, ok := d.(*SOCKS5Dialer); !ok || sd.ProxyAddr != "proxy:1080" || sd.Username != "" {
+	if sd, ok := d.(*socks5.Dialer); !ok || sd.ProxyAddr != "proxy:1080" || sd.Username != "" {
 		t.Errorf("SOCKS5 default address = %#v", d)
 	}
-	if sd := mustDialer(t, "socks5h://u:p@proxy:9").(*SOCKS5Dialer); sd.Username != "u" || sd.Password != "p" || sd.ProxyAddr != "proxy:9" {
+	if sd := mustDialer(t, "socks5h://u:p@proxy:9").(*socks5.Dialer); sd.Username != "u" || sd.Password != "p" || sd.ProxyAddr != "proxy:9" {
 		t.Errorf("socks5h credentials = %#v", sd)
 	}
 	if hd := mustDialer(t, "http://proxy").(*HTTPDialer); hd.ProxyAddr != "proxy:80" || hd.TLSConfig != nil || hd.Header != nil {
@@ -262,10 +263,10 @@ func TestFromURLErrors(t *testing.T) {
 	if hd := mustDialer(t, "https://[2001:db8::1]").(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" || hd.TLSConfig.ServerName != "2001:db8::1" {
 		t.Errorf("https defaults = %#v", hd)
 	}
-	if _, err := d.DialContext(context.Background(), "udp", "example.com:53"); !errors.Is(err, errNetwork) {
+	if _, err := d.DialContext(context.Background(), "udp", "example.com:53"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("udp dial error = %v", err)
 	}
-	if _, err := mustDialer(t, "http://proxy").DialContext(context.Background(), "unix", "/x"); !errors.Is(err, errNetwork) {
+	if _, err := mustDialer(t, "http://proxy").DialContext(context.Background(), "unix", "/x"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("unix dial error = %v", err)
 	}
 }
@@ -306,8 +307,8 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("no_proxy", "")
 	if d, err := FromEnvironment(nil); err != nil {
 		t.Fatal(err)
-	} else if _, ok := d.(*SOCKS5Dialer); !ok {
-		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *SOCKS5Dialer", d)
+	} else if _, ok := d.(*socks5.Dialer); !ok {
+		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5.Dialer", d)
 	}
 
 	t.Setenv("ALL_PROXY", "gopher://proxy")
@@ -436,4 +437,96 @@ func TestHTTPDialerConfig(t *testing.T) {
 			t.Errorf("header %q accepted: %v", h, err)
 		}
 	}
+}
+
+func TestFromURLSOCKSVariants(t *testing.T) {
+	d := mustDialer(t, "socks4://u:ignored@proxy").(*socks5.Dialer)
+	if !d.SOCKS4 || d.Resolver != net.DefaultResolver || d.Username != "u" || d.ProxyAddr != "proxy:1080" || d.Forward != nil {
+		t.Errorf("socks4 = %#v", d)
+	}
+	d = mustDialer(t, "socks4a://proxy:9").(*socks5.Dialer)
+	if !d.SOCKS4 || d.Resolver != nil || d.ProxyAddr != "proxy:9" {
+		t.Errorf("socks4a = %#v", d)
+	}
+
+	forward := &recordingDialer{}
+	u, _ := url.Parse("SOCKS5H+TLS://proxy")
+	dialer, err := FromURL(u, forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = dialer.(*socks5.Dialer)
+	td, ok := d.Forward.(*tlsconn.Dialer)
+	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.Config.ServerName != "proxy" || td.Forward != forward {
+		t.Errorf("socks5h+tls = %#v, forward %#v", d, d.Forward)
+	}
+	if d := mustDialer(t, "socks4a+tls://proxy").(*socks5.Dialer); !d.SOCKS4 || d.Resolver != nil {
+		t.Errorf("socks4a+tls = %#v", d)
+	}
+}
+
+// TestSOCKSOverTLS dials through SOCKS5 and SOCKS4a servers behind TLS.
+func TestSOCKSOverTLS(t *testing.T) {
+	// httptest supplies a certificate for 127.0.0.1 and a client that trusts it.
+	cert := httptest.NewUnstartedServer(nil)
+	cert.StartTLS()
+	roots := cert.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	serverCfg := &tls.Config{Certificates: cert.TLS.Certificates}
+	cert.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socks5.Server{SOCKS4: true}
+	go func() { _ = s.Serve(tls.NewListener(ln, serverCfg)) }()
+	t.Cleanup(func() { _ = s.Close() })
+	target := serveEcho(t)
+
+	for _, scheme := range []string{"socks5+tls", "socks5h+tls", "socks4a+tls"} {
+		d := mustDialer(t, scheme+"://"+ln.Addr().String())
+		_, err := d.DialContext(context.Background(), "tcp", target)
+		var certErr *tls.CertificateVerificationError
+		if !errors.As(err, &certErr) {
+			t.Fatalf("%s with system roots error = %v, want a certificate error", scheme, err)
+		}
+
+		d.(*socks5.Dialer).Forward.(*tlsconn.Dialer).Config.RootCAs = roots
+		conn, err := d.DialContext(context.Background(), "tcp", target)
+		if err != nil {
+			t.Fatalf("%s DialContext() error = %v", scheme, err)
+		}
+		if _, ok := conn.(*tls.Conn); !ok {
+			t.Fatalf("%s connection = %T, want *tls.Conn", scheme, conn)
+		}
+		_, _ = io.WriteString(conn, "ping")
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+			t.Fatalf("%s echo = %q, %v", scheme, buf, err)
+		}
+		_ = conn.Close()
+	}
+}
+
+// serveEcho starts a TCP echo server.
+func serveEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				echoAfter(c, "")
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }

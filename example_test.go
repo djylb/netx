@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/djylb/netx"
 )
@@ -101,4 +102,30 @@ func ExampleNewPrefixConn() {
 	all, _ := io.ReadAll(c)
 	fmt.Printf("%q\n", all)
 	// Output: "GET / HTTP/1.1\r\n"
+}
+
+// Serve one goroutine per UDP peer, like a TCP server.
+func ExamplePacketListener() {
+	pc, err := net.ListenPacket("udp", ":5353")
+	if err != nil {
+		log.Fatal(err)
+	}
+	l := netx.NewPacketListener(pc, netx.WithIdleTimeout(time.Minute))
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = c.Close() }()
+			buf := make([]byte, 1500)
+			for {
+				n, err := c.Read(buf) // one datagram from this peer
+				if err != nil {
+					return
+				}
+				_, _ = c.Write(buf[:n]) // echo it back
+			}
+		}()
+	}
 }

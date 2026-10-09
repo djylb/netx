@@ -38,7 +38,8 @@ func (d *HTTPDialer) Dial(network, address string) (net.Conn, error) {
 
 // DialContext connects to address through the proxy. ctx bounds the whole
 // dial, and the returned connection has no deadline set. Bytes the proxy sends
-// right after its reply are kept.
+// right after its reply are kept. Networks other than tcp, tcp4 and tcp6 give
+// an error matching errors.ErrUnsupported.
 func (d *HTTPDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if err := checkNetwork(network); err != nil {
 		return nil, err

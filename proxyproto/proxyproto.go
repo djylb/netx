@@ -1,7 +1,17 @@
 // Package proxyproto builds and parses PROXY protocol v1 and v2 headers, as
 // specified by HAProxy, which carry the original client and destination
 // addresses of a proxied connection to the backend, and provides a Listener
-// that reports those addresses for the connections it accepts.
+// that reports those addresses for the connections it accepts. The Listener
+// serves streams and UDP flows whose first datagram carries the header.
+//
+// Parsing is lenient towards non-standard senders wherever that cannot change
+// who a connection is attributed to: version 1 lines may end in a bare LF,
+// use runs of spaces, any letter case, UDP4 and UDP6 tokens, address families
+// that differ from the token, and padded ports; version 2 headers may carry
+// any version nibble. Unknown commands, protocols and families, short address
+// blocks and truncated TLVs make the connection's own addresses, or the whole
+// TLVs, apply instead of failing. The package depends only on the standard
+// library.
 package proxyproto
 
 import (

@@ -215,20 +215,25 @@ func TestMessageErrors(t *testing.T) {
 	if _, err := ReadMethod(read(4, 0)); !errors.Is(err, ErrVersion) {
 		t.Errorf("ReadMethod(v4) error = %v", err)
 	}
-	if _, _, err := ReadUserPass(read(5, 0, 0)); !errors.Is(err, ErrVersion) {
-		t.Errorf("ReadUserPass(v5) error = %v", err)
+	// Lenient for non-standard peers: sub-negotiation versions and the
+	// reserved byte are not checked.
+	if u, p, err := ReadUserPass(read(5, 1, 'u', 1, 'p')); err != nil || u != "u" || p != "p" {
+		t.Errorf("ReadUserPass(v5) = %q, %q, %v", u, p, err)
 	}
 	if _, _, err := ReadUserPass(read(1, 3, 'a')); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("ReadUserPass(short) error = %v", err)
 	}
-	if err := ReadUserPassStatus(read(5, 0)); !errors.Is(err, ErrVersion) {
+	if err := ReadUserPassStatus(read(5, 0)); err != nil {
 		t.Errorf("ReadUserPassStatus(v5) error = %v", err)
+	}
+	if err := ReadUserPassStatus(read(5, 0xff)); !errors.Is(err, ErrAuthFailed) {
+		t.Errorf("ReadUserPassStatus(failure) error = %v", err)
 	}
 	if _, _, err := ReadRequest(read(4, 1, 0, 1, 0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrVersion) {
 		t.Errorf("ReadRequest(v4) error = %v", err)
 	}
-	if _, _, err := ReadRequest(read(5, 1, 1, 1, 0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrMalformed) {
-		t.Errorf("ReadRequest(rsv) error = %v", err)
+	if cmd, _, err := ReadRequest(read(5, 1, 1, 1, 0, 0, 0, 0, 0, 0)); err != nil || cmd != CmdConnect {
+		t.Errorf("ReadRequest(rsv) = %v, %v", cmd, err)
 	}
 	if _, _, err := ReadRequest(read(5, 1, 0, 9)); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("ReadRequest(short) error = %v", err)
@@ -314,12 +319,17 @@ func TestStrings(t *testing.T) {
 		{Method(9).String(), "method 9"},
 		{ReplyTTLExpired.String(), "TTL expired"},
 		{Reply(42).String(), "reply 42"},
+		{Reply4Rejected.String(), "request rejected or failed"},
 	} {
 		if tt.got != tt.want {
 			t.Errorf("String() = %q, want %q", tt.got, tt.want)
 		}
 	}
+	named := []Reply{Reply4Granted, Reply4Rejected, Reply4IdentdUnreached, Reply4IdentdMismatch}
 	for r := ReplySucceeded; r <= ReplyAddrTypeNotSupported; r++ {
+		named = append(named, r)
+	}
+	for _, r := range named {
 		if strings.HasPrefix(r.String(), "reply ") {
 			t.Errorf("Reply(%d) has no name", r)
 		}

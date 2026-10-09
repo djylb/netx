@@ -35,3 +35,25 @@ func ExampleListen() {
 		}()
 	}
 }
+
+// Answer UDP datagrams redirected by a TPROXY rule from the address they were
+// sent to.
+func ExampleListenPacket() {
+	ln, err := transparent.ListenPacket(context.Background(), "0.0.0.0:5353")
+	if err != nil {
+		log.Fatal(err)
+	}
+	buf := make([]byte, 65535)
+	for {
+		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		if err != nil {
+			log.Fatal(err)
+		}
+		reply, err := transparent.DialUDP(context.Background(), dst, src)
+		if err != nil {
+			continue
+		}
+		_, _ = reply.Write(buf[:n])
+		_ = reply.Close()
+	}
+}

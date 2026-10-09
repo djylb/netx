@@ -1,11 +1,19 @@
-package netx
+package tlsconn
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,12 +36,12 @@ func TestTLSClientClearsHandshakeDeadline(t *testing.T) {
 		errCh <- err
 	}()
 
-	tlsClient, err := TLSClient(context.Background(), clientConn, &tls.Config{
+	tlsClient, err := Client(context.Background(), clientConn, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
 	}, 300*time.Millisecond)
 	if err != nil {
-		t.Fatalf("TLSClient() error = %v", err)
+		t.Fatalf("Client() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
 	// Close the peer first so close_notify fails at once instead of
@@ -70,12 +78,12 @@ func TestTLSClientNormalizesNonPositiveTimeout(t *testing.T) {
 		errCh <- err
 	}()
 
-	tlsClient, err := TLSClient(context.Background(), clientConn, &tls.Config{
+	tlsClient, err := Client(context.Background(), clientConn, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
 	}, 0)
 	if err != nil {
-		t.Fatalf("TLSClient() error = %v", err)
+		t.Fatalf("Client() error = %v", err)
 	}
 	defer func() { _ = tlsClient.Close() }()
 	// Close the peer first so close_notify fails at once instead of
@@ -113,22 +121,22 @@ func TestTLSClientBoundsHandshakeWhenDeadlinesIgnored(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, serverConn) }()
 
 	started := time.Now()
-	tlsClient, err := TLSClient(context.Background(), &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
+	tlsClient, err := Client(context.Background(), &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
 		InsecureSkipVerify: true,
 	}, 200*time.Millisecond)
 	elapsed := time.Since(started)
 	if err == nil {
 		_ = tlsClient.Close()
-		t.Fatal("TLSClient() error = nil, want handshake timeout")
+		t.Fatal("Client() error = nil, want handshake timeout")
 	}
 	if tlsClient != nil {
-		t.Fatalf("TLSClient() conn = %v, want nil on error", tlsClient)
+		t.Fatalf("Client() conn = %v, want nil on error", tlsClient)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("TLSClient() error = %v, want %v", err, context.DeadlineExceeded)
+		t.Fatalf("Client() error = %v, want %v", err, context.DeadlineExceeded)
 	}
 	if elapsed > 2*time.Second {
-		t.Fatalf("TLSClient() took %v, want about the 200ms timeout", elapsed)
+		t.Fatalf("Client() took %v, want about the 200ms timeout", elapsed)
 	}
 }
 
@@ -140,11 +148,11 @@ func TestTLSClientHonorsCanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := TLSClient(ctx, &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
+	_, err := Client(ctx, &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
 		InsecureSkipVerify: true,
 	}, time.Minute)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("TLSClient() error = %v, want %v", err, context.Canceled)
+		t.Fatalf("Client() error = %v, want %v", err, context.Canceled)
 	}
 }
 
@@ -155,7 +163,7 @@ func TestTLSServerAndClient(t *testing.T) {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		tc, err := TLSServer(context.Background(), serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}}, time.Second)
+		tc, err := Server(context.Background(), serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}}, time.Second)
 		if err != nil {
 			serverErr <- err
 			return
@@ -169,23 +177,21 @@ func TestTLSServerAndClient(t *testing.T) {
 		serverErr <- err
 	}()
 
-	tc, err := TLSClient(context.Background(), spy, &tls.Config{InsecureSkipVerify: true}, time.Second)
+	tc, err := Client(context.Background(), spy, &tls.Config{InsecureSkipVerify: true}, time.Second)
 	if err != nil {
-		t.Fatalf("TLSClient() error = %v", err)
+		t.Fatalf("Client() error = %v", err)
 	}
 	// Close the pipe itself so no close_notify waits on an unread peer.
 	defer func() { _ = clientRaw.Close() }()
 	defer func() { _ = serverRaw.Close() }()
-	if RawConnOf(tc) != net.Conn(spy) {
-		t.Fatalf("RawConnOf(tls) = %v, want the raw conn", RawConnOf(tc))
+	if tc.NetConn() != net.Conn(spy) {
+		t.Fatalf("NetConn() = %v, want the raw conn", tc.NetConn())
 	}
-	// TimeoutConn composes with the handshake helpers.
-	conn := NewTimeoutConn(tc, time.Second)
-	if _, err := conn.Write([]byte("ping")); err != nil {
+	if _, err := tc.Write([]byte("ping")); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 	buf := make([]byte, 4)
-	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+	if _, err := io.ReadFull(tc, buf); err != nil || string(buf) != "ping" {
 		t.Fatalf("echo = %q, %v", buf, err)
 	}
 	if err := <-serverErr; err != nil {
@@ -205,16 +211,87 @@ func TestTLSClientFailureClosesRaw(t *testing.T) {
 	}()
 
 	// The self-signed certificate does not verify.
-	conn, err := TLSClient(context.Background(), spy, &tls.Config{ServerName: "example.com"}, 2*time.Second)
+	conn, err := Client(context.Background(), spy, &tls.Config{ServerName: "example.com"}, 2*time.Second)
 	if err == nil || conn != nil {
-		t.Fatalf("TLSClient() = %v, %v; want nil and a verification error", conn, err)
+		t.Fatalf("Client() = %v, %v; want nil and a verification error", conn, err)
 	}
 	if !spy.isClosed() {
 		t.Fatal("raw conn was not closed after the failed handshake")
 	}
 	<-done
 
-	if conn, err := TLSServer(context.Background(), nil, nil, time.Second); !errors.Is(err, net.ErrClosed) || conn != nil {
-		t.Fatalf("TLSServer(nil) = %v, %v; want nil, %v", conn, err, net.ErrClosed)
+	if conn, err := Server(context.Background(), nil, nil, time.Second); !errors.Is(err, net.ErrClosed) || conn != nil {
+		t.Fatalf("Server(nil) = %v, %v; want nil, %v", conn, err, net.ErrClosed)
 	}
+}
+
+var (
+	testCertOnce sync.Once
+	testCert     tls.Certificate
+)
+
+type closeSpyConn struct {
+	net.Conn
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *closeSpyConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *closeSpyConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func generateSelfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key failed: %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+		},
+		DNSNames: []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert failed: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key failed: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("load key pair failed: %v", err)
+	}
+	return cert
+}
+
+func testSelfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	testCertOnce.Do(func() {
+		testCert = generateSelfSignedCert(t)
+	})
+	return testCert
 }

@@ -14,6 +14,9 @@ const (
 	v2HeadLen   = 16
 	// maxV1Len is the longest version 1 header, CRLF included.
 	maxV1Len = 107
+	// maxV1Line is the longest version 1 header the parser accepts, leaving
+	// room for the padding of non-standard senders.
+	maxV1Line = 256
 	// unixPathLen is the size of each AF_UNIX address in a version 2 header.
 	unixPathLen = 108
 )
@@ -23,7 +26,8 @@ var (
 	// with a PROXY protocol header.
 	ErrNoHeader = errors.New("proxyproto: no PROXY protocol header")
 	// ErrMalformed reports a header that starts with a PROXY protocol
-	// signature but violates the format.
+	// signature but cannot be parsed even leniently: a version 1 TCP or UDP
+	// line whose addresses do not parse, or one longer than 256 bytes.
 	ErrMalformed = errors.New("proxyproto: malformed PROXY protocol header")
 )
 
@@ -74,11 +78,13 @@ type Header struct {
 	Version Version
 	// Local marks a version 2 LOCAL command, which a proxy sends for its own
 	// connections such as health checks, and a version 1 UNKNOWN header.
+	// Unknown version 2 commands and version 1 protocols are parsed as Local.
 	// The connection's own addresses apply.
 	Local bool
 	// Source and Destination are the client and server addresses of the
 	// proxied connection: *net.TCPAddr, *net.UDPAddr or *net.UnixAddr. They
-	// are nil for a Local header and for unspecified families.
+	// are nil for a Local header and for unspecified or unknown families, in
+	// which case the connection's own addresses apply.
 	Source      net.Addr
 	Destination net.Addr
 	// TLVs holds the version 2 type-length-value fields in header order.
@@ -93,6 +99,21 @@ func (h *Header) TLV(t TLVType) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// UDPAddrs returns Source and Destination with *net.TCPAddr converted to
+// *net.UDPAddr, for a header sent ahead of UDP traffic. Version 1 has no UDP
+// token, so UDP senders use TCP4 and TCP6, and some use a version 2 STREAM
+// transport. Other addresses are returned unchanged.
+func (h *Header) UDPAddrs() (src, dst net.Addr) {
+	return udpAddr(h.Source), udpAddr(h.Destination)
+}
+
+func udpAddr(a net.Addr) net.Addr {
+	if t, ok := a.(*net.TCPAddr); ok && t != nil {
+		return &net.UDPAddr{IP: t.IP, Port: t.Port, Zone: t.Zone}
+	}
+	return a
 }
 
 // AppendBinary appends the encoded header to b.

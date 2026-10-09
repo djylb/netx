@@ -1,20 +1,30 @@
-// Package socks5 reads and writes SOCKS version 5 messages (RFC 1928) and
-// username/password authentication (RFC 1929), for both clients and servers.
+// Package socks5 implements SOCKS version 5 (RFC 1928) with
+// username/password authentication (RFC 1929): a message codec for clients
+// and servers, and a configurable Server.
 //
-// It does not dial or listen. Each function reads one message from an
-// io.Reader or writes one message to an io.Writer in a single Write call, so
-// it works over any connection and leaves timeouts and policy to the caller.
-//
-// A server handshake reads the client's methods, selects one, optionally
-// authenticates, then reads the request and writes a reply:
+// The codec functions read one message from an io.Reader or write one message
+// to an io.Writer in a single Write call, so they work over any connection and
+// leave timeouts and policy to the caller. A server handshake reads the
+// client's methods, selects one, optionally authenticates, then reads the
+// request and writes a reply:
 //
 //	methods, err := socks5.ReadMethods(conn)        // then socks5.WriteMethod
 //	user, pass, err := socks5.ReadUserPass(conn)    // then socks5.WriteUserPassStatus
 //	cmd, dst, err := socks5.ReadRequest(conn)       // then socks5.WriteReply
 //
 // A client mirrors it with WriteMethods, ReadMethod, WriteUserPass,
-// ReadUserPassStatus, WriteRequest and ReadReply. ParseDatagram and
-// AppendDatagram handle the header of UDP ASSOCIATE datagrams.
+// ReadUserPassStatus, WriteRequest and ReadReply. ReadRequest4,
+// WriteRequest4, WriteReply4 and ReadReply4 handle SOCKS4 and SOCKS4a. ParseDatagram and
+// AppendDatagram handle the header of UDP ASSOCIATE datagrams. Reserved
+// fields and the username/password version byte are not checked on receipt,
+// for compatibility with non-standard peers.
+//
+// Dialer dials TCP connections through a SOCKS5, SOCKS4 or SOCKS4a proxy.
+// Server serves CONNECT, UDP ASSOCIATE and, optionally, SOCKS4 and SOCKS4a
+// clients. Both run over any net.Conn, so SOCKS over TLS only needs a TLS
+// listener for the server, or a TLS dialer as the Dialer's Forward. Authentication, access control, dialing, relaying, the outbound
+// side of UDP associations and the advertised addresses are all replaceable,
+// and UDP associations can share one fixed port or get a socket each.
 package socks5
 
 import (
@@ -25,7 +35,7 @@ import (
 // Version is the SOCKS protocol version byte.
 const Version = 5
 
-const userPassVersion = 1
+const userPassVersion = 1 // sent in username/password messages; not checked on receipt
 
 // Command is the command of a client request.
 type Command byte
@@ -112,13 +122,21 @@ func (r Reply) String() string {
 		return "command not supported"
 	case ReplyAddrTypeNotSupported:
 		return "address type not supported"
+	case Reply4Granted:
+		return "request granted"
+	case Reply4Rejected:
+		return "request rejected or failed"
+	case Reply4IdentdUnreached:
+		return "identd unreachable"
+	case Reply4IdentdMismatch:
+		return "identd user ID mismatch"
 	default:
 		return "reply " + strconv.Itoa(int(r))
 	}
 }
 
-// ReplyError is returned by ReadReply when the server reply is not
-// ReplySucceeded.
+// ReplyError is returned by ReadReply and ReadReply4 when the server reply is
+// not a success. Reply holds the code as sent, a SOCKS4 one for ReadReply4.
 type ReplyError struct {
 	Reply Reply
 }
@@ -128,8 +146,7 @@ func (e *ReplyError) Error() string {
 }
 
 var (
-	// ErrVersion reports a message whose version byte is not 5, or a
-	// username/password message whose version byte is not 1.
+	// ErrVersion reports a message whose version byte is not 5.
 	ErrVersion = errors.New("socks5: unsupported version")
 	// ErrMalformed reports a message that violates the protocol.
 	ErrMalformed = errors.New("socks5: malformed message")

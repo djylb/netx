@@ -1,0 +1,347 @@
+package netx
+
+import (
+	"errors"
+	"io"
+	"net"
+	"os"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func newUDPListener(t *testing.T, opts ...PacketListenerOption) *PacketListener {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewPacketListener(pc, opts...)
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
+func dialUDP(t *testing.T, l *PacketListener) *net.UDPConn {
+	t.Helper()
+	c, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestPacketListenerSplitsPeers(t *testing.T) {
+	l := newUDPListener(t)
+	a, b := dialUDP(t, l), dialUDP(t, l)
+
+	_, _ = a.Write([]byte("from a"))
+	ca, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ca.Close() }()
+	if ca.RemoteAddr().String() != a.LocalAddr().String() || ca.LocalAddr().String() != l.Addr().String() {
+		t.Fatalf("addresses = %v -> %v", ca.RemoteAddr(), ca.LocalAddr())
+	}
+	_, _ = b.Write([]byte("from b"))
+	cb, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cb.Close() }()
+	_, _ = a.Write([]byte("again a"))
+
+	buf := make([]byte, 64)
+	for _, want := range []struct {
+		c   net.Conn
+		msg string
+	}{{ca, "from a"}, {cb, "from b"}, {ca, "again a"}} {
+		_ = want.c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := want.c.Read(buf)
+		if err != nil || string(buf[:n]) != want.msg {
+			t.Fatalf("Read() = %q, %v; want %q", buf[:n], err, want.msg)
+		}
+	}
+
+	// Writes go to the peer, and a short buffer truncates like UDP.
+	if _, err := cb.Write([]byte("reply")); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := b.Read(buf); err != nil || string(buf[:n]) != "reply" {
+		t.Fatalf("peer Read() = %q, %v", buf[:n], err)
+	}
+	_, _ = a.Write([]byte("truncated"))
+	_ = ca.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := ca.Read(buf[:4]); err != nil || string(buf[:n]) != "trun" {
+		t.Fatalf("short Read() = %q, %v", buf[:n], err)
+	}
+}
+
+func TestPacketListenerReopensClosedPeer(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("1"))
+	c1, _ := l.Accept()
+	_ = c1.Close()
+	if _, err := c1.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read() after Close error = %v", err)
+	}
+	if _, err := c1.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write() after Close error = %v", err)
+	}
+	_, _ = a.Write([]byte("2"))
+	c2, err := l.Accept()
+	if err != nil || c2 == c1 {
+		t.Fatalf("Accept() = %v, %v; want a new connection", c2, err)
+	}
+	buf := make([]byte, 4)
+	_ = c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := c2.Read(buf); err != nil || string(buf[:n]) != "2" {
+		t.Fatalf("Read() = %q, %v", buf[:n], err)
+	}
+}
+
+func TestPacketListenerFilterAndBacklog(t *testing.T) {
+	var mu sync.Mutex
+	allowed := map[string]bool{}
+	l := newUDPListener(t, WithAcceptBacklog(1), WithAcceptFilter(func(peer net.Addr) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return allowed[peer.String()]
+	}))
+	a, b, c := dialUDP(t, l), dialUDP(t, l), dialUDP(t, l)
+	mu.Lock()
+	allowed[a.LocalAddr().String()] = true
+	allowed[b.LocalAddr().String()] = true
+	mu.Unlock()
+
+	_, _ = c.Write([]byte("filtered"))
+	_, _ = a.Write([]byte("a"))
+	time.Sleep(50 * time.Millisecond)
+	_, _ = b.Write([]byte("b")) // backlog of one is taken by a
+	time.Sleep(50 * time.Millisecond)
+	first, _ := l.Accept()
+	if first.RemoteAddr().String() != a.LocalAddr().String() {
+		t.Fatalf("first peer = %v, want %v", first.RemoteAddr(), a.LocalAddr())
+	}
+	done := make(chan net.Conn, 1)
+	go func() {
+		c, _ := l.Accept()
+		done <- c
+	}()
+	select {
+	case got := <-done:
+		t.Fatalf("Accept() returned %v for a dropped or filtered peer", got.RemoteAddr())
+	case <-time.After(100 * time.Millisecond):
+	}
+	_, _ = b.Write([]byte("b again"))
+	select {
+	case got := <-done:
+		if got.RemoteAddr().String() != b.LocalAddr().String() {
+			t.Fatalf("second peer = %v, want %v", got.RemoteAddr(), b.LocalAddr())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer b was not accepted once the backlog had room")
+	}
+}
+
+func TestPacketListenerQueueDropsOverflow(t *testing.T) {
+	l := newUDPListener(t, WithPacketQueue(2))
+	a := dialUDP(t, l)
+	for _, m := range []string{"1", "2", "3", "4"} {
+		_, _ = a.Write([]byte(m))
+	}
+	c, _ := l.Accept()
+	time.Sleep(50 * time.Millisecond)
+	buf := make([]byte, 4)
+	var got []string
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, err := c.Read(buf)
+		if err != nil {
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("Read() error = %v", err)
+			}
+			break
+		}
+		got = append(got, string(buf[:n]))
+	}
+	if len(got) != 2 || got[0] != "1" || got[1] != "2" {
+		t.Fatalf("datagrams = %v, want the first two", got)
+	}
+}
+
+func TestPacketListenerIdleTimeout(t *testing.T) {
+	l := newUDPListener(t, WithIdleTimeout(80*time.Millisecond))
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c, _ := l.Accept()
+	_, _ = c.Read(make([]byte, 1))
+	start := time.Now()
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() error = %v, want EOF after the idle timeout", err)
+	}
+	if d := time.Since(start); d < 40*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("idle close after %v", d)
+	}
+}
+
+func TestPacketListenerDeadlinesAndClose(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c, _ := l.Accept()
+	_, _ = c.Read(make([]byte, 1))
+
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) || !IsTimeout(err) {
+		t.Fatalf("Read() error = %v, want a timeout", err)
+	}
+	_ = c.SetReadDeadline(time.Time{})
+	_ = c.SetWriteDeadline(time.Now().Add(-time.Second))
+	if _, err := c.Write([]byte("x")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Write() past deadline error = %v", err)
+	}
+	_ = c.SetDeadline(time.Time{})
+	if _, err := c.Write([]byte("x")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := c.Read(make([]byte, 1))
+		blocked <- err
+	}()
+	accepting := make(chan error, 1)
+	go func() {
+		_, err := l.Accept()
+		accepting <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := <-blocked; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read() after listener Close error = %v", err)
+	}
+	if err := <-accepting; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept() after Close error = %v", err)
+	}
+	_ = l.Close()
+}
+
+// The listener also works on a PacketConn that is not a *net.UDPConn.
+func TestPacketListenerGenericPacketConn(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewPacketListener(struct{ net.PacketConn }{pc})
+	defer func() { _ = l.Close() }()
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("hi"))
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 8)
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "hi" {
+		t.Fatalf("Read() = %q, %v", buf[:n], err)
+	}
+	if _, err := c.Write([]byte("yo")); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := a.Read(buf); err != nil || string(buf[:n]) != "yo" {
+		t.Fatalf("peer Read() = %q, %v", buf[:n], err)
+	}
+}
+
+func TestPacketListenerMaxDatagram(t *testing.T) {
+	l := newUDPListener(t, WithMaxDatagram(4))
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("truncated"))
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "trun" {
+		t.Fatalf("Read() = %q, %v; want the first 4 bytes", buf[:n], err)
+	}
+}
+
+// failingPacketConn returns err from every read and counts them.
+type failingPacketConn struct {
+	net.PacketConn
+	err   error
+	reads atomic.Int64
+}
+
+func (f *failingPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	f.reads.Add(1)
+	return 0, nil, f.err
+}
+
+func TestPacketListenerReadErrors(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+
+	// io.EOF means the packet connection is exhausted: the listener closes.
+	l := NewPacketListener(&failingPacketConn{PacketConn: pc, err: io.EOF})
+	accepted := make(chan error, 1)
+	go func() {
+		_, err := l.Accept()
+		accepted <- err
+	}()
+	select {
+	case err := <-accepted:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept() error = %v, want %v", err, net.ErrClosed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener still open after io.EOF")
+	}
+
+	// A persistent error is retried with a growing delay, not in a busy loop.
+	failing := &failingPacketConn{PacketConn: pc, err: errors.New("broken tunnel")}
+	l = NewPacketListener(failing)
+	time.Sleep(200 * time.Millisecond)
+	_ = l.Close()
+	if n := failing.reads.Load(); n > 20 {
+		t.Fatalf("%d reads in 200ms, want a backoff", n)
+	}
+}
+
+func TestPacketListenerClearsExpiredReadDeadline(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pc.SetReadDeadline(time.Now().Add(-time.Second))
+	l := NewPacketListener(pc)
+	defer func() { _ = l.Close() }()
+	a := dialUDP(t, l)
+	if _, err := a.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := l.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	select {
+	case c := <-accepted:
+		_ = c.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("no connection: the expired read deadline was kept")
+	}
+}

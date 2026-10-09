@@ -6,13 +6,19 @@ Requires Go 1.25. Every package builds on all major Go ports, including
 Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
 return an error matching `errors.ErrUnsupported` where they are not available.
 
-| Package                             | Contents                                                                |
-|-------------------------------------|-------------------------------------------------------------------------|
-| `github.com/djylb/netx`             | connection wrappers, `Relay`, in-memory listeners, error classifiers    |
-| `github.com/djylb/netx/proxyproto`  | PROXY protocol v1 and v2 headers                                        |
-| `github.com/djylb/netx/transparent` | transparent-proxy listeners and original destinations                   |
-| `github.com/djylb/netx/socks5`      | SOCKS5 and username/password messages for clients and servers           |
-| `github.com/djylb/netx/proxy`       | dialing through HTTP CONNECT and SOCKS5 proxies, `ALL_PROXY`/`NO_PROXY` |
+| Package                             | Contents                                                                     |
+|-------------------------------------|------------------------------------------------------------------------------|
+| `github.com/djylb/netx`             | connection wrappers, `Relay`, in-memory and UDP listeners, error classifiers |
+| `github.com/djylb/netx/tlsconn`     | bounded TLS handshakes, and a TLS dialer over any dialer                     |
+| `github.com/djylb/netx/proxyproto`  | PROXY protocol v1 and v2: build, parse, header-reading listener              |
+| `github.com/djylb/netx/transparent` | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations   |
+| `github.com/djylb/netx/socks5`      | SOCKS5 and SOCKS4 codec, client dialer and a configurable server             |
+| `github.com/djylb/netx/proxy`       | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`   |
+
+Each package depends only on the standard library and links only what it uses.
+`crypto/tls` adds about 800 KB to a binary as soon as it is imported, so only
+`tlsconn` and `proxy` (for `https` proxies) import it; the root package,
+`proxyproto`, `transparent` and `socks5` each add tens of kilobytes.
 
 ## Install
 
@@ -33,6 +39,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/tlsconn"
 )
 
 // wrap refreshes an idle deadline before every read and write and counts traffic.
@@ -50,7 +57,7 @@ func main() {
 		log.Fatal(err)
 	}
 	// The handshake is bounded by 5s; on failure raw is closed.
-	conn, err := netx.TLSClient(context.Background(), wrap(raw), &tls.Config{ServerName: "example.com"}, 5*time.Second)
+	conn, err := tlsconn.Client(context.Background(), wrap(raw), &tls.Config{ServerName: "example.com"}, 5*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,15 +65,21 @@ func main() {
 }
 ```
 
-- A non-positive timeout means `netx.DefaultTimeout` (5s). This also applies to
-  a `TimeoutConn` built as a struct literal.
+- A non-positive timeout means 5s (`netx.DefaultTimeout`,
+  `tlsconn.DefaultTimeout`). This also applies to a `TimeoutConn` built as a
+  struct literal.
 - `TimeoutConn` moves the deadline only once it lags by more than idle/16 (at
   most 1s), so the per-call cost is an atomic load; a connection may time out
   up to that slack early.
-- `TLSClient` and `TLSServer` bound the handshake by the context and the
-  timeout, applied as both a connection deadline and a context deadline, and
-  return a `*tls.Conn` with no deadline set. On failure they close the raw
-  connection.
+- `tlsconn.Client` and `tlsconn.Server` bound the handshake by the context and
+  the timeout, applied as both a connection deadline and a context deadline,
+  and return a `*tls.Conn` with no deadline set. On failure they close the raw
+  connection. They live in their own package so that the root package does not
+  import `crypto/tls`.
+- `tlsconn.Dialer` dials with any `Forward` dialer, such as a proxy dialer, and
+  runs `tlsconn.Client` on the result, taking the server name from the dialed
+  address unless the config sets one. Used as a proxy dialer's `Forward`, it
+  reaches the proxy over TLS.
 
 ### Framed messages
 
@@ -220,6 +233,36 @@ func serveOne(c net.Conn, h http.Handler) error {
   accepted connection is a wrapper (unwrap it with `RawConnOf`), so for TLS
   wrap the listener with `tls.NewListener` instead of passing a `*tls.Conn`.
 
+### UDP peers
+
+`PacketListener` splits a packet connection, such as a UDP socket, into one
+`net.Conn` per peer, so a UDP server can be written like a TCP server.
+
+```go
+func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
+	l := netx.NewPacketListener(pc,
+		netx.WithIdleTimeout(2*time.Minute),
+		netx.WithAcceptFilter(func(peer net.Addr) bool { return true }),
+	)
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return err
+		}
+		go handle(c) // each Read is one datagram, each Write sends one
+	}
+}
+```
+
+- The first datagram from a new peer starts a connection; later ones are read
+  from it, truncated to the buffer like a UDP socket. Closing a connection
+  lets the next datagram of that peer start a new one.
+- Datagrams are dropped, as a socket buffer would, when a connection's queue
+  (`WithPacketQueue`, 128) or the accept backlog (`WithAcceptBacklog`, 128) is
+  full. `WithAcceptFilter` rejects peers before a connection is created.
+- On a `*net.UDPConn` the read loop and writes do not allocate per datagram.
+  The listener owns the socket and closes it, and all connections, on `Close`.
+
 ## Error Helpers
 
 ```go
@@ -269,7 +312,8 @@ only for errnos the classifiers recognise; others appear as `errno=<number>`.
 
 `github.com/djylb/netx/proxyproto` builds, parses and serves the PROXY protocol
 headers that tell a backend the original client and destination of a proxied
-connection.
+connection or UDP flow. It depends only on the standard library and not on the
+`netx` root package, so importing it adds no more than the header code.
 
 ```go
 func sendProxyHeader(backend, client net.Conn) error {
@@ -290,6 +334,11 @@ func behindLoadBalancer(ln net.Listener, balancers netip.Prefix) net.Listener {
 		},
 	}
 }
+
+// udpBehindProxy reads the header from the first datagram of each UDP flow.
+func udpBehindProxy(pc net.PacketConn) net.Listener {
+	return &proxyproto.Listener{Listener: netx.NewPacketListener(pc), Datagram: true}
+}
 ```
 
 - `V1Header`, `V2Header`, `HeaderFromAddrs` and `HeaderFromConn` build a header
@@ -299,10 +348,23 @@ func behindLoadBalancer(ln net.Listener, balancers netip.Prefix) net.Listener {
   `io.ErrUnexpectedEOF` while it is incomplete, for protocol sniffers. `Read`
   decodes one from a `bufio.Reader` and leaves a stream without a header
   unread (`ErrNoHeader`).
+- Parsing accepts non-standard senders wherever that cannot misattribute a
+  connection: v1 lines ending in a bare LF, with runs of spaces, any letter
+  case, `UDP4`/`UDP6` tokens, families that differ from the token or padded
+  ports; any v2 version nibble. Unknown commands, protocols and families,
+  short address blocks and truncated TLVs fall back to the connection's own
+  addresses, or to the whole TLVs, instead of failing.
 - `Listener` reads the header lazily, on the first read or address query, with
   a timeout (`DefaultHeaderTimeout`), so a slow peer cannot stall `Accept`. Its
   `Policy` decides per peer between `Required` (the zero value), `Optional` and
   `Ignore`; only trusted peers should be allowed to send a header.
+- With `Datagram` set, for listeners such as `netx.PacketListener` whose reads
+  return one datagram, the header is taken from the first datagram of each
+  flow, alone or followed by payload; later datagrams are passed through
+  untouched. Addresses are reported as `*net.UDPAddr`, since UDP senders use
+  the v1 `TCP4`/`TCP6` tokens (Minecraft Bedrock proxies, nps) or a v2 `STREAM`
+  transport; `Header.UDPAddrs` does the same conversion for other callers.
+  Leave it unset for stream protocols over UDP such as KCP or QUIC.
 - A nil or unspecified target is sent as `0.0.0.0` or `::`, matching the
   client's address family. As in HAProxy, an IPv4/IPv6 pair is sent as `TCP6`
   (v1) or `AF_INET6` (v2), with the IPv4 side in its IPv4-mapped form
@@ -343,8 +405,35 @@ func serve(ctx context.Context, handle func(c net.Conn, target string)) error {
 | macOS, iOS     | plain listener (pf `rdr` needs no socket option)                 | pf `DIOCNATLOOK` (needs root)                                      |
 | Others         | `ErrListenUnsupported`                                           | `ErrOriginalDestinationUnsupported`                                |
 
-Both errors match `errors.ErrUnsupported`. For a plain listener use `net.Listen`;
-for TCP keepalive tuning, use the standard library:
+Both errors match `errors.ErrUnsupported`. For a plain listener use `net.Listen`.
+
+On Linux and Android, `ListenPacket`, `ReadFromUDP` and `DialUDP` handle UDP
+redirected by TPROXY: each datagram reports its original destination, and
+`DialUDP` opens a socket bound to that destination to answer from it.
+
+```go
+func serveRedirectedUDP(ctx context.Context) error {
+	ln, err := transparent.ListenPacket(ctx, "0.0.0.0:8080")
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 65535)
+	for {
+		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		if err != nil {
+			return err
+		}
+		reply, err := transparent.DialUDP(ctx, dst, src)
+		if err != nil {
+			continue
+		}
+		_, _ = reply.Write(buf[:n])
+		_ = reply.Close()
+	}
+}
+```
+
+For TCP keepalive tuning, use the standard library:
 
 ```go
 func keepAlive(c *net.TCPConn) error {
@@ -359,9 +448,11 @@ func keepAlive(c *net.TCPConn) error {
 
 ## SOCKS5
 
-`github.com/djylb/netx/socks5` reads and writes SOCKS5 messages (RFC 1928)
-and username/password authentication (RFC 1929) for clients and servers. It
-neither dials nor listens, and every message is written with a single `Write`.
+`github.com/djylb/netx/socks5` reads and writes SOCKS5 messages (RFC 1928),
+username/password authentication (RFC 1929) and SOCKS4/SOCKS4a messages for
+clients and servers, and provides a client `Dialer` and a `Server` built on
+them. The codec functions
+neither dial nor listen, and every message is written with a single `Write`.
 
 ```go
 // handshake runs the server side of a SOCKS5 CONNECT without authentication.
@@ -409,13 +500,102 @@ func udpRelay(packet []byte, exchange func(dst string, payload []byte) (net.Addr
   `ReplySucceeded`. `DecodeAddr` decodes an address embedded in another
   message. `ParseDatagram` rejects fragments with `ErrFragmented` and
   ignores the reserved field.
+- `ReadRequest4`, `WriteRequest4`, `WriteReply4` and `ReadReply4` handle
+  SOCKS4, and SOCKS4a for domain names. SOCKS4 replies (`Reply4Granted`,
+  `Reply4Rejected`, ...) share the `Reply` type, whose SOCKS5 codes they do not
+  overlap, so `ReadReply4` also fails with a `*socks5.ReplyError`.
+
+### Client
+
+`socks5.Dialer` dials TCP through a SOCKS5 proxy with CONNECT, or a SOCKS4 or
+SOCKS4a proxy with `SOCKS4` set. Host names are sent to the proxy, which
+resolves them, unless `Resolver` resolves them first, as SOCKS4 servers
+without the 4a extension need. A non-success reply is returned as a
+`*socks5.ReplyError`.
+
+```go
+func dialSOCKS(ctx context.Context, target string) (net.Conn, error) {
+	d := &socks5.Dialer{
+		ProxyAddr: "127.0.0.1:1080",
+		Username:  "alice", // also offers no authentication
+		Password:  "secret",
+		Forward:   &net.Dialer{Timeout: 10 * time.Second},
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return d.DialContext(ctx, "tcp", target)
+}
+```
+
+For SOCKS over TLS, give the dialer a `Forward` that returns TLS connections:
+`&tls.Dialer{Config: cfg}` or, to reach the proxy through another dialer,
+`&tlsconn.Dialer{Config: cfg, Forward: next}`.
+
+### Server
+
+`socks5.Server` serves SOCKS5 CONNECT and UDP ASSOCIATE, and SOCKS4/SOCKS4a
+CONNECT when `SOCKS4` is set. Every field is optional; the zero `Server`
+accepts anonymous clients and dials directly.
+
+```go
+func runSOCKS(ln net.Listener, udp net.PacketConn) error {
+	s := &socks5.Server{
+		Auth: []socks5.Authenticator{
+			socks5.UserPassAuth{Check: socks5.Credentials(map[string]string{"alice": "secret"})},
+		},
+		Allow: func(ctx context.Context, req *socks5.Request) error {
+			if req.Dst.Port == 25 {
+				return &socks5.ReplyError{Reply: socks5.ReplyNotAllowed}
+			}
+			return nil
+		},
+		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", req.Dst.String())
+		},
+		PacketConn: udp, // one fixed UDP port for every association
+	}
+	return s.Serve(ln)
+}
+```
+
+- Hooks: `Auth` (any `Authenticator`), `Allow`, `Dial` (its error picks the
+  reply code through `ReplyFor`), `ConnectAddr`, `Relay`, and for UDP
+  `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
+  names unresolved, for example to forward through a tunnel), `AllowPacket`
+  and `UDPAddr` (the address advertised to clients).
+- UDP on a fixed port (`PacketConn`): datagrams must come from the IP address
+  of their association's control connection, and are matched by the exact
+  source the client announced, or else as the only pending association of that
+  IP; ambiguous sources are dropped. Announcements of another IP are ignored,
+  so a client cannot claim the datagrams of others. `ListenUDP` instead gives
+  each association its own socket. Replies from any source are relayed (full
+  cone). An association ends with its control connection, or after
+  `UDPIdleTimeout`; `UDPOutlivesControl` keeps it for clients that close the
+  control connection early.
+- `OnError` receives the errors that end connections and drop datagrams, for
+  logging; the package itself does not log.
+- The server runs over any `net.Conn`. For SOCKS over TLS, serve
+  `tls.NewListener(ln, cfg)`: the TLS handshake happens within
+  `HandshakeTimeout`. UDP ASSOCIATE then has a TLS control connection, and its
+  datagrams stay plain UDP. To share a port with HTTP or TLS, sniff the first
+  byte (5 for SOCKS5, 4 for SOCKS4, 0x16 for a TLS handshake), for example with
+  `github.com/djylb/portmux`, and pass SOCKS connections to `ServeConn`, after
+  `tlsconn.Server` for TLS ones.
+- For non-standard clients, a server without required authentication accepts
+  an empty or mismatched method list (username/password with any
+  credentials), and reserved bytes and the username/password version byte are
+  not checked. A custom `MethodNoAuth` authenticator, such as an IP allowlist,
+  still decides on those clients and on SOCKS4 ones.
 
 ## Upstream Proxies
 
 `github.com/djylb/netx/proxy` dials TCP through an HTTP CONNECT or SOCKS5
 proxy. `FromURL` and `FromEnvironment` build the dialers from a URL; they are
-plain structs (`HTTPDialer`, `SOCKS5Dialer`) that can also be configured
-directly, for example with a private CA or extra request headers:
+plain structs (`HTTPDialer`, `socks5.Dialer`) that can also be configured
+directly, for example with a private CA or extra request headers. A program
+that only talks to SOCKS5 proxies can use `socks5.Dialer` alone and avoid the
+`crypto/tls` that `https` proxies need.
 
 ```go
 func corporateProxy(ca *x509.CertPool) *proxy.HTTPDialer {
@@ -452,11 +632,14 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 }
 ```
 
-- Schemes: `http` (port 80), `https` (port 443, TLS to the proxy), `socks5`
-  and `socks5h` (port 1080). User information is sent as Basic
-  `Proxy-Authorization` or as SOCKS5 username/password. Both SOCKS5 schemes let
-  the proxy resolve host names. A dialer for one proxy can be the `Forward`
-  dialer of another, which chains them.
+- Schemes: `http` (port 80), `https` (port 443, TLS to the proxy), `socks5`,
+  `socks5h`, `socks4a` and `socks4` (port 1080), and `socks5+tls`,
+  `socks5h+tls`, `socks4a+tls` and `socks4+tls` for SOCKS over TLS, verified
+  against the proxy's host name. User information is sent as Basic
+  `Proxy-Authorization`, as SOCKS5 username/password or as the SOCKS4 user ID.
+  The SOCKS5 and SOCKS4a schemes let the proxy resolve host names; `socks4`
+  resolves them locally. A dialer for one proxy can be the `Forward` dialer of
+  another, which chains them.
 - The dialers also have a `Dial(network, address)` method, so they satisfy the
   `Dialer` interface of `golang.org/x/net/proxy`.
 - The context bounds the dial and the proxy handshake; the returned connection

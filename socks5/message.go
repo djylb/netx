@@ -61,14 +61,12 @@ func ReadMethod(r io.Reader) (Method, error) {
 	return Method(msg[1]), nil
 }
 
-// ReadUserPass reads a username/password request.
+// ReadUserPass reads a username/password request. Its version byte is not
+// checked, since some clients send 5 instead of 1.
 func ReadUserPass(r io.Reader) (user, password string, err error) {
 	var hdr [2]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return "", "", err
-	}
-	if hdr[0] != userPassVersion {
-		return "", "", ErrVersion
 	}
 	// The username is followed by the password length.
 	var buf [256]byte
@@ -109,14 +107,12 @@ func WriteUserPassStatus(w io.Writer, ok bool) error {
 }
 
 // ReadUserPassStatus reads the server's answer to a username/password
-// request and returns ErrAuthFailed if it is a failure.
+// request and returns ErrAuthFailed if it is a failure. Its version byte is
+// not checked.
 func ReadUserPassStatus(r io.Reader) error {
 	var msg [2]byte
 	if _, err := io.ReadFull(r, msg[:]); err != nil {
 		return err
-	}
-	if msg[0] != userPassVersion {
-		return ErrVersion
 	}
 	if msg[1] != 0 {
 		return ErrAuthFailed
@@ -127,7 +123,7 @@ func ReadUserPassStatus(r io.Reader) error {
 // ReadRequest reads a client request. The command is returned as sent;
 // answer commands the server does not implement with
 // ReplyCommandNotSupported. ErrAddrType is answered with
-// ReplyAddrTypeNotSupported.
+// ReplyAddrTypeNotSupported. The reserved byte is ignored.
 func ReadRequest(r io.Reader) (Command, Addr, error) {
 	var hdr [3]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -135,9 +131,6 @@ func ReadRequest(r io.Reader) (Command, Addr, error) {
 	}
 	if hdr[0] != Version {
 		return 0, Addr{}, ErrVersion
-	}
-	if hdr[2] != 0 {
-		return 0, Addr{}, ErrMalformed
 	}
 	addr, err := ReadAddr(r)
 	if err != nil {
@@ -158,7 +151,8 @@ func WriteReply(w io.Writer, rep Reply, bound Addr) error {
 }
 
 // ReadReply reads a server reply and returns the bound address. A reply other
-// than ReplySucceeded is returned as a *ReplyError.
+// than ReplySucceeded is returned as a *ReplyError. The reserved byte is
+// ignored.
 func ReadReply(r io.Reader) (Addr, error) {
 	var hdr [3]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

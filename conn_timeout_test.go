@@ -1,24 +1,11 @@
 package netx
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"io"
-	"math/big"
 	"net"
 	"sync"
 	"testing"
 	"time"
-)
-
-var (
-	testCertOnce sync.Once
-	testCert     tls.Certificate
 )
 
 type deadlineSpyConn struct {
@@ -40,25 +27,6 @@ func (d *deadlineSpyConn) snapshot() (time.Time, int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastDeadline, d.deadlineCalls
-}
-
-type closeSpyConn struct {
-	net.Conn
-	mu     sync.Mutex
-	closed bool
-}
-
-func (c *closeSpyConn) Close() error {
-	c.mu.Lock()
-	c.closed = true
-	c.mu.Unlock()
-	return c.Conn.Close()
-}
-
-func (c *closeSpyConn) isClosed() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
 }
 
 type deadlineRecordConn struct {
@@ -245,53 +213,6 @@ func TestTimeoutConnHelpersHandleNilState(t *testing.T) {
 
 	malformed := &TimeoutConn{}
 	assertClosedConnState(t, "malformed", malformed)
-}
-
-func generateSelfSignedCert(t *testing.T) tls.Certificate {
-	t.Helper()
-
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key failed: %v", err)
-	}
-
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-		DNSNames: []string{"localhost"},
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatalf("create cert failed: %v", err)
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyDER, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		t.Fatalf("marshal key failed: %v", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("load key pair failed: %v", err)
-	}
-	return cert
-}
-
-func testSelfSignedCert(t *testing.T) tls.Certificate {
-	t.Helper()
-	testCertOnce.Do(func() {
-		testCert = generateSelfSignedCert(t)
-	})
-	return testCert
 }
 
 func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {

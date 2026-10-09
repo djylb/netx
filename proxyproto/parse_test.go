@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -96,11 +97,12 @@ func TestHeaderTLVAndErrors(t *testing.T) {
 	}
 }
 
+func v2Wire(verCmd, fam byte, body ...byte) []byte {
+	b := append([]byte(v2Signature), verCmd, fam, byte(len(body)>>8), byte(len(body)))
+	return append(b, body...)
+}
+
 func TestParseErrors(t *testing.T) {
-	v2 := func(verCmd, fam byte, body ...byte) []byte {
-		b := append([]byte(v2Signature), verCmd, fam, byte(len(body)>>8), byte(len(body)))
-		return append(b, body...)
-	}
 	tests := []struct {
 		name string
 		in   []byte
@@ -109,20 +111,11 @@ func TestParseErrors(t *testing.T) {
 		{"http", []byte("GET / HTTP/1.1\r\n"), ErrNoHeader},
 		{"almost v1", []byte("PROXX TCP4"), ErrNoHeader},
 		{"almost v2", []byte("\r\n\r\n\x00\r\nQUIX"), ErrNoHeader},
-		{"v1 protocol", []byte("PROXY TCP5 1.1.1.1 2.2.2.2 1 2\r\n"), ErrMalformed},
-		{"v1 lf only", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2\n"), ErrMalformed},
 		{"v1 fields", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1\r\n"), ErrMalformed},
-		{"v1 family", []byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"), ErrMalformed},
-		{"v1 port zero padded", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 01 2\r\n"), ErrMalformed},
+		{"v1 address", []byte("PROXY TCP4 1.1.1 2.2.2.2 1 2\r\n"), ErrMalformed},
 		{"v1 port sign", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 +1 2\r\n"), ErrMalformed},
-		{"v1 port range", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 65536 2\r\n"), ErrMalformed},
-		{"v1 too long", []byte("PROXY TCP4 " + strings.Repeat("1", 100)), ErrMalformed},
-		{"v2 version", v2(0x31, 0x11, make([]byte, 12)...), ErrMalformed},
-		{"v2 command", v2(0x22, 0x11, make([]byte, 12)...), ErrMalformed},
-		{"v2 family", v2(0x21, 0x41, make([]byte, 12)...), ErrMalformed},
-		{"v2 short addresses", v2(0x21, 0x21, make([]byte, 12)...), ErrMalformed},
-		{"v2 truncated tlv", v2(0x21, 0x11, append(make([]byte, 12), 1, 0, 5, 'x')...), ErrMalformed},
-		{"v2 tlv header", v2(0x21, 0x11, append(make([]byte, 12), 1, 0)...), ErrMalformed},
+		{"v1 port range", []byte("PROXY UDP4 1.1.1.1 2.2.2.2 65536 2\r\n"), ErrMalformed},
+		{"v1 too long", []byte("PROXY TCP4 " + strings.Repeat("1", 300)), ErrMalformed},
 	}
 	for _, tt := range tests {
 		if h, n, err := Parse(tt.in); !errors.Is(err, tt.want) || h != nil || n != 0 {
@@ -140,6 +133,76 @@ func TestParseErrors(t *testing.T) {
 				t.Fatalf("Parse(%q) error = %v, want %v", wire[:i], err, io.ErrUnexpectedEOF)
 			}
 		}
+	}
+}
+
+// TestParseLenient covers headers from non-standard senders that are
+// accepted because they leave no doubt about the addresses, or fall back to
+// the connection's own.
+func TestParseLenient(t *testing.T) {
+	addrs := append(net.ParseIP("192.0.2.1").To4(), 198, 51, 100, 1, 0x13, 0x88, 0x01, 0xbb)
+	tlv := []byte{byte(TLVAuthority), 0, 1, 'a'}
+	tests := []struct {
+		name     string
+		in       []byte
+		src, dst string
+		local    bool
+		udp      bool
+		tlvs     int
+	}{
+		{"v1 lf only", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
+		{"v1 spacing case padding", []byte("PROXY  tcp4   1.1.1.1  2.2.2.2  01  00002 \r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
+		{"v1 family", []byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"), "[::1]:1", "2.2.2.2:2", false, false, 0},
+		{"v1 zone", []byte("PROXY TCP6 fe80::1%eth0 ::1 1 2\r\n"), "[fe80::1%eth0]:1", "[::1]:2", false, false, 0},
+		{"v1 udp4", []byte("PROXY UDP4 1.1.1.1 2.2.2.2 1 2\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, true, 0},
+		{"v1 udp6", []byte("PROXY UDP6 ::1 ::2 1 2\r\n"), "[::1]:1", "[::2]:2", false, true, 0},
+		{"v1 extra fields", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2 x y\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
+		{"v1 padded line", []byte("PROXY TCP6 1.1.1.1 2.2.2.2 1 2" + strings.Repeat(" ", 150) + "\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
+		{"v1 unknown protocol", []byte("PROXY SCTP4 1.1.1.1 2.2.2.2 1 2\r\n"), "", "", true, false, 0},
+		{"v1 no protocol", []byte("PROXY \r\n"), "", "", true, false, 0},
+		{"v2 version", v2Wire(0x11, 0x11, addrs...), "192.0.2.1:5000", "198.51.100.1:443", false, false, 0},
+		{"v2 command", v2Wire(0x22, 0x11, append(addrs, tlv...)...), "", "", true, false, 1},
+		{"v2 family", v2Wire(0x21, 0x41, addrs...), "", "", false, false, 0},
+		{"v2 transport", v2Wire(0x21, 0x13, append(addrs, tlv...)...), "", "", false, false, 1},
+		{"v2 unspec transport", v2Wire(0x21, 0x10, addrs...), "", "", false, false, 0},
+		{"v2 short addresses", v2Wire(0x21, 0x21, addrs...), "", "", false, false, 0},
+		{"v2 truncated tlv", v2Wire(0x21, 0x12, append(append(addrs, tlv...), 1, 0, 5, 'x')...), "192.0.2.1:5000", "198.51.100.1:443", false, true, 1},
+		{"v2 tlv header", v2Wire(0x21, 0x11, append(addrs, 1, 0)...), "192.0.2.1:5000", "198.51.100.1:443", false, false, 0},
+	}
+	for _, tt := range tests {
+		h, n, err := Parse(append(tt.in, "rest"...))
+		if err != nil || n != len(tt.in) {
+			t.Errorf("%s: Parse() = %d, %v; want %d bytes", tt.name, n, err, len(tt.in))
+			continue
+		}
+		if h.Local != tt.local || addrString(h.Source) != tt.src || addrString(h.Destination) != tt.dst || len(h.TLVs) != tt.tlvs {
+			t.Errorf("%s: Parse() = local %v, %v -> %v, %d TLVs; want local %v, %s -> %s, %d TLVs",
+				tt.name, h.Local, h.Source, h.Destination, len(h.TLVs), tt.local, tt.src, tt.dst, tt.tlvs)
+		}
+		if _, isUDP := h.Source.(*net.UDPAddr); tt.src != "" && isUDP != tt.udp {
+			t.Errorf("%s: Source is %T", tt.name, h.Source)
+		}
+	}
+}
+
+func TestHeaderUDPAddrs(t *testing.T) {
+	h, _, err := Parse(V1Header(udp("192.0.2.1", 5000), udp("198.51.100.1", 19132)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.Source.(*net.TCPAddr); !ok {
+		t.Fatalf("version 1 Source = %T, want *net.TCPAddr", h.Source)
+	}
+	src, dst := h.UDPAddrs()
+	if s, ok := src.(*net.UDPAddr); !ok || s.String() != "192.0.2.1:5000" {
+		t.Fatalf("UDPAddrs() source = %#v", src)
+	}
+	if d, ok := dst.(*net.UDPAddr); !ok || d.String() != "198.51.100.1:19132" {
+		t.Fatalf("UDPAddrs() destination = %#v", dst)
+	}
+	unix := &net.UnixAddr{Name: "/a", Net: "unixgram"}
+	if src, dst := (&Header{Source: unix}).UDPAddrs(); src != unix || dst != nil {
+		t.Fatalf("UDPAddrs() = %v, %v; want the unix address and nil", src, dst)
 	}
 }
 
@@ -178,7 +241,7 @@ func TestRead(t *testing.T) {
 		"":                  io.EOF,
 		"PROX":              io.ErrUnexpectedEOF,
 		"PROXY TCP4 1.1.1.": io.ErrUnexpectedEOF,
-		"PROXY TCP9 x\r\n":  ErrMalformed,
+		"PROXY TCP4 x\r\n":  ErrMalformed,
 	} {
 		if _, err := Read(bufio.NewReader(strings.NewReader(in))); !errors.Is(err, want) {
 			t.Errorf("Read(%q) error = %v, want %v", in, err, want)
@@ -192,6 +255,9 @@ func TestRead(t *testing.T) {
 func FuzzParse(f *testing.F) {
 	f.Add([]byte("PROXY TCP4 192.0.2.1 198.51.100.1 5000 443\r\n"))
 	f.Add([]byte("PROXY UNKNOWN\r\n"))
+	f.Add([]byte("PROXY udp6 fe80::1%eth0 ::ffff:1.2.3.4 01 2\n"))
+	f.Add(v2Wire(0x21, 0x12, append(make([]byte, 12), 1, 0, 5, 'x')...))
+	f.Add([]byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"))
 	f.Add(V2Header(tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)))
 	f.Add(V2Header(&net.UnixAddr{Name: "/a", Net: "unix"}, &net.UnixAddr{Name: "/b", Net: "unix"}))
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -211,12 +277,25 @@ func FuzzParse(f *testing.F) {
 		}
 		h2, _, err := Parse(wire)
 		// A PROXY command without addresses is re-encoded as LOCAL; both mean
-		// that the connection's own addresses apply.
+		// that the connection's own addresses apply. Zones are not encoded.
 		sameLocal := h2.Local == h.Local || h.Source == nil
-		if err != nil || !sameLocal || addrString(h2.Source) != addrString(h.Source) || addrString(h2.Destination) != addrString(h.Destination) || len(h2.TLVs) != len(h.TLVs) {
+		if err != nil || !sameLocal || addrKey(h2.Source) != addrKey(h.Source) || addrKey(h2.Destination) != addrKey(h.Destination) || len(h2.TLVs) != len(h.TLVs) {
 			t.Fatalf("round trip of %q = %+v, %v; want %+v", b, h2, err, h)
 		}
 	})
+}
+
+// addrKey identifies an address the way an encoded header does: without the
+// IPv6 zone, the IPv4-mapped form of mixed families and the TCP or UDP type
+// of version 1.
+func addrKey(a net.Addr) string {
+	switch a := a.(type) {
+	case *net.TCPAddr:
+		return netip.AddrPortFrom(a.AddrPort().Addr().Unmap().WithZone(""), uint16(a.Port)).String()
+	case *net.UDPAddr:
+		return netip.AddrPortFrom(a.AddrPort().Addr().Unmap().WithZone(""), uint16(a.Port)).String()
+	}
+	return addrString(a)
 }
 
 func TestTLVTypeString(t *testing.T) {
