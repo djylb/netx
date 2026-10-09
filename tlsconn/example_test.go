@@ -3,8 +3,11 @@ package tlsconn_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
+	"path/filepath"
 	"time"
 
 	"github.com/djylb/netx/socks5"
@@ -69,4 +72,46 @@ func ExampleDialer() {
 		return
 	}
 	defer func() { _ = conn.Close() }()
+}
+
+// Serve TLS with a generated certificate and give its fingerprint to clients
+// out of band, for example in their configuration.
+func ExampleNewSelfSigned() {
+	cert, err := tlsconn.NewSelfSigned(tlsconn.SelfSignedOptions{Hosts: []string{"tunnel.internal", "10.0.0.1"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	pin := tlsconn.Fingerprint(cert.Certificate[0])
+	fmt.Println(len(hex.EncodeToString(pin[:])), cert.Leaf.Subject.CommonName)
+	// Output: 64 tunnel.internal
+}
+
+// Trust a self-signed server by its fingerprint instead of a certificate
+// authority. Pins can be added and removed while the config is in use.
+func ExamplePinSet() {
+	var pin [32]byte // from the server's tlsconn.Fingerprint, shared out of band
+	pins := tlsconn.NewPinSet(pin)
+	d := &tlsconn.Dialer{Config: pins.ClientConfig(nil)}
+	conn, err := d.Dial("tcp", "tunnel.internal:443")
+	if err != nil {
+		log.Println(err) // tlsconn.ErrNotPinned for another certificate
+		return
+	}
+	defer func() { _ = conn.Close() }()
+}
+
+// Serve per-host certificates from files, picking up renewals within an hour.
+func ExampleCertCache() {
+	certs := &tlsconn.CertCache{MaxEntries: 1000, ReloadInterval: time.Hour, IdleTimeout: 24 * time.Hour}
+	cfg := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			dir := filepath.Join("/etc/certs", filepath.Base(hello.ServerName))
+			return certs.LoadFiles(filepath.Join(dir, "fullchain.pem"), filepath.Join(dir, "privkey.pem"))
+		},
+	}
+	ln, err := tls.Listen("tcp", ":443", cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
 }

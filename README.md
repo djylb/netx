@@ -9,7 +9,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | Package                             | Contents                                                                     |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `github.com/djylb/netx`             | connection wrappers, `Relay`, in-memory and UDP listeners, error classifiers |
-| `github.com/djylb/netx/tlsconn`     | bounded TLS handshakes, and a TLS dialer over any dialer                     |
+| `github.com/djylb/netx/tlsconn`     | bounded TLS handshakes, TLS over any dialer, self-signed certs, pins, cache  |
 | `github.com/djylb/netx/proxyproto`  | PROXY protocol v1 and v2: build, parse, header-reading listener              |
 | `github.com/djylb/netx/transparent` | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations   |
 | `github.com/djylb/netx/socks5`      | SOCKS5 and SOCKS4 codec, client dialer and a configurable server             |
@@ -80,6 +80,52 @@ func main() {
   runs `tlsconn.Client` on the result, taking the server name from the dialed
   address unless the config sets one. Used as a proxy dialer's `Forward`, it
   reaches the proxy over TLS.
+
+### TLS certificates
+
+`tlsconn` also generates self-signed certificates, trusts peers by
+certificate fingerprint, and caches certificates loaded from files or PEM:
+
+```go
+// pinnedTunnel serves a self-signed certificate and returns a client config
+// that trusts exactly that certificate.
+func pinnedTunnel() (server, client *tls.Config, err error) {
+	cert, err := tlsconn.NewSelfSigned(tlsconn.SelfSignedOptions{Hosts: []string{"tunnel.internal"}})
+	if err != nil {
+		return nil, nil, err
+	}
+	pins := tlsconn.NewPinSet(tlsconn.Fingerprint(cert.Certificate[0]))
+	return &tls.Config{Certificates: []tls.Certificate{cert}}, pins.ClientConfig(nil), nil
+}
+
+// perHost serves certificates from files, picking up renewals within an hour.
+func perHost() *tls.Config {
+	certs := &tlsconn.CertCache{MaxEntries: 1000, ReloadInterval: time.Hour, IdleTimeout: 24 * time.Hour}
+	return &tls.Config{GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		dir := filepath.Join("/etc/certs", filepath.Base(hello.ServerName))
+		return certs.LoadFiles(filepath.Join(dir, "fullchain.pem"), filepath.Join(dir, "privkey.pem"))
+	}}
+}
+```
+
+- `NewSelfSigned` makes a server certificate for DNS names and IP addresses,
+  with a new ECDSA P-256 key or a given one (such as RSA), valid for a year by
+  default and from an hour in the past. `EncodePEM` writes it, or any
+  `tls.Certificate` with an RSA, ECDSA, Ed25519 or ECDH key, as PEM that
+  `tls.X509KeyPair` reads back.
+- `Fingerprint` is the SHA-256 of a DER certificate. A `PinSet` of them,
+  changeable while in use, verifies peers in `VerifyConnection`, which also
+  runs for resumed sessions, so removing a pin cuts off resumptions too.
+  `ClientConfig` returns a config that trusts exactly the pins, keeping the
+  base config's own `VerifyConnection` after the pin check; on a server, use
+  `VerifyConnection` with `ClientAuth: tls.RequireAnyClientCert`. A pin names
+  one exact certificate, so host names and expiry are not checked.
+- `CertCache` keeps certificates by file names, or by a hash of PEM data, for
+  `GetCertificate` callbacks that run on every handshake. Concurrent first
+  loads share one read, files are read again after `ReloadInterval` (or once
+  an expired certificate is due, at most once a minute), a failed reload keeps
+  the previous certificate, and `MaxEntries` and `IdleTimeout` bound the
+  cache, without a background goroutine.
 
 ### Framed messages
 

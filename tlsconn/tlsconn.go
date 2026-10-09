@@ -1,6 +1,9 @@
 // Package tlsconn runs TLS handshakes over existing connections with a bound
 // on how long they take, and provides a Dialer that layers TLS on any dialer,
-// such as a proxy dialer.
+// such as a proxy dialer. Its certificate helpers generate self-signed
+// certificates (NewSelfSigned, EncodePEM), trust peers by fingerprint
+// (Fingerprint, PinSet) and cache certificates loaded from files or PEM data
+// (CertCache).
 //
 // It is separate from the netx root package because importing crypto/tls
 // adds about 800 KB to a binary even when no handshake runs.

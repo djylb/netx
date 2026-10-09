@@ -22,7 +22,7 @@
 // Helpers that take a timeout use DefaultTimeout for a non-positive value.
 //
 // Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
-// handshakes, proxyproto builds, parses and serves PROXY protocol headers,
+// handshakes and handles certificates, proxyproto builds, parses and serves PROXY protocol headers,
 // transparent accepts transparently redirected TCP connections and UDP
 // datagrams, socks5 implements SOCKS5 and SOCKS4 with a client dialer and a
 // configurable server, and proxy dials through HTTP CONNECT, SOCKS5 and SOCKS4

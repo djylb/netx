@@ -26,6 +26,12 @@ func ReadFromUDP(c *net.UDPConn, b []byte) (n int, src, dst netip.AddrPort, err 
 // that replies reach the client from the address it sent to. Several such
 // sockets may share one local address. It needs CAP_NET_ADMIN and is
 // available where ListenPacket is.
+//
+// The listening socket does not share its address, since that would let other
+// sockets bind its port, so DialUDP fails with EADDRINUSE for an original
+// destination the listener holds: with a listener on a wildcard address, any
+// destination on the listener's port. Listen on a port that redirected
+// traffic does not use.
 func DialUDP(ctx context.Context, local, remote netip.AddrPort) (*net.UDPConn, error) {
 	return dialUDP(ctx, local, remote)
 }
