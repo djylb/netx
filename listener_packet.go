@@ -81,8 +81,10 @@ func WithIdleTimeout(d time.Duration) PacketListenerOption {
 	}
 }
 
-// WithMaxDatagram sets the largest datagram that is read in full, 65535 bytes
-// by default; longer ones are truncated.
+// WithMaxDatagram sets the largest datagram that is delivered in full, 65535
+// bytes by default; longer ones are truncated. The packet connection is still
+// read with a buffer of at least 64 KiB, since Windows drops a datagram that
+// does not fit, and reports neither its sender nor its data.
 func WithMaxDatagram(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.maxDatagram = n
@@ -172,7 +174,7 @@ func (l *PacketListener) Addr() net.Addr {
 }
 
 func (l *PacketListener) readLoop() {
-	buf := make([]byte, l.opts.maxDatagram)
+	buf := make([]byte, max(l.opts.maxDatagram, 65535))
 	var failures int
 	var delay time.Duration
 	for {
@@ -216,7 +218,7 @@ func (l *PacketListener) readLoop() {
 			continue
 		}
 		failures, delay = 0, 0
-		l.deliver(buf[:n], ap, addr)
+		l.deliver(buf[:min(n, l.opts.maxDatagram)], ap, addr)
 	}
 }
 
