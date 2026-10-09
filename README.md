@@ -143,6 +143,161 @@ func sniff(c net.Conn) (net.Conn, []byte, error) {
 }
 ```
 
+### Relaying
+
+```go
+// forward copies between client and backend until either side stops, then
+// closes both.
+func forward(client, backend net.Conn) {
+	up, down, err := netx.Relay(client, backend)
+	log.Printf("sent=%d received=%d err=%v", up, down, err)
+}
+```
+
+- `Relay` returns the bytes copied in each direction and the error that
+  stopped the first direction, or nil at EOF. Errors caused by its own
+  `Close` calls are not reported.
+- Copies go through `io.CopyBuffer` with a pooled 32 KiB buffer, so two raw
+  `*net.TCPConn`s still use `splice`/`sendfile` where the platform has it.
+
+## Listeners
+
+```go
+// handOff serves connections that were accepted and routed elsewhere.
+func handOff(srv *http.Server) *netx.ChanListener {
+	l := netx.NewChanListener(&net.TCPAddr{Port: 443}, 128)
+	go func() { _ = srv.Serve(l) }()
+	return l
+}
+
+func route(ctx context.Context, l *netx.ChanListener, c net.Conn) error {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	return l.Deliver(ctx, c) // closes c if it cannot be queued
+}
+
+// dialInProcess reaches the same server without a socket.
+func dialInProcess(ctx context.Context, l *netx.ChanListener) (net.Conn, error) {
+	return l.Dial(ctx, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50000})
+}
+
+// serveOne runs an http.Server on one connection and returns when the
+// connection is closed.
+func serveOne(c net.Conn, h http.Handler) error {
+	err := (&http.Server{Handler: h}).Serve(netx.NewSingleConnListener(c))
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+```
+
+- `Deliver` waits for queue space until the context is done or the listener
+  closes. On success the listener owns the connection: `Accept` returns it or
+  `Close` closes it. On failure `Deliver` closes it.
+- `Dial` connects through a synchronous `net.Pipe`. The server end reports the
+  given remote address and the listener address; the client end reports the
+  reverse.
+- `NewSingleConnListener` returns the connection once. Later `Accept` calls
+  return `net.ErrClosed` after the connection or the listener is closed. The
+  accepted connection is a wrapper (unwrap it with `RawConnOf`), so for TLS
+  wrap the listener with `tls.NewListener` instead of passing a `*tls.Conn`.
+
+## SOCKS5
+
+`github.com/djylb/netx/socks5` reads and writes SOCKS5 messages (RFC 1928)
+and username/password authentication (RFC 1929) for clients and servers. It
+neither dials nor listens, and every message is written with a single `Write`.
+
+```go
+// handshake runs the server side of a SOCKS5 CONNECT without authentication.
+func handshake(c net.Conn) (socks5.Addr, error) {
+	methods, err := socks5.ReadMethods(c)
+	if err != nil {
+		return socks5.Addr{}, err
+	}
+	if !slices.Contains(methods, socks5.MethodNoAuth) {
+		_ = socks5.WriteMethod(c, socks5.MethodNoAcceptable)
+		return socks5.Addr{}, socks5.ErrNoAcceptableMethod
+	}
+	if err := socks5.WriteMethod(c, socks5.MethodNoAuth); err != nil {
+		return socks5.Addr{}, err
+	}
+	cmd, dst, err := socks5.ReadRequest(c)
+	switch {
+	case errors.Is(err, socks5.ErrAddrType):
+		_ = socks5.WriteReply(c, socks5.ReplyAddrTypeNotSupported, socks5.Addr{})
+		return socks5.Addr{}, err
+	case err != nil:
+		return socks5.Addr{}, err
+	case cmd != socks5.CmdConnect:
+		_ = socks5.WriteReply(c, socks5.ReplyCommandNotSupported, socks5.Addr{})
+		return socks5.Addr{}, fmt.Errorf("unsupported %v", cmd)
+	}
+	return dst, nil // dial dst, then socks5.WriteReply(c, socks5.ReplySucceeded, bound)
+}
+
+// udpRelay unwraps a UDP ASSOCIATE datagram and wraps the answer.
+func udpRelay(packet []byte, exchange func(dst string, payload []byte) (net.Addr, []byte)) ([]byte, error) {
+	dst, payload, err := socks5.ParseDatagram(packet)
+	if err != nil {
+		return nil, err
+	}
+	from, answer := exchange(dst.String(), payload)
+	return socks5.AppendDatagram(nil, socks5.AddrFromNetAddr(from), answer)
+}
+```
+
+- `Addr` holds an IP address (`netip.Addr`) or a domain name, and a port.
+  IPv4-mapped addresses are sent as IPv4, zones are dropped, and the zero
+  `Addr` is sent as `0.0.0.0:0`.
+- `ReadReply` returns a `*socks5.ReplyError` for a reply other than
+  `ReplySucceeded`. `DecodeAddr` decodes an address embedded in another
+  message. `ParseDatagram` rejects fragments with `ErrFragmented` and
+  ignores the reserved field.
+
+## Upstream Proxies
+
+`github.com/djylb/netx/proxy` dials TCP through an HTTP CONNECT or SOCKS5
+proxy.
+
+```go
+func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
+	forward := &net.Dialer{Timeout: 10 * time.Second}
+	var d proxy.ContextDialer = forward
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, err
+		}
+		if d, err = proxy.FromURL(u, forward); err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		if d, err = proxy.FromEnvironment(forward); err != nil {
+			return nil, err
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return d.DialContext(ctx, "tcp", target)
+}
+```
+
+- Schemes: `http` (port 80), `https` (port 443, TLS to the proxy), `socks5`
+  and `socks5h` (port 1080). User information is sent as Basic
+  `Proxy-Authorization` or as SOCKS5 username/password. Both SOCKS5 schemes let
+  the proxy resolve host names.
+- The context bounds the dial and the proxy handshake; the returned connection
+  has no deadline. Bytes the HTTP proxy sends right after its `2xx` reply are
+  kept.
+- `FromEnvironment` reads `ALL_PROXY` and bypasses the proxy for targets in
+  `NO_PROXY`: `*`, IP addresses, CIDR ranges, and domain names, which also
+  match their subdomains (a leading `.` or `*.` matches subdomains only). An
+  entry may end in `:port`. `ParseNoProxy` exposes the same matcher for other
+  dialers.
+
 ## PROXY Protocol
 
 ```go
