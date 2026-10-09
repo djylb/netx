@@ -28,7 +28,8 @@ const (
 
 // ReadRequest4 reads a SOCKS4 or SOCKS4a request and returns its command,
 // destination and user ID. A SOCKS4a destination, signaled by an address of
-// 0.0.0.x with x not zero, is returned by name. The user ID is not
+// 0.0.0.x with x not zero, is returned by name, or by IP address when the
+// name is an IP literal, as DecodeAddr does. The user ID is not
 // authentication: SOCKS4 has none.
 func ReadRequest4(r io.Reader) (cmd Command, dst Addr, userID string, err error) {
 	var hdr [8]byte // version, command, port, IPv4 address
@@ -41,22 +42,25 @@ func ReadRequest4(r io.Reader) (cmd Command, dst Addr, userID string, err error)
 	if userID, err = readNULString(r, maxUserID4); err != nil {
 		return 0, Addr{}, "", err
 	}
-	dst.Port = binary.BigEndian.Uint16(hdr[2:4])
-	if hdr[4] == 0 && hdr[5] == 0 && hdr[6] == 0 && hdr[7] != 0 {
-		if dst.Name, err = readNULString(r, maxHost4); err != nil {
+	if socks4aMarker([4]byte(hdr[4:8])) {
+		name, err := readNULString(r, maxHost4)
+		if err != nil {
 			return 0, Addr{}, "", err
 		}
-		if dst.Name == "" {
+		if name == "" {
 			return 0, Addr{}, "", ErrMalformed
 		}
+		dst = nameAddr(name)
 	} else {
 		dst.IP = netip.AddrFrom4([4]byte(hdr[4:8]))
 	}
+	dst.Port = binary.BigEndian.Uint16(hdr[2:4])
 	return Command(hdr[1]), dst, userID, nil
 }
 
 // WriteRequest4 writes a SOCKS4 request for cmd to dst, or a SOCKS4a request
-// when dst is a domain name. It returns an error wrapping ErrAddrType for an
+// when dst is a domain name or an address of 0.0.0.x, which SOCKS4 reserves
+// for SOCKS4a, with x not zero. It returns an error wrapping ErrAddrType for an
 // IPv6 destination and ErrMalformed for a user ID or name that is too long or
 // contains a NUL byte.
 func WriteRequest4(w io.Writer, cmd Command, dst Addr, userID string) error {
@@ -68,9 +72,12 @@ func WriteRequest4(w io.Writer, cmd Command, dst Addr, userID string) error {
 	}
 	var name string
 	switch ip := dst.IP.Unmap(); {
-	case ip.Is4():
+	case ip.Is4() && !socks4aMarker(ip.As4()):
 		v4 := ip.As4()
 		copy(msg[4:], v4[:])
+	case ip.Is4():
+		msg[7] = 1 // 0.0.0.x itself would announce a name
+		name = ip.String()
 	case ip.IsValid():
 		return fmt.Errorf("%w: SOCKS4 cannot carry IPv6 address %v", ErrAddrType, ip)
 	default:
@@ -120,6 +127,12 @@ func ReadReply4(r io.Reader) (Addr, error) {
 		return bound, &ReplyError{Reply: rep}
 	}
 	return bound, nil
+}
+
+// socks4aMarker reports whether a SOCKS4 destination address of 0.0.0.x, with
+// x not zero, announces a SOCKS4a name.
+func socks4aMarker(v4 [4]byte) bool {
+	return v4[0] == 0 && v4[1] == 0 && v4[2] == 0 && v4[3] != 0
 }
 
 // readNULString reads a NUL-terminated string of at most limit bytes before

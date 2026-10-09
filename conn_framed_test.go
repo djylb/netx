@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -805,7 +806,11 @@ func TestFramedConnReadBuffer(t *testing.T) {
 		fc := NewFramedConn(src, opts...)
 		var got []string
 		buf := make([]byte, 3)
-		for range 4 {
+		reads := 3 // stream mode skips the empty frame
+		if datagram {
+			reads = 4
+		}
+		for range reads {
 			n, err := fc.Read(buf)
 			if err != nil {
 				t.Fatalf("datagram=%v Read() error = %v", datagram, err)
@@ -817,7 +822,7 @@ func TestFramedConnReadBuffer(t *testing.T) {
 				got[len(got)-1] += string(buf[:n])
 			}
 		}
-		want := "a|bcdef||ghi"
+		want := "a|bcdef|ghi"
 		if datagram {
 			want = "a|bcd||ghi"
 		}
@@ -826,6 +831,9 @@ func TestFramedConnReadBuffer(t *testing.T) {
 		}
 		if src.reads.Load() > 1 {
 			t.Fatalf("datagram=%v underlying reads = %d, want the frames read in one go", datagram, src.reads.Load())
+		}
+		if n, err := fc.Read(buf); n != 0 || err != io.EOF {
+			t.Fatalf("datagram=%v Read() at end = %d, %v, want 0, EOF", datagram, n, err)
 		}
 	}
 }
@@ -838,4 +846,32 @@ type countingReadConn struct {
 func (c *countingReadConn) Read(p []byte) (int, error) {
 	c.reads.Add(1)
 	return c.Conn.Read(p)
+}
+
+// Empty frames carry no stream bytes: a stream Read skips them instead of
+// returning 0, nil, which bufio.Reader gives up on as no progress after 100.
+func TestFramedConnStreamReadSkipsEmptyFrames(t *testing.T) {
+	var wire []byte
+	for range 200 {
+		wire = append(wire, frameBytes("")...)
+	}
+	wire = append(wire, frameBytes("hello\n")...)
+	wire = append(wire, frameBytes("")...)
+	for _, readBuffer := range []int{0, 64} {
+		newConn := func() *FramedConn {
+			return NewFramedConn(&teeTestConn{readBuf: bytes.NewBuffer(append([]byte(nil), wire...))}, WithReadBuffer(readBuffer))
+		}
+		fc := newConn()
+		buf := make([]byte, 16)
+		if n, err := fc.Read(buf); err != nil || string(buf[:n]) != "hello\n" {
+			t.Fatalf("readBuffer=%d Read() = %q, %v, want %q", readBuffer, buf[:n], err, "hello\n")
+		}
+		if n, err := fc.Read(buf); n != 0 || err != io.EOF {
+			t.Fatalf("readBuffer=%d Read() at end = %d, %v, want 0, EOF", readBuffer, n, err)
+		}
+		line, err := bufio.NewReader(newConn()).ReadString('\n')
+		if err != nil || line != "hello\n" {
+			t.Fatalf("readBuffer=%d bufio ReadString() = %q, %v, want %q", readBuffer, line, err, "hello\n")
+		}
+	}
 }

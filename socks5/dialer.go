@@ -153,9 +153,9 @@ func handshake(ctx context.Context, c net.Conn, fn func() error) error {
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = c.SetDeadline(time.Time{})
-	}
-	if err == nil {
+		// Connections without deadline support, such as SSH channels, fail
+		// here although they have no deadline to clear.
+		_ = c.SetDeadline(time.Time{})
 		return nil
 	}
 	_ = c.Close()

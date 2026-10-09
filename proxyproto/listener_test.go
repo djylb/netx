@@ -145,3 +145,120 @@ func TestConnWriteTo(t *testing.T) {
 		t.Fatalf("client Read() error = %v, want EOF", err)
 	}
 }
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
+	l := newTestListener(t)
+	l.HeaderTimeout = 5 * time.Second
+	header := V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
+	server, client := acceptOne(t, l, header[:8])
+
+	// A shorter caller deadline ends the header read without failing it.
+	_ = server.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	start := time.Now()
+	buf := make([]byte, 8)
+	if _, err := server.Read(buf); !isTimeout(err) || time.Since(start) > 2*time.Second {
+		t.Fatalf("Read() error = %v after %v, want the caller's timeout", err, time.Since(start))
+	}
+	if _, err := client.Write(append(header[8:], "hi"...)); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Time{})
+	if n, err := server.Read(buf); err != nil || string(buf[:n]) != "hi" {
+		t.Fatalf("resumed Read() = %q, %v", buf[:n], err)
+	}
+	if got := server.RemoteAddr().String(); got != "192.0.2.1:1" {
+		t.Fatalf("RemoteAddr() = %s", got)
+	}
+
+	// The header timeout runs from the first attempt and still applies.
+	l.HeaderTimeout = 300 * time.Millisecond
+	server, _ = acceptOne(t, l, nil)
+	_ = server.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	start = time.Now()
+	if _, err := server.Read(buf); !isTimeout(err) {
+		t.Fatalf("Read() error = %v, want the caller's timeout", err)
+	}
+	_ = server.SetReadDeadline(time.Time{})
+	if _, err := server.Read(buf); !isTimeout(err) || time.Since(start) > 2*time.Second {
+		t.Fatalf("Read() error = %v after %v, want the header timeout", err, time.Since(start))
+	}
+	if _, err := server.Read(buf); !isTimeout(err) {
+		t.Fatalf("Read() after the header timeout = %v, want it again", err)
+	}
+
+	// Clearing the caller's deadline during a header read keeps the header
+	// timeout.
+	server, _ = acceptOne(t, l, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.Read(buf)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	_ = server.SetReadDeadline(time.Time{})
+	select {
+	case err := <-done:
+		if !isTimeout(err) {
+			t.Fatalf("Read() error = %v, want the header timeout", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read() outlived the header timeout")
+	}
+}
+
+func TestListenerOptionalSignaturePrefix(t *testing.T) {
+	l := newTestListener(t)
+	l.HeaderTimeout = 100 * time.Millisecond
+	l.Policy = func(net.Addr) Policy { return Optional }
+	buf := make([]byte, 16)
+
+	// A peer that sends a bare CRLF, the start of a version 2 signature, and
+	// waits.
+	server, client := acceptOne(t, l, []byte("\r\n"))
+	if n, err := server.Read(buf); err != nil || string(buf[:n]) != "\r\n" {
+		t.Fatalf("Read() = %q, %v; want the CRLF", buf[:n], err)
+	}
+	if _, err := client.Write([]byte("more")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := server.Read(buf); err != nil || string(buf[:n]) != "more" {
+		t.Fatalf("Read() = %q, %v", buf[:n], err)
+	}
+
+	// A peer that waits for the server to speak first.
+	server, client = acceptOne(t, l, nil)
+	if got := server.RemoteAddr().String(); got != client.LocalAddr().String() {
+		t.Fatalf("RemoteAddr() = %s, want the peer %s", got, client.LocalAddr())
+	}
+	if _, err := server.Write([]byte("220 ready\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write([]byte("HELO")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := server.Read(buf); err != nil || string(buf[:n]) != "HELO" {
+		t.Fatalf("Read() = %q, %v", buf[:n], err)
+	}
+
+	// A peer that ends the stream after the start of a version 1 signature.
+	server, client = acceptOne(t, l, []byte("PROX"))
+	_ = client.(*net.TCPConn).CloseWrite()
+	if got, err := io.ReadAll(server); err != nil || string(got) != "PROX" {
+		t.Fatalf("ReadAll() = %q, %v", got, err)
+	}
+
+	// Required still fails.
+	l.Policy = nil
+	server, _ = acceptOne(t, l, []byte("\r\n"))
+	if _, err := server.Read(buf); !isTimeout(err) {
+		t.Fatalf("Read() error = %v, want the header timeout", err)
+	}
+}

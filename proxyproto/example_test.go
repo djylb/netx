@@ -47,8 +47,8 @@ func ExampleListener() {
 }
 
 // Serve UDP behind a proxy that sends a PROXY protocol header in the first
-// datagram of each flow, as Minecraft Bedrock proxies do with version 1 TCP4
-// and TCP6 tokens.
+// datagram of each flow, as some UDP proxies do with version 1 TCP4 and TCP6
+// tokens.
 func ExampleListener_datagram() {
 	pc, err := net.ListenPacket("udp", ":19132")
 	if err != nil {

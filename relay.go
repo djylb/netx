@@ -2,6 +2,8 @@ package netx
 
 import (
 	"io"
+	"net"
+	"runtime"
 	"sync"
 )
 
@@ -39,9 +41,15 @@ func WithHalfClose() RelayOption {
 //
 // It returns the bytes copied from a to b and from b to a, and the error that
 // stopped the relay, or nil if it stopped at EOF. Errors caused by Relay
-// closing the connections are not reported. The copies use io.CopyBuffer with
-// pooled 32 KiB buffers, so a ReaderFrom or WriterTo such as *net.TCPConn can
-// move the data without a user-space copy.
+// closing the connections are not reported.
+//
+// On Linux, a direction between a *net.TCPConn and another *net.TCPConn or a
+// *net.UnixConn, also beneath a PrefixConn on the reading side, is left to the
+// kernel with splice. Otherwise a direction is copied with the reading end's
+// WriteTo or else the writing end's ReadFrom, as io.Copy would, so a datagram
+// connection can keep each datagram whole; the WriteTo and ReadFrom of
+// *net.TCPConn and *net.UnixConn are skipped, also beneath a PrefixConn, and
+// the data goes through a pooled 32 KiB buffer instead of one they allocate.
 func Relay(a, b io.ReadWriteCloser, opts ...RelayOption) (aToB, bToA int64, err error) {
 	var cfg relayOptions
 	for _, opt := range opts {
@@ -98,7 +106,92 @@ func Relay(a, b io.ReadWriteCloser, opts ...RelayOption) (aToB, bToA int64, err 
 }
 
 func relayCopy(dst io.Writer, src io.Reader) (int64, error) {
+	if canSplice(dst, src) {
+		return io.Copy(dst, src)
+	}
+	if wt, ok := ownWriterTo(src); ok {
+		return wt.WriteTo(dst)
+	}
+	if rf, ok := dst.(io.ReaderFrom); ok && !isStdConn(dst) {
+		return rf.ReadFrom(src)
+	}
 	buf := relayBufPool.Get().(*[]byte)
 	defer relayBufPool.Put(buf)
-	return io.CopyBuffer(dst, src, *buf)
+	// Hide ReadFrom and WriteTo, or a *net.TCPConn that cannot splice copies
+	// through a buffer of its own instead of the pooled one.
+	return io.CopyBuffer(writerOnly{dst}, readerOnly{src}, *buf)
 }
+
+// ownWriterTo returns src's WriteTo unless it only falls back to a buffer of
+// its own: that of a *net.TCPConn or *net.UnixConn, or of a PrefixConn over
+// one or over a connection without WriteTo.
+func ownWriterTo(src io.Reader) (io.WriterTo, bool) {
+	wt, ok := src.(io.WriterTo)
+	if !ok {
+		return nil, false
+	}
+	inner := unwrapPrefix(src)
+	if _, ok := inner.(io.WriterTo); !ok {
+		return nil, false
+	}
+	return wt, !isStdConn(inner)
+}
+
+// isStdConn reports whether c is a *net.TCPConn or a *net.UnixConn.
+func isStdConn(c any) bool {
+	switch c.(type) {
+	case *net.TCPConn, *net.UnixConn:
+		return true
+	}
+	return false
+}
+
+// unwrapPrefix returns the connection beneath any PrefixConns around r.
+func unwrapPrefix(r io.Reader) io.Reader {
+	for {
+		pc, ok := r.(*PrefixConn)
+		if !ok || pc == nil || pc.Conn == nil {
+			return r
+		}
+		r = pc.Conn
+	}
+}
+
+// spliceOS reports whether *net.TCPConn moves data with splice(2).
+const spliceOS = runtime.GOOS == "linux" || runtime.GOOS == "android"
+
+// canSplice reports whether io.Copy(dst, src) moves the data with splice:
+// from a TCP or Unix stream connection into a TCP connection, or from a TCP
+// connection into a Unix stream connection. PrefixConn.WriteTo passes its wrapped
+// connection on to io.Copy, so src is looked at beneath it.
+func canSplice(dst io.Writer, src io.Reader) bool {
+	if !spliceOS {
+		return false
+	}
+	src = unwrapPrefix(src)
+	switch d := dst.(type) {
+	case *net.TCPConn:
+		switch s := src.(type) {
+		case *net.TCPConn:
+			return true
+		case *net.UnixConn:
+			return isStreamUnix(s)
+		}
+	case *net.UnixConn:
+		_, ok := src.(*net.TCPConn)
+		return ok && isStreamUnix(d)
+	}
+	return false
+}
+
+// isStreamUnix reports whether c is a "unix" stream socket, the only kind of
+// Unix connection that splice is used for.
+func isStreamUnix(c *net.UnixConn) bool {
+	addr := c.LocalAddr()
+	return addr != nil && addr.Network() == "unix"
+}
+
+// readerOnly and writerOnly hide every method but Read or Write.
+type readerOnly struct{ io.Reader }
+
+type writerOnly struct{ io.Writer }

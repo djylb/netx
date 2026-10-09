@@ -345,3 +345,112 @@ func TestPacketListenerClearsExpiredReadDeadline(t *testing.T) {
 		t.Fatal("no connection: the expired read deadline was kept")
 	}
 }
+
+func TestPacketListenerIdleTimeoutSparesBacklog(t *testing.T) {
+	const idle = 30 * time.Millisecond
+	l := newUDPListener(t, WithIdleTimeout(idle))
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	// Several sweeps run while the connection waits for Accept.
+	time.Sleep(5 * idle)
+	c := acceptWithin(t, l)
+	if c.(*packetConn).idleAt(time.Now(), idle) {
+		t.Fatal("idle clock started before Accept")
+	}
+	buf := make([]byte, 4)
+	n, err := c.Read(buf)
+	if err != nil || string(buf[:n]) != "x" {
+		t.Fatalf("Read() = %q, %v, want the datagram sent before Accept", buf[:n], err)
+	}
+	start := time.Now()
+	if _, err := c.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() error = %v, want EOF after the idle timeout", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("idle close after %v", d)
+	}
+}
+
+func TestPacketListenerAcceptSkipsClosedConns(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	b := dialUDP(t, l)
+	_, _ = a.Write([]byte("a"))
+	waitUntil(t, func() bool { return len(l.accept) == 1 })
+	l.mu.Lock()
+	stale := l.conns[a.LocalAddr().(*net.UDPAddr).AddrPort()]
+	l.mu.Unlock()
+	if stale == nil {
+		t.Fatal("no connection for the first peer")
+	}
+	stale.shutdown(io.EOF)
+	_, _ = b.Write([]byte("b"))
+	c := acceptWithin(t, l)
+	if got, want := c.RemoteAddr().String(), b.LocalAddr().String(); got != want {
+		t.Fatalf("Accept() returned the peer %s, want %s past the closed connection", got, want)
+	}
+}
+
+func TestPacketConnIdleClockIsMonotonic(t *testing.T) {
+	c := &packetConn{}
+	c.touch()
+	if d := time.Duration(clockOffset(time.Now()) - c.active.Load()); d < 0 || d > time.Second {
+		t.Fatalf("activity stamp is %v behind the monotonic clock, want about 0", d)
+	}
+}
+
+func TestPacketConnReadDoesNotAllocate(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewPacketListener(pc)
+	defer func() { _ = l.Close() }()
+	c := &packetConn{l: l, queue: make(chan *[]byte, 4), closed: make(chan struct{}), readDeadline: makeDeadline(), writeDeadline: makeDeadline()}
+	p := make([]byte, 100)
+	buf := make([]byte, 2048)
+	allocs := testing.AllocsPerRun(1000, func() {
+		c.enqueue(p)
+		if n, err := c.Read(buf); n != len(p) || err != nil {
+			t.Fatalf("Read() = %d, %v", n, err)
+		}
+	})
+	if allocs > 0 {
+		t.Fatalf("allocations per queued datagram = %v, want 0", allocs)
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// acceptWithin returns the next connection of l, failing the test if none
+// comes within 2s.
+func acceptWithin(t *testing.T, l *PacketListener) net.Conn {
+	t.Helper()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := l.Accept()
+		ch <- result{c, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("Accept() error = %v", r.err)
+		}
+		return r.c
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept() returned no connection within 2s")
+		return nil
+	}
+}

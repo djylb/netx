@@ -44,7 +44,8 @@ func (d *HTTPDialer) DialContext(ctx context.Context, network, address string) (
 	if err := checkNetwork(network); err != nil {
 		return nil, err
 	}
-	if _, _, err := net.SplitHostPort(address); err != nil || hasControl(address) {
+	// A space or control character would end the request line early.
+	if _, _, err := net.SplitHostPort(address); err != nil || hasControl(address) || strings.Contains(address, " ") {
 		return nil, fmt.Errorf("proxy: invalid target %q", address)
 	}
 	req, err := d.request(address)
@@ -136,7 +137,8 @@ func readConnectStatus(tp *textproto.Reader) (string, error) {
 	return status, nil
 }
 
-// hasControl reports whether s contains a space or a control character.
+// hasControl reports whether s contains a control character. Spaces, which
+// header values may contain, are not.
 func hasControl(s string) bool {
 	return strings.IndexFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f }) >= 0
 }

@@ -14,6 +14,7 @@ func TestSOCKS4RoundTrip(t *testing.T) {
 		{IP: netip.MustParseAddr("192.0.2.1"), Port: 80},
 		{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 81}, // sent as IPv4
 		{Name: "example.com", Port: 443},
+		{IP: netip.MustParseAddr("0.0.0.5"), Port: 82}, // sent as a SOCKS4a name
 	} {
 		var buf bytes.Buffer
 		if err := WriteRequest4(&buf, CmdConnect, dst, "alice"); err != nil {
@@ -58,6 +59,22 @@ func TestSOCKS4RoundTrip(t *testing.T) {
 	}
 }
 
+// A SOCKS4a name that is an IP literal, also with one trailing dot, is read as
+// that IP address.
+func TestReadRequest4LiteralName(t *testing.T) {
+	for name, want := range map[string]Addr{
+		"127.0.0.1":   {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		"127.0.0.1.":  {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		"127.0.0.1..": {Name: "127.0.0.1..", Port: 80},
+		"example.":    {Name: "example.", Port: 80},
+	} {
+		_, got, _, err := ReadRequest4(strings.NewReader("\x04\x01\x00\x50\x00\x00\x00\x01\x00" + name + "\x00"))
+		if err != nil || got != want {
+			t.Errorf("ReadRequest4(%q) = IP %v, Name %q, %v; want %v", name, got.IP, got.Name, err, want)
+		}
+	}
+}
+
 func TestSOCKS4Errors(t *testing.T) {
 	ipv6 := Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 1}
 	if err := WriteRequest4(io.Discard, CmdConnect, ipv6, ""); !errors.Is(err, ErrAddrType) {
@@ -99,10 +116,16 @@ func TestSOCKS4Errors(t *testing.T) {
 func FuzzReadRequest4(f *testing.F) {
 	f.Add([]byte("\x04\x01\x00\x50\x01\x02\x03\x04user\x00"))
 	f.Add([]byte("\x04\x01\x00\x50\x00\x00\x00\x01\x00example.com\x00"))
+	f.Add([]byte("\x04\x01\x00\x50\x00\x00\x00\x01\x000.0.0.5\x00"))
+	f.Add([]byte("\x04\x01\x00\x50\x00\x00\x00\x01\x00::1\x00"))
+	f.Add([]byte("\x04\x01\x00\x50\x00\x00\x00\x01\x00127.0.0.1.\x00"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		cmd, dst, user, err := ReadRequest4(bytes.NewReader(b))
 		if err != nil {
 			return
+		}
+		if dst.IP.Is6() {
+			return // a SOCKS4a name can be an IPv6 literal, which SOCKS4 cannot carry
 		}
 		var buf bytes.Buffer
 		if err := WriteRequest4(&buf, cmd, dst, user); err != nil {

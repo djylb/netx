@@ -118,6 +118,37 @@ func TestDialerEndsStalledHandshake(t *testing.T) {
 	}
 }
 
+// noDeadlineConn reports an error for every deadline, as connections without
+// deadline support such as SSH channels do.
+type noDeadlineConn struct{ net.Conn }
+
+func (noDeadlineConn) SetDeadline(time.Time) error      { return errors.New("deadline not supported") }
+func (noDeadlineConn) SetReadDeadline(time.Time) error  { return errors.New("deadline not supported") }
+func (noDeadlineConn) SetWriteDeadline(time.Time) error { return errors.New("deadline not supported") }
+
+type noDeadlineDialer struct{}
+
+func (noDeadlineDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return noDeadlineConn{c}, nil
+}
+
+func TestDialerForwardWithoutDeadlines(t *testing.T) {
+	target := echoTCP(t)
+	addr := serve(t, &socks5.Server{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := (&socks5.Dialer{ProxyAddr: addr, Forward: noDeadlineDialer{}}).DialContext(ctx, "tcp", target)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	assertEcho(t, c, "no deadlines")
+}
+
 func TestServerOnError(t *testing.T) {
 	errs := make(chan error, 1)
 	addr := serve(t, &socks5.Server{

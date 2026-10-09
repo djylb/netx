@@ -38,6 +38,17 @@ func TestOrigDstFromControl(t *testing.T) {
 	v4in6 := netip.MustParseAddr("::ffff:192.0.2.1").As16()
 	copy(mapped[8:24], v4in6[:])
 
+	// A link-local destination carries the receiving interface's index.
+	ifName, ifIndex := testInterface(t)
+	linkLocal := append([]byte(nil), sin6...)
+	ll := netip.MustParseAddr("fe80::7").As16()
+	copy(linkLocal[8:24], ll[:])
+	binary.NativeEndian.PutUint32(linkLocal[24:28], ifIndex)
+	unknownIf := append([]byte(nil), linkLocal...)
+	binary.NativeEndian.PutUint32(unknownIf[24:28], 0x7ffffff0)
+	globalScoped := append([]byte(nil), sin6...)
+	binary.NativeEndian.PutUint32(globalScoped[24:28], ifIndex)
+
 	other := controlMessage(solIP, 8 /* IP_TTL */, []byte{64, 0, 0, 0})
 	tests := []struct {
 		name string
@@ -47,6 +58,9 @@ func TestOrigDstFromControl(t *testing.T) {
 		{"ipv4", append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...), "203.0.113.9:53"},
 		{"ipv6", controlMessage(solIPv6, ipv6RecvOrigDstAddr, sin6), "[2001:db8::7]:443"},
 		{"ipv4-mapped", controlMessage(solIPv6, ipv6RecvOrigDstAddr, mapped), "192.0.2.1:443"},
+		{"link-local", controlMessage(solIPv6, ipv6RecvOrigDstAddr, linkLocal), "[fe80::7%" + ifName + "]:443"},
+		{"link-local unknown interface", controlMessage(solIPv6, ipv6RecvOrigDstAddr, unknownIf), "[fe80::7%2147483632]:443"},
+		{"global with scope", controlMessage(solIPv6, ipv6RecvOrigDstAddr, globalScoped), "[2001:db8::7]:443"},
 		{"missing", other, ""},
 		{"short", controlMessage(solIP, ipRecvOrigDstAddr, sin[:6]), ""},
 		{"garbage", []byte{1, 2, 3}, ""},

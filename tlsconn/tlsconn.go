@@ -24,9 +24,9 @@ const DefaultTimeout = 5 * time.Second
 //
 // The handshake stops when ctx is done or after timeout, DefaultTimeout if
 // non-positive. The timeout is applied both as a deadline on raw and as a
-// context deadline, so it also holds when raw ignores deadlines. On failure raw
-// is closed and the returned connection is nil. netx.RawConnOf unwraps the
-// result through its NetConn method.
+// context deadline, so it also holds when raw ignores deadlines or fails to set
+// them. On failure raw is closed and the returned connection is nil.
+// netx.RawConnOf unwraps the result through its NetConn method.
 func Client(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration) (*tls.Conn, error) {
 	return handshake(ctx, raw, cfg, timeout, tls.Client)
 }
@@ -43,21 +43,17 @@ func handshake(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	if err := raw.SetDeadline(time.Now().Add(timeout)); err != nil {
-		_ = raw.Close()
-		return nil, err
-	}
+	// A connection without deadline support, which may say so with an error
+	// such as errors.ErrUnsupported, is bounded by the context instead.
+	_ = raw.SetDeadline(time.Now().Add(timeout))
 	tc := newConn(raw, cfg)
 	hsCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := tc.HandshakeContext(hsCtx)
-	if err == nil {
-		err = raw.SetDeadline(time.Time{})
-	}
-	if err != nil {
+	if err := tc.HandshakeContext(hsCtx); err != nil {
 		// Before a completed handshake this only closes raw.
 		_ = tc.Close()
 		return nil, err
 	}
+	_ = raw.SetDeadline(time.Time{})
 	return tc, nil
 }

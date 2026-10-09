@@ -74,7 +74,8 @@ func WithAcceptBacklog(n int) PacketListenerOption {
 }
 
 // WithIdleTimeout closes a connection that has neither received nor sent a
-// datagram for d. Its pending and later Reads return io.EOF.
+// datagram for d since Accept returned it. Its pending and later Reads return
+// io.EOF. Connections waiting for Accept are kept with their datagrams.
 func WithIdleTimeout(d time.Duration) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.idle = d
@@ -123,18 +124,25 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 }
 
 // Accept waits for the next peer. It returns net.ErrClosed once the listener
-// is closed.
+// is closed. The idle timeout of a connection starts when it is accepted.
 func (l *PacketListener) Accept() (net.Conn, error) {
-	select {
-	case <-l.done:
-		return nil, net.ErrClosed
-	default:
-	}
-	select {
-	case c := <-l.accept:
-		return c, nil
-	case <-l.done:
-		return nil, net.ErrClosed
+	for {
+		select {
+		case <-l.done:
+			return nil, net.ErrClosed
+		default:
+		}
+		select {
+		case c := <-l.accept:
+			if isClosedChan(c.closed) {
+				continue
+			}
+			c.touch()
+			c.accepted.Store(true)
+			return c, nil
+		case <-l.done:
+			return nil, net.ErrClosed
+		}
 	}
 }
 
@@ -268,12 +276,11 @@ func (l *PacketListener) newConnLocked(ap netip.AddrPort, addr net.Addr) *packet
 		l:             l,
 		ap:            ap,
 		peer:          addr,
-		queue:         make(chan []byte, l.opts.queue),
+		queue:         make(chan *[]byte, l.opts.queue),
 		closed:        make(chan struct{}),
 		readDeadline:  makeDeadline(),
 		writeDeadline: makeDeadline(),
 	}
-	c.touch()
 	select {
 	case l.accept <- c:
 	default:
@@ -318,12 +325,12 @@ func (l *PacketListener) sweepLoop() {
 			l.mu.Lock()
 			var idle []*packetConn
 			for _, c := range l.conns {
-				if c.idleSince(now) >= l.opts.idle {
+				if c.idleAt(now, l.opts.idle) {
 					idle = append(idle, c)
 				}
 			}
 			for _, c := range l.other {
-				if c.idleSince(now) >= l.opts.idle {
+				if c.idleAt(now, l.opts.idle) {
 					idle = append(idle, c)
 				}
 			}
@@ -349,46 +356,53 @@ type packetConn struct {
 	ap   netip.AddrPort // valid for *net.UDPAddr peers
 	peer net.Addr
 
-	queue  chan []byte
+	queue  chan *[]byte // datagrams, in packetBufPool buffers when they fit
 	closed chan struct{}
 	once   sync.Once
 	err    error // reported by Read after shutdown
 
-	active        atomic.Int64 // unix nanoseconds of the last datagram
+	accepted      atomic.Bool  // returned by Accept; the idle sweep skips it until then
+	active        atomic.Int64 // clockOffset of the last datagram or of Accept
 	readDeadline  deadline
 	writeDeadline deadline
 }
 
 func (c *packetConn) touch() {
-	c.active.Store(time.Now().UnixNano())
+	c.active.Store(clockOffset(time.Now()))
 }
 
-func (c *packetConn) idleSince(now time.Time) time.Duration {
-	return time.Duration(now.UnixNano() - c.active.Load())
+// idleAt reports whether the accepted connection has been idle for at least
+// d at now. A connection waiting for Accept is not idle: the backlog is
+// bounded, and closing it would lose its datagrams.
+func (c *packetConn) idleAt(now time.Time, d time.Duration) bool {
+	return c.accepted.Load() && clockOffset(now)-c.active.Load() >= int64(d)
 }
 
 func (c *packetConn) enqueue(p []byte) {
-	var b []byte
+	var bp *[]byte
 	if len(p) <= 2048 {
-		b = (*packetBufPool.Get().(*[]byte))[:len(p)]
+		bp = packetBufPool.Get().(*[]byte)
+		*bp = (*bp)[:len(p)]
 	} else {
-		b = make([]byte, len(p))
+		b := make([]byte, len(p))
+		bp = &b
 	}
-	copy(b, p)
+	copy(*bp, p)
 	select {
 	case <-c.closed:
-		putPacketBuf(b)
-	case c.queue <- b:
+		putPacketBuf(bp)
+	case c.queue <- bp:
 		c.touch()
 	default:
-		putPacketBuf(b) // queue full: drop like a socket buffer would
+		putPacketBuf(bp) // queue full: drop like a socket buffer would
 	}
 }
 
-func putPacketBuf(b []byte) {
-	if cap(b) == 2048 {
-		b = b[:0]
-		packetBufPool.Put(&b)
+// putPacketBuf returns a datagram buffer to packetBufPool if it came from it.
+func putPacketBuf(bp *[]byte) {
+	if cap(*bp) == 2048 {
+		*bp = (*bp)[:0]
+		packetBufPool.Put(bp)
 	}
 }
 
@@ -396,14 +410,14 @@ func putPacketBuf(b []byte) {
 func (c *packetConn) Read(b []byte) (int, error) {
 	select {
 	case p := <-c.queue:
-		n := copy(b, p)
+		n := copy(b, *p)
 		putPacketBuf(p)
 		return n, nil
 	default:
 	}
 	select {
 	case p := <-c.queue:
-		n := copy(b, p)
+		n := copy(b, *p)
 		putPacketBuf(p)
 		return n, nil
 	case <-c.closed:

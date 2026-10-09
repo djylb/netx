@@ -5,8 +5,12 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/proxyproto"
 )
 
 func tcpPair(t *testing.T) (client, server net.Conn) {
@@ -178,5 +182,324 @@ func TestRelayHalfCloseFallsBackToClose(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Relay() did not return")
+	}
+}
+
+// plainReader hides every method of its reader but Read.
+type plainReader struct{ io.Reader }
+
+// A direction with one raw *net.TCPConn end cannot splice; it must copy
+// through the pooled buffer instead of one that TCPConn.ReadFrom allocates.
+func TestRelayCopyPoolsBufferWithOneTCPEnd(t *testing.T) {
+	client, server := tcpPair(t)
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	go func() {
+		buf := make([]byte, 64<<10)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	payload := make([]byte, 1024)
+	copyOnce := func() {
+		if n, err := relayCopy(client, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
+			t.Fatalf("relayCopy() = %d, %v", n, err)
+		}
+	}
+	copyOnce() // warm up the pool
+	const runs = 100
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		copyOnce()
+	}
+	runtime.ReadMemStats(&after)
+	// The race detector drops a quarter of the pool's Puts, so allow some.
+	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
+		t.Fatalf("relayCopy() allocates %d bytes per copy, want the pooled buffer reused", perCopy)
+	}
+}
+
+// Half-close and the byte counts work when only one end is a raw TCPConn.
+func TestRelayHalfCloseMixedEnds(t *testing.T) {
+	client, relayA := tcpPair(t)
+	relayB, backend := tcpPair(t)
+	defer func() { _ = client.Close() }()
+	defer func() { _ = backend.Close() }()
+
+	go func() {
+		request, _ := io.ReadAll(backend)
+		_, _ = backend.Write(append([]byte("echo:"), request...))
+		_ = backend.(*net.TCPConn).CloseWrite()
+	}()
+	done := make(chan error, 1)
+	var up, down int64
+	go func() {
+		var err error
+		up, down, err = Relay(relayA, NewTimeoutConn(relayB, 5*time.Second), WithHalfClose())
+		done <- err
+	}()
+
+	_, _ = client.Write([]byte("ping"))
+	_ = client.(*net.TCPConn).CloseWrite()
+	answer, err := io.ReadAll(client)
+	if err != nil || string(answer) != "echo:ping" {
+		t.Fatalf("answer = %q, %v", answer, err)
+	}
+	if err := <-done; err != nil || up != 4 || down != 9 {
+		t.Fatalf("Relay() = %d, %d, %v", up, down, err)
+	}
+}
+
+func TestRelayCanSplice(t *testing.T) {
+	tcpA, tcpB := tcpPair(t)
+	defer func() { _ = tcpA.Close() }()
+	defer func() { _ = tcpB.Close() }()
+	pipeA, pipeB := net.Pipe()
+	defer func() { _ = pipeA.Close() }()
+	defer func() { _ = pipeB.Close() }()
+	tests := []struct {
+		name string
+		dst  io.Writer
+		src  io.Reader
+		want bool
+	}{
+		{"tcp to tcp", tcpA, tcpB, spliceOS},
+		{"prefixed tcp to tcp", tcpA, NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), spliceOS},
+		{"pipe to tcp", tcpA, pipeA, false},
+		{"tcp to pipe", pipeA, tcpB, false},
+		{"tcp to wrapped tcp", NewTimeoutConn(tcpA, time.Second), tcpB, false},
+		{"prefixed pipe to tcp", tcpA, NewPrefixConn(pipeA, nil), false},
+		{"nil prefix conn to tcp", tcpA, (*PrefixConn)(nil), false},
+	}
+	for _, tt := range tests {
+		if got := canSplice(tt.dst, tt.src); got != tt.want {
+			t.Errorf("%s: canSplice() = %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}
+
+// datagramConn returns one queued message per Read, truncated to b like a UDP
+// socket, and records the size of each Write.
+type datagramConn struct {
+	mu     sync.Mutex
+	msgs   [][]byte
+	writes []int
+}
+
+func (c *datagramConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.msgs) == 0 {
+		return 0, io.EOF
+	}
+	m := c.msgs[0]
+	c.msgs = c.msgs[1:]
+	return copy(b, m), nil
+}
+
+func (c *datagramConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = append(c.writes, len(b))
+	return len(b), nil
+}
+
+func (c *datagramConn) sizes() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]int(nil), c.writes...)
+}
+
+func (*datagramConn) Close() error                     { return nil }
+func (*datagramConn) LocalAddr() net.Addr              { return &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 2} }
+func (*datagramConn) RemoteAddr() net.Addr             { return &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1} }
+func (*datagramConn) SetDeadline(time.Time) error      { return nil }
+func (*datagramConn) SetReadDeadline(time.Time) error  { return nil }
+func (*datagramConn) SetWriteDeadline(time.Time) error { return nil }
+
+// oneConnListener accepts c once and then blocks until closed.
+type oneConnListener struct {
+	c    net.Conn
+	once sync.Once
+	done chan struct{}
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() { c = l.c })
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *oneConnListener) Close() error   { close(l.done); return nil }
+func (l *oneConnListener) Addr() net.Addr { return l.c.LocalAddr() }
+
+// A datagram larger than the pooled buffer reaches the other end whole through
+// the WriteTo of a PROXY protocol datagram connection.
+func TestRelayKeepsLargeProxyprotoDatagram(t *testing.T) {
+	src := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 5}
+	dst := &net.UDPAddr{IP: net.IPv4(6, 7, 8, 9), Port: 10}
+	const size = 40000
+	raw := &datagramConn{msgs: [][]byte{proxyproto.V1Header(src, dst), make([]byte, size), make([]byte, 7)}}
+	ln := &proxyproto.Listener{Listener: &oneConnListener{c: raw, done: make(chan struct{})}, Datagram: true}
+	defer func() { _ = ln.Close() }()
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if got := c.RemoteAddr().String(); got != src.String() {
+		t.Fatalf("RemoteAddr() = %s, want %s", got, src)
+	}
+	sink := &datagramConn{}
+	aToB, _, err := Relay(c, sink)
+	if err != nil || aToB != size+7 {
+		t.Fatalf("Relay() = %d, %v, want %d, nil", aToB, err, size+7)
+	}
+	if got := sink.sizes(); len(got) != 2 || got[0] != size || got[1] != 7 {
+		t.Fatalf("datagrams written = %v, want [%d 7]", got, size)
+	}
+}
+
+// customWriterTo counts the bytes it writes with its own WriteTo.
+type customWriterTo struct {
+	io.Reader
+	calls int
+}
+
+func (c *customWriterTo) WriteTo(w io.Writer) (int64, error) {
+	c.calls++
+	return io.Copy(w, plainReader{c.Reader})
+}
+
+// customReaderFrom counts its ReadFrom calls.
+type customReaderFrom struct {
+	bytes.Buffer
+	calls int
+}
+
+func (c *customReaderFrom) ReadFrom(r io.Reader) (int64, error) {
+	c.calls++
+	return c.Buffer.ReadFrom(r)
+}
+
+func TestRelayCopyUsesCustomWriterToAndReaderFrom(t *testing.T) {
+	tcpA, tcpB := tcpPair(t)
+	defer func() { _ = tcpA.Close() }()
+	defer func() { _ = tcpB.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, tcpB) }()
+
+	payload := bytes.Repeat([]byte("x"), 100<<10)
+	for _, dst := range []io.Writer{tcpA, &bytes.Buffer{}} {
+		src := &customWriterTo{Reader: bytes.NewReader(payload)}
+		if n, err := relayCopy(dst, src); n != int64(len(payload)) || err != nil {
+			t.Fatalf("relayCopy(%T) = %d, %v", dst, n, err)
+		}
+		if src.calls != 1 {
+			t.Fatalf("relayCopy(%T) called WriteTo %d times, want 1", dst, src.calls)
+		}
+	}
+
+	// Beneath a PrefixConn, the custom WriteTo is still reached.
+	inner := &customWriterTo{Reader: bytes.NewReader(payload)}
+	pc := NewPrefixConn(writerToConn{customWriterTo: inner}, []byte("head"))
+	var out bytes.Buffer
+	if n, err := relayCopy(&out, pc); n != int64(len(payload)+4) || err != nil || out.Len() != len(payload)+4 {
+		t.Fatalf("relayCopy(prefix) = %d, %v, wrote %d", n, err, out.Len())
+	}
+	if inner.calls != 1 {
+		t.Fatalf("relayCopy(prefix) called WriteTo %d times, want 1", inner.calls)
+	}
+
+	rf := &customReaderFrom{}
+	if n, err := relayCopy(rf, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
+		t.Fatalf("relayCopy(ReaderFrom) = %d, %v", n, err)
+	}
+	if rf.calls != 1 || rf.Len() != len(payload) {
+		t.Fatalf("ReadFrom calls = %d, buffered %d", rf.calls, rf.Len())
+	}
+}
+
+// writerToConn is a net.Conn whose reads and WriteTo come from a customWriterTo.
+type writerToConn struct {
+	net.Conn
+	*customWriterTo
+}
+
+func (c writerToConn) Read(b []byte) (int, error) { return c.customWriterTo.Read(b) }
+
+// A PrefixConn that would end up in the fallback WriteTo or ReadFrom of a
+// *net.TCPConn copies through the pooled buffer instead: over a raw TCPConn
+// that cannot splice into dst, and over a connection without WriteTo into a
+// TCPConn.
+func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
+	outClient, outServer := tcpPair(t)
+	defer func() { _ = outClient.Close() }()
+	defer func() { _ = outServer.Close() }()
+	pipeA, pipeB := net.Pipe()
+	defer func() { _ = pipeA.Close() }()
+	defer func() { _ = pipeB.Close() }()
+	drain := func(c net.Conn) {
+		buf := make([]byte, 64<<10)
+		for {
+			if _, err := c.Read(buf); err != nil {
+				return
+			}
+		}
+	}
+	go drain(pipeB)
+	go drain(outServer)
+	payload := make([]byte, 1024)
+
+	// Each source holds the payload followed by EOF.
+	tests := []struct {
+		name   string
+		dst    io.Writer
+		source func() net.Conn
+	}{
+		{"prefixed tcp to pipe", pipeA, func() net.Conn {
+			feed, c := tcpPair(t)
+			t.Cleanup(func() { _ = c.Close() })
+			_, _ = feed.Write(payload)
+			_ = feed.Close()
+			return c
+		}},
+		{"prefixed pipe to tcp", outClient, func() net.Conn {
+			c, feed := net.Pipe()
+			t.Cleanup(func() { _ = c.Close() })
+			go func() {
+				_, _ = feed.Write(payload)
+				_ = feed.Close()
+			}()
+			return c
+		}},
+	}
+	const runs = 50
+	for _, tt := range tests {
+		srcs := make([]io.Reader, runs+1)
+		for i := range srcs {
+			srcs[i] = NewPrefixConn(tt.source(), []byte("p"))
+		}
+		copyFrom := func(src io.Reader) {
+			if n, err := relayCopy(tt.dst, src); n != int64(len(payload)+1) || err != nil {
+				t.Fatalf("%s: relayCopy() = %d, %v", tt.name, n, err)
+			}
+		}
+		copyFrom(srcs[runs]) // warm up the pool
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for _, src := range srcs[:runs] {
+			copyFrom(src)
+		}
+		runtime.ReadMemStats(&after)
+		// The race detector drops a quarter of the pool's Puts, so allow some.
+		if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
+			t.Fatalf("%s: relayCopy() allocates %d bytes per copy, want the pooled buffer reused", tt.name, perCopy)
+		}
 	}
 }

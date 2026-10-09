@@ -62,8 +62,11 @@ func origDstFromControl(oob []byte) (netip.AddrPort, bool) {
 			return netip.AddrPortFrom(ip, binary.BigEndian.Uint16(m.Data[2:4])), true
 		case m.Header.Level == solIPv6 && m.Header.Type == ipv6RecvOrigDstAddr && len(m.Data) >= 24:
 			// struct sockaddr_in6: family, port, flow info, address, scope.
-			ip := netip.AddrFrom16([16]byte(m.Data[8:24])).Unmap()
-			return netip.AddrPortFrom(ip, binary.BigEndian.Uint16(m.Data[2:4])), true
+			ip := netip.AddrFrom16([16]byte(m.Data[8:24]))
+			if len(m.Data) >= 28 {
+				ip = ip.WithZone(scopeZone(ip, binary.NativeEndian.Uint32(m.Data[24:28])))
+			}
+			return netip.AddrPortFrom(ip.Unmap(), binary.BigEndian.Uint16(m.Data[2:4])), true
 		}
 	}
 	return netip.AddrPort{}, false

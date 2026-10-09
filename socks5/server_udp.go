@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -18,7 +19,8 @@ import (
 // may forward the datagrams elsewhere, such as through a tunnel; Addr keeps
 // domain names unresolved for that purpose.
 type PacketConn interface {
-	// WriteTo sends p to dst.
+	// WriteTo sends p to dst. It must not retain p, which the caller reuses
+	// once WriteTo returns.
 	WriteTo(p []byte, dst Addr) (int, error)
 	// ReadFrom reads the next reply and returns its source.
 	ReadFrom(p []byte) (n int, src Addr, err error)
@@ -107,6 +109,7 @@ type udpRelay struct {
 	l       *netx.PacketListener
 	mu      sync.Mutex
 	pending map[netip.Addr][]*association // by client IP, until the first datagram
+	anyPeer *association                  // takes the first source, on its own socket
 	closed  bool
 }
 
@@ -143,7 +146,7 @@ func (r *udpRelay) expects(peer net.Addr) bool {
 	ap := peerAddrPort(peer)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.pending[ap.Addr()]) > 0
+	return r.anyPeer != nil || len(r.pending[ap.Addr()]) > 0
 }
 
 func (r *udpRelay) acceptLoop() {
@@ -161,10 +164,15 @@ func (r *udpRelay) acceptLoop() {
 }
 
 // match takes the association for a new client source: the one that
-// announced it, or the only one pending for its IP address.
+// announced it, the only one pending for its IP address, or the one that
+// takes any source.
 func (r *udpRelay) match(src netip.AddrPort) *association {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if a := r.anyPeer; a != nil {
+		r.anyPeer = nil
+		return a
+	}
 	list := r.pending[src.Addr()]
 	for _, a := range list {
 		if a.announced == src {
@@ -188,6 +196,8 @@ func (r *udpRelay) add(a *association) bool {
 	}
 	if a.key.IsValid() {
 		r.pending[a.key] = append(r.pending[a.key], a)
+	} else {
+		r.anyPeer = a
 	}
 	return true
 }
@@ -199,6 +209,9 @@ func (r *udpRelay) remove(a *association) {
 }
 
 func (r *udpRelay) removeLocked(a *association) {
+	if r.anyPeer == a {
+		r.anyPeer = nil
+	}
 	list := r.pending[a.key]
 	for i, other := range list {
 		if other == a {
@@ -246,7 +259,7 @@ type association struct {
 	ownsRelay bool
 	out       PacketConn
 	announced netip.AddrPort // the client's announced source, if specific
-	key       netip.Addr     // the client IP address it is pending under
+	key       netip.Addr     // the client IP address it is pending under, if known
 
 	mu      sync.Mutex
 	pending *time.Timer // ends an association that never receives a datagram
@@ -256,6 +269,11 @@ type association struct {
 }
 
 func (s *Server) associate(ctx context.Context, req *Request) error {
+	key, announced := clientSource(req)
+	if !key.IsValid() && s.PacketConn != nil {
+		_ = s.reply(req, ReplyGeneralFailure, Addr{})
+		return errNoClientIP
+	}
 	relay, owns, err := s.relayFor(ctx, req)
 	if err != nil {
 		_ = s.reply(req, ReplyFor(err), Addr{})
@@ -269,26 +287,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 		_ = s.reply(req, ReplyFor(err), Addr{})
 		return err
 	}
-	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, done: make(chan struct{})}
-	client := peerAddrPort(req.Conn.RemoteAddr()).Addr()
-	announced := req.Dst.IP.Unmap().WithZone("")
-	switch {
-	case client.IsValid():
-		// Only the control connection's IP address may send: honoring an
-		// announcement of another address would let a client claim the
-		// datagrams of others.
-		a.key = client
-		if announced == client && req.Dst.Port != 0 {
-			a.announced = netip.AddrPortFrom(client, req.Dst.Port)
-		}
-	case announced.IsValid() && !announced.IsUnspecified():
-		// A control connection without an IP address, such as a tunneled
-		// stream, can only rely on the announcement.
-		a.key = announced
-		if req.Dst.Port != 0 {
-			a.announced = netip.AddrPortFrom(announced, req.Dst.Port)
-		}
-	}
+	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, done: make(chan struct{})}
 	a.mu.Lock()
 	a.pending = time.AfterFunc(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
 	a.mu.Unlock()
@@ -320,6 +319,38 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 		}
 	}
 	return err
+}
+
+// errNoClientIP refuses a UDP association on the shared socket to a client
+// whose IP address is unknown.
+var errNoClientIP = errors.New("socks5: UDP ASSOCIATE: client IP address neither known from the control connection nor announced")
+
+// clientSource returns the IP address that may send an association's
+// datagrams, invalid when unknown, and the exact source the client announced,
+// if specific.
+func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort) {
+	client := peerAddrPort(req.Conn.RemoteAddr()).Addr()
+	ip := req.Dst.IP.Unmap().WithZone("")
+	switch {
+	case client.IsValid():
+		// Only the control connection's IP address may send: honoring an
+		// announcement of another address would let a client claim the
+		// datagrams of others.
+		if ip == client && req.Dst.Port != 0 {
+			announced = netip.AddrPortFrom(client, req.Dst.Port)
+		}
+		return client, announced
+	case ip.IsValid() && !ip.IsUnspecified():
+		// A control connection without an IP address, such as a tunneled
+		// stream, can only rely on the announcement.
+		if req.Dst.Port != 0 {
+			announced = netip.AddrPortFrom(ip, req.Dst.Port)
+		}
+		return ip, announced
+	}
+	// Neither is known: only a socket of the association's own can take the
+	// first source that sends.
+	return netip.Addr{}, netip.AddrPort{}
 }
 
 // relayFor returns the relay serving req: the shared one, or a new one that
@@ -414,7 +445,12 @@ func (a *association) targetToClient(c net.Conn) {
 			continue
 		}
 		if _, err := c.Write(packet); err != nil {
-			return
+			if netx.IsClosed(err) || errors.Is(err, os.ErrDeadlineExceeded) {
+				return
+			}
+			// One undeliverable reply, such as one too large once wrapped,
+			// does not end the association.
+			a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
 		}
 	}
 }

@@ -109,12 +109,22 @@ type Server struct {
 	// associations of one IP address wait for their first datagram, an
 	// unannounced source is ambiguous and its datagrams are dropped. An
 	// announced address with another IP is ignored, unless the control
-	// connection has no IP address. Close closes PacketConn.
+	// connection has no IP address; a request then fails unless it announces
+	// one. Close closes PacketConn.
 	PacketConn net.PacketConn
 	ctx        context.Context
 	// Allow is called for each request after authentication. A non-nil error
 	// refuses it with the error's ReplyFor code, or ReplyNotAllowed when that
 	// is ReplyGeneralFailure.
+	//
+	// The request's Dst holds every IP address the client sends as IP,
+	// including IPv4-mapped IPv6 addresses and domain names that are IP
+	// literals, also with one trailing dot such as "127.0.0.1." (see
+	// DecodeAddr). Other names are not resolved: a policy on IP
+	// addresses must also check the addresses that names resolve to, in a
+	// Dial hook, for example with a net.Dialer Control function, since some
+	// resolvers turn legacy forms such as "127.1" or "0x7f.0.0.1" into
+	// addresses.
 	Allow func(ctx context.Context, req *Request) error
 	// Dial connects to the destination of a CONNECT request; nil dials it
 	// directly. ctx is bounded by DialTimeout. The error's ReplyFor code is
@@ -127,7 +137,10 @@ type Server struct {
 	// and closes both; nil uses netx.Relay.
 	Relay func(ctx context.Context, req *Request, client, target net.Conn) error
 	// ListenUDP, used when PacketConn is nil, opens a UDP socket for one
-	// association, which the association owns.
+	// association, which the association owns. Datagrams are taken as on
+	// PacketConn, except that when neither the control connection nor the
+	// request gives the client's IP address, the first source that sends
+	// becomes the client.
 	ListenUDP func(ctx context.Context, req *Request) (net.PacketConn, error)
 	// UDPAddr returns the address a UDP ASSOCIATE reply tells the client to
 	// send to, given the association's socket address; nil uses that address
@@ -137,7 +150,9 @@ type Server struct {
 	// UDP socket through NewPacketConn.
 	DialPacket func(ctx context.Context, req *Request) (PacketConn, error)
 	// AllowPacket, if set, drops the client datagrams to destinations it
-	// rejects.
+	// rejects. Like Allow, it sees IP addresses as IP and other names
+	// unresolved, so a policy on IP addresses must also check the addresses
+	// that names resolve to, in a DialPacket whose PacketConn resolves them.
 	AllowPacket func(req *Request, dst Addr) bool
 	// OnError, if set, receives the errors that end connections accepted by
 	// Serve, with the client connection, and those that drop UDP datagrams,
@@ -182,7 +197,8 @@ type Server struct {
 
 // Serve accepts connections on l and serves each in its own goroutine. It
 // returns ErrServerClosed after Close, or the error that ended Accept.
-// Temporary Accept errors are retried with a growing delay.
+// Temporary Accept errors, such as timeouts and running out of file
+// descriptors (EMFILE, ENFILE), are retried with a growing delay.
 func (s *Server) Serve(l net.Listener) error {
 	if !s.track(l, true) {
 		return ErrServerClosed
@@ -195,8 +211,7 @@ func (s *Server) Serve(l net.Listener) error {
 			if s.isClosed() {
 				return ErrServerClosed
 			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if temporary(err) {
 				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
 				time.Sleep(delay)
 				continue
@@ -210,6 +225,17 @@ func (s *Server) Serve(l net.Listener) error {
 			}
 		}()
 	}
+}
+
+// temporary reports whether an Accept error is worth retrying, as net/http
+// decides: a timeout, or an error that reports itself temporary.
+func temporary(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	var te interface{ Temporary() bool }
+	return errors.As(err, &te) && te.Temporary()
 }
 
 // ServeConn serves one client connection and closes it. It returns the error

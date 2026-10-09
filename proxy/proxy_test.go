@@ -112,11 +112,86 @@ func TestHTTPConnectRejected(t *testing.T) {
 }
 
 func TestHTTPConnectRejectsBadTargets(t *testing.T) {
-	d := mustDialer(t, "http://127.0.0.1:1")
-	for _, target := range []string{"no-port", "evil\r\nX-Injected: 1:80", "a b:80"} {
-		if _, err := d.DialContext(context.Background(), "tcp", target); err == nil {
+	// The proxy grants every CONNECT request it gets, so only the target
+	// check can fail these dials.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	requests := make(chan string, 8)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				line, _ := bufio.NewReader(c).ReadString('\n')
+				requests <- line
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
+			}()
+		}
+	}()
+	d := mustDialer(t, "http://"+ln.Addr().String())
+	if c, err := d.DialContext(context.Background(), "tcp", "good.example:80"); err != nil {
+		t.Fatalf("DialContext(good target) error = %v", err)
+	} else {
+		_ = c.Close()
+		<-requests
+	}
+	for _, target := range []string{"no-port", "evil\r\nX-Injected: 1:80", "a b:80", "evil.example HTTP/1.0 x.example:443", "tab\t:80"} {
+		if c, err := d.DialContext(context.Background(), "tcp", target); err == nil {
+			_ = c.Close()
 			t.Errorf("DialContext(%q) succeeded", target)
 		}
+	}
+	select {
+	case line := <-requests:
+		t.Errorf("bad target reached the proxy: %q", line)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// noDeadlineConn reports an error for every deadline, as connections without
+// deadline support such as SSH channels do.
+type noDeadlineConn struct{ net.Conn }
+
+func (noDeadlineConn) SetDeadline(time.Time) error      { return errors.New("deadline not supported") }
+func (noDeadlineConn) SetReadDeadline(time.Time) error  { return errors.New("deadline not supported") }
+func (noDeadlineConn) SetWriteDeadline(time.Time) error { return errors.New("deadline not supported") }
+
+type noDeadlineDialer struct{}
+
+func (noDeadlineDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return noDeadlineConn{c}, nil
+}
+
+func TestHTTPConnectForwardWithoutDeadlines(t *testing.T) {
+	addr := serveOnce(t, func(c net.Conn) {
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+			return
+		}
+		echoAfter(c, "HTTP/1.1 200 Connection established\r\n\r\n")
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := (&HTTPDialer{ProxyAddr: addr, Forward: noDeadlineDialer{}}).DialContext(ctx, "tcp", "example.com:443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo = %q, %v", buf, err)
 	}
 }
 
@@ -311,6 +386,18 @@ func TestFromEnvironment(t *testing.T) {
 		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5.Dialer", d)
 	}
 
+	// A value without a scheme is an http proxy, as for curl.
+	for raw, want := range map[string]string{"127.0.0.1:1080": "127.0.0.1:1080", "proxy.local:3128": "proxy.local:3128", "proxy.local": "proxy.local:80"} {
+		t.Setenv("ALL_PROXY", raw)
+		d, err := FromEnvironment(nil)
+		if err != nil {
+			t.Fatalf("FromEnvironment(ALL_PROXY=%s) error = %v", raw, err)
+		}
+		if hd, ok := d.(*HTTPDialer); !ok || hd.ProxyAddr != want {
+			t.Fatalf("FromEnvironment(ALL_PROXY=%s) = %#v, want an HTTPDialer for %s", raw, d, want)
+		}
+	}
+
 	t.Setenv("ALL_PROXY", "gopher://proxy")
 	if _, err := FromEnvironment(nil); err == nil {
 		t.Fatal("FromEnvironment(bad scheme) succeeded")
@@ -322,7 +409,7 @@ func TestFromEnvironment(t *testing.T) {
 }
 
 func TestNoProxy(t *testing.T) {
-	np := ParseNoProxy(" Example.COM ,.sub.test,*.wild.test, 192.0.2.1, 198.51.100.0/24, [2001:db8::1]:8443, internal:8080, 2001:db8:1::/48 ,,")
+	np := ParseNoProxy(" Example.COM ,.sub.test,*.wild.test, 192.0.2.1, 198.51.100.0/24, [2001:db8::1]:8443, internal:8080, 2001:db8:1::/48 ,[::1],,")
 	tests := map[string]bool{
 		"example.com:80":       true,
 		"EXAMPLE.com.:80":      true,
@@ -341,6 +428,9 @@ func TestNoProxy(t *testing.T) {
 		"[2001:db8:1::5]:1":    true,
 		"internal:8080":        true,
 		"internal:80":          false,
+		"[::1]:80":             true,
+		"[::1]":                true,
+		"::1":                  true,
 		"other.internal:8080":  true,
 		"example.org":          false,
 	}

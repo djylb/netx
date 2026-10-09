@@ -25,7 +25,9 @@ func handshake(ctx context.Context, c net.Conn, fn func() (net.Conn, error)) (ne
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = c.SetDeadline(time.Time{})
+		// Connections without deadline support, such as SSH channels, fail
+		// here although they have no deadline to clear.
+		_ = c.SetDeadline(time.Time{})
 	}
 	if err != nil {
 		_ = c.Close()

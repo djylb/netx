@@ -27,7 +27,8 @@ type noProxyDomain struct {
 }
 
 // ParseNoProxy parses a comma-separated NO_PROXY list. "*" matches every
-// target. An IP address or CIDR range matches IP targets. A domain name
+// target. An IP address, bracketed or not, or a CIDR range matches IP
+// targets. A domain name
 // matches itself and its subdomains, and a leading "." or "*." restricts it to
 // subdomains. An entry may end in ":port" to match only that port. Matching
 // ignores case and a trailing dot; entries that fit none of these forms are
@@ -51,7 +52,7 @@ func ParseNoProxy(s string) NoProxy {
 		if h, p, err := net.SplitHostPort(entry); err == nil {
 			host, port = h, p
 		}
-		if ip, err := netip.ParseAddr(host); err == nil {
+		if ip, err := netip.ParseAddr(unbracket(host)); err == nil {
 			np.ips = append(np.ips, noProxyIP{ip: ip.Unmap().WithZone(""), port: port})
 			continue
 		}
@@ -84,7 +85,7 @@ func (np NoProxy) Match(address string) bool {
 		host, port = address, ""
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if ip, err := netip.ParseAddr(host); err == nil {
+	if ip, err := netip.ParseAddr(unbracket(host)); err == nil {
 		ip = ip.Unmap().WithZone("")
 		for _, prefix := range np.prefixes {
 			if prefix.Contains(ip) {
@@ -107,4 +108,12 @@ func (np NoProxy) Match(address string) bool {
 		}
 	}
 	return false
+}
+
+// unbracket removes the brackets around an IPv6 literal such as "[::1]".
+func unbracket(host string) string {
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
 }

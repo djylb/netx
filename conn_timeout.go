@@ -24,14 +24,31 @@ func normalizeLinkTimeout(timeout time.Duration) time.Duration {
 //
 // To keep the per-call cost to an atomic load, the deadline is only moved once
 // it lags behind by more than a small slack (idle/16, at most one second), so
-// a connection may time out up to that slack early. SetDeadline,
-// SetReadDeadline and SetWriteDeadline pass through and stay in effect until
-// the next read or write moves the deadline again.
+// a connection may time out up to that slack early.
+//
+// SetDeadline, SetReadDeadline and SetWriteDeadline are passed through and
+// remembered until they are changed again: reads and writes then move each
+// direction's deadline to the earlier of the remembered one and now plus the
+// idle timeout, so a deadline set to interrupt a blocked Read or Write stays in
+// effect while the other direction is in use. A zero time leaves only the idle
+// timeout.
 type TimeoutConn struct {
 	net.Conn
 	idleTimeout time.Duration
-	deadline    atomic.Int64 // unix nanoseconds last set on Conn, 0 to force an update
+	deadline    atomic.Int64 // idle deadline last set on Conn as a clock offset, 0 to force an update
 	mu          sync.Mutex   // serializes deadline updates
+	userRead    time.Time    // set by SetDeadline or SetReadDeadline, guarded by mu
+	userWrite   time.Time    // set by SetDeadline or SetWriteDeadline, guarded by mu
+}
+
+// clockBase anchors the monotonic clock offsets that idle tracking stores in
+// atomics, so a step of the wall clock neither stretches nor cuts an idle
+// period.
+var clockBase = time.Now()
+
+// clockOffset returns t as a monotonic offset from clockBase.
+func clockOffset(t time.Time) int64 {
+	return int64(t.Sub(clockBase))
 }
 
 // NewTimeoutConn wraps c and refreshes its deadline before each read or write.
@@ -62,17 +79,34 @@ func (c *TimeoutConn) Write(b []byte) (int, error) {
 func (c *TimeoutConn) refreshDeadline() error {
 	idle := normalizeLinkTimeout(c.idleTimeout)
 	slack := int64(min(idle/16, time.Second))
-	if time.Now().UnixNano()+int64(idle)-c.deadline.Load() < slack {
+	if clockOffset(time.Now())+int64(idle)-c.deadline.Load() < slack {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// Recompute under the lock so a slower caller never moves the deadline back.
-	want := time.Now().UnixNano() + int64(idle)
+	now := time.Now()
+	want := clockOffset(now) + int64(idle)
 	if want-c.deadline.Load() < slack {
 		return nil
 	}
-	if err := c.Conn.SetDeadline(time.Unix(0, want)); err != nil {
+	// now.Add keeps the monotonic reading, so the socket deadline does not
+	// follow wall-clock steps either.
+	rd := now.Add(idle)
+	wd := rd
+	if !c.userRead.IsZero() && c.userRead.Before(rd) {
+		rd = c.userRead
+	}
+	if !c.userWrite.IsZero() && c.userWrite.Before(wd) {
+		wd = c.userWrite
+	}
+	var err error
+	if rd.Equal(wd) {
+		err = c.Conn.SetDeadline(rd)
+	} else if err = c.Conn.SetReadDeadline(rd); err == nil {
+		err = c.Conn.SetWriteDeadline(wd)
+	}
+	if err != nil {
 		return err
 	}
 	c.deadline.Store(want)
@@ -116,6 +150,7 @@ func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.userRead, c.userWrite = t, t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetDeadline(t)
 }
@@ -126,6 +161,7 @@ func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.userRead = t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetReadDeadline(t)
 }
@@ -136,6 +172,7 @@ func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.userWrite = t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
 	return c.Conn.SetWriteDeadline(t)
 }

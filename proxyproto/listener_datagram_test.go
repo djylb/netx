@@ -60,8 +60,8 @@ func readDatagram(t *testing.T, c net.Conn, size int) string {
 
 func TestListenerDatagramHeaderWithPayload(t *testing.T) {
 	l := newDatagramListener(t, Required)
-	// Version 1 has no UDP token: UDP senders such as Minecraft proxies use
-	// TCP4 and send the header in the first datagram only.
+	// Version 1 has no UDP token: UDP senders use TCP4 and send the header in
+	// the first datagram only.
 	header := V1Header(udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
 	if string(header[:10]) != "PROXY TCP4" {
 		t.Fatalf("V1Header(udp) = %q", header)

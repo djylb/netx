@@ -3,7 +3,11 @@ package transparent
 import (
 	"fmt"
 	"net"
+	"net/netip"
+	"strconv"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -113,7 +117,39 @@ func tcpAddrFromSockaddrInet6(sa *syscall.RawSockaddrInet6) *net.TCPAddr {
 	return &net.TCPAddr{
 		IP:   append(net.IP(nil), sa.Addr[:]...),
 		Port: sockaddrPort(&sa.Port),
+		Zone: scopeZone(netip.AddrFrom16(sa.Addr), sa.Scope_id),
 	}
+}
+
+// scopeZone returns the zone of a link-local IPv6 address with scope ID
+// scope: the name of the interface with that index, or the index itself when
+// no interface has it. It returns "" for other addresses.
+func scopeZone(ip netip.Addr, scope uint32) string {
+	if scope == 0 || !ip.Is6() || ip.Is4In6() || !(ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return ""
+	}
+	zones.Lock()
+	defer zones.Unlock()
+	if now := time.Now(); zones.names == nil || now.After(zones.expires) {
+		zones.names, zones.expires = make(map[uint32]string), now.Add(time.Minute)
+	}
+	name, ok := zones.names[scope]
+	if !ok {
+		name = strconv.FormatUint(uint64(scope), 10)
+		if ifi, err := net.InterfaceByIndex(int(scope)); err == nil {
+			name = ifi.Name
+		}
+		zones.names[scope] = name
+	}
+	return name
+}
+
+// zones caches interface names by index for a minute, since a lookup lists
+// every interface and UDP needs one per datagram.
+var zones struct {
+	sync.Mutex
+	names   map[uint32]string
+	expires time.Time
 }
 
 // sockaddrPort decodes sin_port/sin6_port, which hold the port in network byte

@@ -32,7 +32,7 @@ var ErrFrameDesync = errors.New("framed: stream desynchronized by a partial fram
 //
 // By default Read is stream-oriented: it returns the current frame, or as much
 // of it as fits in p, and a longer frame continues in the next Reads without
-// being buffered. Use WithDatagramReads, ReadFrame or a buffer of at least
+// being buffered. Empty frames are skipped, as they carry no stream bytes. Use WithDatagramReads, ReadFrame or a buffer of at least
 // MaxFramePayload bytes when message boundaries matter, and WithReadBuffer to
 // serve small frames or small buffers from one read of the connection.
 //
@@ -108,8 +108,9 @@ func (fc *FramedConn) reader() io.Reader {
 // Read reads frame payload into p.
 //
 // In the default stream mode, a frame longer than p is returned across several
-// Reads. With WithDatagramReads, each call consumes exactly one frame and
-// discards what does not fit in p; an empty p consumes and discards one frame.
+// Reads and empty frames are skipped. With WithDatagramReads, each call
+// consumes exactly one frame, an empty one included, and discards what does
+// not fit in p; an empty p consumes and discards one frame.
 func (fc *FramedConn) Read(p []byte) (int, error) {
 	if fc == nil || fc.Conn == nil {
 		return 0, net.ErrClosed
@@ -123,7 +124,9 @@ func (fc *FramedConn) Read(p []byte) (int, error) {
 	if fc.rerr != nil {
 		return 0, fc.rerr
 	}
-	if fc.remain == 0 {
+	// In stream mode empty frames carry no bytes and are skipped, so that a
+	// Read with a non-empty p never returns 0, nil.
+	for fc.remain == 0 {
 		n, err := fc.readHeaderLocked()
 		if err != nil {
 			return 0, err

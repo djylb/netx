@@ -10,8 +10,8 @@
 // that differ from the token, and padded ports; version 2 headers may carry
 // any version nibble. Unknown commands, protocols and families, short address
 // blocks and truncated TLVs make the connection's own addresses, or the whole
-// TLVs, apply instead of failing. The package depends only on the standard
-// library.
+// TLVs, apply instead of failing. Parsed headers drop NOOP padding and keep at
+// most 64 TLVs. The package depends only on the standard library.
 package proxyproto
 
 import (
@@ -34,8 +34,8 @@ const (
 // V1Header returns a PROXY protocol v1 header for client and target addresses.
 //
 // Both addresses must be *net.TCPAddr or both *net.UDPAddr. v1 has no UDP
-// token, so UDP pairs are emitted with the TCP4/TCP6 tokens (historical nps
-// behavior); use v2 to signal UDP. As in HAProxy, an IPv4 and an IPv6 address
+// token, so UDP pairs are emitted with the TCP4/TCP6 tokens; use v2 to signal
+// UDP. As in HAProxy, an IPv4 and an IPv6 address
 // are sent as TCP6 with the IPv4 side in its IPv4-mapped form (::ffff:a.b.c.d).
 // Anything else yields "PROXY UNKNOWN\r\n".
 func V1Header(clientAddr, targetAddr net.Addr) []byte {

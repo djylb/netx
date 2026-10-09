@@ -88,6 +88,7 @@ type Header struct {
 	Source      net.Addr
 	Destination net.Addr
 	// TLVs holds the version 2 type-length-value fields in header order.
+	// Parsing omits NOOP padding and fields past the 64th.
 	TLVs []TLV
 }
 

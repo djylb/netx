@@ -3,10 +3,12 @@ package proxyproto
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -51,12 +53,19 @@ func TestHeaderRoundTrip(t *testing.T) {
 			if addrString(got.Source) != tt.src || addrString(got.Destination) != tt.dst {
 				t.Fatalf("Parse() addresses = %v -> %v, want %s -> %s", got.Source, got.Destination, tt.src, tt.dst)
 			}
-			if len(got.TLVs) != len(tt.h.TLVs) {
-				t.Fatalf("Parse() TLVs = %v, want %v", got.TLVs, tt.h.TLVs)
+			// NOOP padding is dropped.
+			var want []TLV
+			for _, tlv := range tt.h.TLVs {
+				if tlv.Type != TLVNoop {
+					want = append(want, tlv)
+				}
+			}
+			if len(got.TLVs) != len(want) {
+				t.Fatalf("Parse() TLVs = %v, want %v", got.TLVs, want)
 			}
 			for i, tlv := range got.TLVs {
-				if tlv.Type != tt.h.TLVs[i].Type || !bytes.Equal(tlv.Value, tt.h.TLVs[i].Value) {
-					t.Fatalf("TLV %d = %v, want %v", i, tlv, tt.h.TLVs[i])
+				if tlv.Type != want[i].Type || !bytes.Equal(tlv.Value, want[i].Value) {
+					t.Fatalf("TLV %d = %v, want %v", i, tlv, want[i])
 				}
 			}
 		})
@@ -250,6 +259,73 @@ func TestRead(t *testing.T) {
 	if _, err := Read(bufio.NewReaderSize(strings.NewReader("PROXY UNKNOWN"+strings.Repeat(" ", 50)+"\r\n"), 16)); err == nil {
 		t.Fatal("Read() with a 16-byte buffer parsed a long version 1 header")
 	}
+}
+
+// tlvHeader returns a version 2 LOCAL header whose payload is the TLVs that
+// fill fills in, given the payload size.
+func tlvHeader(size int, fill func(payload []byte)) []byte {
+	b := v2Wire(0x20, 0x00, make([]byte, size)...)
+	fill(b[v2HeadLen:])
+	return b
+}
+
+func TestParseTLVsBounded(t *testing.T) {
+	const size = 65535 / 3 * 3
+	emptyTLVs := func(typ TLVType) func([]byte) {
+		return func(p []byte) {
+			for i := 0; i < len(p); i += 3 {
+				p[i] = byte(typ)
+			}
+		}
+	}
+	tests := []struct {
+		name  string
+		b     []byte
+		tlvs  int
+		value []byte
+	}{
+		{"noop padding", tlvHeader(size, emptyTLVs(TLVNoop)), 0, nil},
+		{"empty tlvs", tlvHeader(size, emptyTLVs(TLVUniqueID)), maxTLVs, []byte{}},
+		{"padding then tlv", tlvHeader(size, func(p []byte) {
+			emptyTLVs(TLVNoop)(p)
+			copy(p[len(p)-6:], []byte{byte(TLVALPN), 0, 3, 'h', '2', 'c'})
+		}), 1, []byte("h2c")},
+		{"large tlv", tlvHeader(size, func(p []byte) {
+			p[0] = byte(TLVSSL)
+			binary.BigEndian.PutUint16(p[1:], size-3)
+		}), 1, make([]byte, size-3)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, n, err := Parse(tt.b)
+			if err != nil || n != len(tt.b) {
+				t.Fatalf("Parse() = %d, %v", n, err)
+			}
+			if len(h.TLVs) != tt.tlvs || cap(h.TLVs) != tt.tlvs {
+				t.Fatalf("Parse() kept %d TLVs (cap %d), want %d", len(h.TLVs), cap(h.TLVs), tt.tlvs)
+			}
+			if tt.tlvs > 0 && !bytes.Equal(h.TLVs[0].Value, tt.value) {
+				t.Fatalf("TLV value = %q, want %q", h.TLVs[0].Value, tt.value)
+			}
+			// The parsed header retains little beyond its TLV values.
+			allocs := allocatedBytes(func() { _, _, _ = Parse(tt.b) })
+			if limit := uint64(len(tt.value) + 4096); allocs > limit {
+				t.Fatalf("Parse() of %d bytes allocates %d bytes, want at most %d", len(tt.b), allocs, limit)
+			}
+		})
+	}
+}
+
+// allocatedBytes returns the bytes f allocates, averaged over several runs.
+func allocatedBytes(f func()) uint64 {
+	const runs = 20
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / runs
 }
 
 func FuzzParse(f *testing.F) {

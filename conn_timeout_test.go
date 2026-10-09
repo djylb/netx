@@ -3,6 +3,7 @@ package netx
 import (
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -239,5 +240,149 @@ func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {
 	got := raw.deadlines()
 	if len(got) != 3 || !got[1].Equal(explicit) || !got[2].Before(explicit) {
 		t.Fatalf("deadlines = %v, want idle, explicit, idle", got)
+	}
+}
+
+// dirDeadlineConn tracks the read and write deadlines set on it.
+type dirDeadlineConn struct {
+	countedCloseConn
+	mu     sync.Mutex
+	rd, wd time.Time
+}
+
+func (d *dirDeadlineConn) SetDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.rd, d.wd = t, t
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *dirDeadlineConn) SetReadDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.rd = t
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *dirDeadlineConn) SetWriteDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.wd = t
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *dirDeadlineConn) snapshot() (rd, wd time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.rd, d.wd
+}
+
+func TestTimeoutConnKeepsUserDeadlines(t *testing.T) {
+	raw := &dirDeadlineConn{}
+	const idle = 160 * time.Millisecond // refresh slack 10ms
+	conn := NewTimeoutConn(raw, idle)
+	near := func(got time.Time) bool {
+		d := time.Until(got)
+		return d > idle-100*time.Millisecond && d <= idle
+	}
+	waitSlack := func() { time.Sleep(20 * time.Millisecond) }
+
+	// A read deadline set to interrupt a blocked Read survives writes.
+	past := time.Now().Add(-time.Second)
+	if err := conn.SetReadDeadline(past); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	for range 2 {
+		if _, err := conn.Write([]byte("x")); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+		if rd, wd := raw.snapshot(); !rd.Equal(past) || !near(wd) {
+			t.Fatalf("after Write: read deadline %v, write deadline in %v; want %v and about %v", rd, time.Until(wd), past, idle)
+		}
+		waitSlack()
+	}
+
+	// A later user deadline is capped by the idle timeout.
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SetWriteDeadline() error = %v", err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read() error = nil, want the stub's EOF")
+	}
+	if rd, wd := raw.snapshot(); !rd.Equal(past) || !near(wd) {
+		t.Fatalf("after Read: read deadline %v, write deadline in %v; want %v and about %v", rd, time.Until(wd), past, idle)
+	}
+
+	// Clearing the user deadlines leaves the idle timeout in both directions.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if rd, wd := raw.snapshot(); !rd.Equal(wd) || !near(rd) {
+		t.Fatalf("after clearing: read deadline in %v, write deadline in %v; want both about %v", time.Until(rd), time.Until(wd), idle)
+	}
+}
+
+func TestTimeoutConnReadDeadlineInterruptsDuringWrites(t *testing.T) {
+	for i := range 20 {
+		client, server := tcpPair(t)
+		go func() { _, _ = io.Copy(io.Discard, client) }()
+		conn := NewTimeoutConn(server, 3*time.Second)
+		stop := make(chan struct{})
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := conn.Write([]byte("w")); err != nil {
+					return
+				}
+			}
+		}()
+		readDone := make(chan error, 1)
+		go func() {
+			_, err := conn.Read(make([]byte, 1))
+			readDone <- err
+		}()
+		time.Sleep(2 * time.Millisecond)
+		if err := conn.SetReadDeadline(time.Now()); err != nil {
+			t.Fatalf("SetReadDeadline() error = %v", err)
+		}
+		select {
+		case err := <-readDone:
+			if !IsTimeout(err) {
+				t.Fatalf("round %d: Read() error = %v, want a timeout", i, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("round %d: Read() still blocked after SetReadDeadline while writes continue", i)
+		}
+		close(stop)
+		_ = client.Close()
+		_ = server.Close()
+		<-writerDone
+	}
+}
+
+func TestTimeoutConnIdleClockIsMonotonic(t *testing.T) {
+	raw := &dirDeadlineConn{}
+	const idle = time.Minute
+	conn := NewTimeoutConn(raw, idle)
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	// The stored deadline is an offset on the monotonic clock, not a wall
+	// clock reading that a clock step would move.
+	if d := time.Duration(conn.deadline.Load() - clockOffset(time.Now())); d <= idle-time.Second || d > idle {
+		t.Fatalf("stored idle deadline is %v ahead of the monotonic clock, want about %v", d, idle)
+	}
+	// The socket deadline keeps the monotonic reading too.
+	if rd, _ := raw.snapshot(); !strings.Contains(rd.String(), " m=") {
+		t.Fatalf("deadline %v has no monotonic clock reading", rd)
 	}
 }

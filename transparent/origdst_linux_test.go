@@ -99,6 +99,34 @@ func TestTCPAddrFromSockaddrInet6(t *testing.T) {
 	}
 }
 
+// testInterface returns the name and index of an interface of this host.
+func testInterface(t *testing.T) (string, uint32) {
+	t.Helper()
+	ifs, err := net.Interfaces()
+	if err != nil || len(ifs) == 0 {
+		t.Skipf("no network interfaces: %v", err)
+	}
+	return ifs[0].Name, uint32(ifs[0].Index)
+}
+
+func TestTCPAddrFromSockaddrInet6Zone(t *testing.T) {
+	name, index := testInterface(t)
+	sa := syscall.RawSockaddrInet6{Family: syscall.AF_INET6, Scope_id: index}
+	copy(sa.Addr[:], net.ParseIP("fe80::25"))
+	setSockaddrPort(&sa.Port, 443)
+	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[fe80::25%"+name+"]:443"; got != want {
+		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	}
+	sa.Scope_id = 0x7ffffff0 // no such interface
+	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[fe80::25%2147483632]:443"; got != want {
+		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	}
+	copy(sa.Addr[:], net.ParseIP("2001:db8::25"))
+	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[2001:db8::25]:443"; got != want {
+		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	}
+}
+
 // SO_ORIGINAL_DST is read through typed getsockopt helpers whose buffers must
 // start with room for the sockaddr the kernel writes back.
 func TestOriginalDestinationGetsockoptBuffers(t *testing.T) {

@@ -70,7 +70,12 @@ func main() {
   struct literal.
 - `TimeoutConn` moves the deadline only once it lags by more than idle/16 (at
   most 1s), so the per-call cost is an atomic load; a connection may time out
-  up to that slack early.
+  up to that slack early. Idle tracking uses the monotonic clock.
+- Deadlines set with `SetDeadline`, `SetReadDeadline` or `SetWriteDeadline`
+  stay in effect until changed: each read or write sets a direction's deadline
+  to the earlier of that deadline and now plus the idle timeout, so
+  `SetReadDeadline(time.Now())` interrupts a blocked `Read` even while writes
+  continue.
 - `tlsconn.Client` and `tlsconn.Server` bound the handshake by the context and
   the timeout, applied as both a connection deadline and a context deadline,
   and return a `*tls.Conn` with no deadline set. On failure they close the raw
@@ -159,12 +164,13 @@ func relayDatagrams(tunnel net.Conn, udp *net.UDPConn, peer *net.UDPAddr) error 
 
 - By default `Read` has stream semantics: when a frame is larger than the
   buffer, the rest of it is returned by the following reads, without buffering
-  or allocating.
+  or allocating. Empty frames carry no stream bytes and are skipped.
 - `WithReadBuffer(size)` reads the stream through a buffer, so a burst of small
   frames costs one read of the connection (about 30x faster for 64-byte frames
   over loopback TCP).
 - With `WithDatagramReads`, every `Read` returns exactly one frame and drops the
-  bytes that do not fit in the buffer, like a UDP socket.
+  bytes that do not fit in the buffer, like a UDP socket; an empty frame is
+  returned as a 0-byte read.
 - `ReadFrame` returns one whole frame, or the rest of a frame that a stream
   `Read` has already started.
 - If a read or write fails partway through a frame, the frame boundaries are
@@ -233,8 +239,15 @@ func forward(client, backend net.Conn) {
   `CloseWrite` and the other direction keeps going, for protocols where a
   client shuts down its sending side and then reads the answer. Ends without
   `CloseWrite` are closed as usual. Pair it with an idle timeout.
-- Copies go through `io.CopyBuffer` with a pooled 32 KiB buffer, so two raw
-  `*net.TCPConn`s still use `splice`/`sendfile` where the platform has it.
+- On Linux, a direction between two `*net.TCPConn`s, or between a
+  `*net.TCPConn` and a `*net.UnixConn` (also beneath a `PrefixConn` on the
+  reading side), is left to the kernel with `splice`.
+- Otherwise a direction is copied with the reading end's `WriteTo` or else the
+  writing end's `ReadFrom`, as `io.Copy` would, so a datagram connection that
+  implements them keeps each datagram whole. The `WriteTo` and `ReadFrom` of
+  `*net.TCPConn` and `*net.UnixConn` are skipped (also beneath a `PrefixConn`)
+  and the data goes through a pooled 32 KiB buffer instead of one they
+  allocate.
 
 ## Listeners
 
@@ -306,7 +319,11 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
 - Datagrams are dropped, as a socket buffer would, when a connection's queue
   (`WithPacketQueue`, 128) or the accept backlog (`WithAcceptBacklog`, 128) is
   full. `WithAcceptFilter` rejects peers before a connection is created.
-- On a `*net.UDPConn` the read loop and writes do not allocate per datagram.
+- `WithIdleTimeout` closes a connection that has been idle since `Accept`
+  returned it; connections still waiting for `Accept` are not closed, and their
+  datagrams are kept.
+- On a `*net.UDPConn` the read loop, queueing and writes do not allocate per
+  datagram up to 2 KiB.
   The listener owns the socket and closes it, and all connections, on `Close`.
 
 ## Error Helpers
@@ -408,14 +425,14 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
   return one datagram, the header is taken from the first datagram of each
   flow, alone or followed by payload; later datagrams are passed through
   untouched. Addresses are reported as `*net.UDPAddr`, since UDP senders use
-  the v1 `TCP4`/`TCP6` tokens (Minecraft Bedrock proxies, nps) or a v2 `STREAM`
-  transport; `Header.UDPAddrs` does the same conversion for other callers.
-  Leave it unset for stream protocols over UDP such as KCP or QUIC.
+  the v1 `TCP4`/`TCP6` tokens or a v2 `STREAM` transport; `Header.UDPAddrs`
+  does the same conversion for other callers. Leave it unset for stream
+  protocols over UDP such as KCP or QUIC.
 - A nil or unspecified target is sent as `0.0.0.0` or `::`, matching the
   client's address family. As in HAProxy, an IPv4/IPv6 pair is sent as `TCP6`
   (v1) or `AF_INET6` (v2), with the IPv4 side in its IPv4-mapped form
   `::ffff:a.b.c.d`. v1 has no UDP token, so UDP pairs are written with
-  `TCP4`/`TCP6` (historical nps behavior); use v2 to mark them as `DGRAM`.
+  `TCP4`/`TCP6`; use v2 to mark them as `DGRAM`.
   Unsupported addresses give `PROXY UNKNOWN\r\n` (v1) or a `LOCAL` header (v2).
 
 ## Transparent Proxying
@@ -610,15 +627,25 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
   names unresolved, for example to forward through a tunnel), `AllowPacket`
   and `UDPAddr` (the address advertised to clients).
+- `Allow` and `AllowPacket` see every IP address a client sends in
+  `Dst.IP`, including IPv4-mapped IPv6 addresses and domain names that are IP
+  literals, also with one trailing dot such as `127.0.0.1.`. Other names arrive unresolved, so an IP policy must also check the
+  resolved address where `Dial` or `DialPacket` resolves it, for example with
+  a `net.Dialer` `Control` function: some resolvers accept forms such as
+  `127.1`.
 - UDP on a fixed port (`PacketConn`): datagrams must come from the IP address
   of their association's control connection, and are matched by the exact
   source the client announced, or else as the only pending association of that
   IP; ambiguous sources are dropped. Announcements of another IP are ignored,
-  so a client cannot claim the datagrams of others. `ListenUDP` instead gives
-  each association its own socket. Replies from any source are relayed (full
-  cone). An association ends with its control connection, or after
-  `UDPIdleTimeout`; `UDPOutlivesControl` keeps it for clients that close the
-  control connection early.
+  so a client cannot claim the datagrams of others. A control connection
+  without an IP address, such as a tunneled stream, must announce the client's
+  IP address, or the request is refused. `ListenUDP` instead gives each
+  association its own socket, which without a known client IP takes the first
+  source that sends. Replies from any source are relayed (full cone), and a
+  reply that cannot be delivered is reported to `OnError` and dropped. An
+  association ends with its control connection, or after `UDPIdleTimeout`;
+  `UDPOutlivesControl` keeps it for clients that close the control connection
+  early.
 - `OnError` receives the errors that end connections and drop datagrams, for
   logging; the package itself does not log.
 - The server runs over any `net.Conn`. For SOCKS over TLS, serve
@@ -691,8 +718,9 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 - The context bounds the dial and the proxy handshake; the returned connection
   has no deadline. Bytes the HTTP proxy sends right after its `2xx` reply are
   kept.
-- `FromEnvironment` reads `ALL_PROXY` and bypasses the proxy for targets in
-  `NO_PROXY`: `*`, IP addresses, CIDR ranges, and domain names, which also
-  match their subdomains (a leading `.` or `*.` matches subdomains only). An
-  entry may end in `:port`. `ParseNoProxy` exposes the same matcher for other
-  dialers.
+- `FromEnvironment` reads `ALL_PROXY`, where a value without a scheme, such
+  as `proxy:3128`, is an `http` proxy, and bypasses the proxy for targets in
+  `NO_PROXY`: `*`, IP addresses (IPv6 with or without brackets), CIDR ranges,
+  and domain names, which also match their subdomains (a leading `.` or `*.`
+  matches subdomains only). An entry may end in `:port`. `ParseNoProxy`
+  exposes the same matcher for other dialers.

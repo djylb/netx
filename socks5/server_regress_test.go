@@ -6,7 +6,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,24 +181,71 @@ type noAddrConn struct{ net.Conn }
 
 func (noAddrConn) RemoteAddr() net.Addr { return nil }
 
-func TestServerUDPWithoutRemoteAddr(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &socks5.Server{PacketConn: pc}
-	defer func() { _ = s.Close() }()
+// associateWithoutAddr sends a UDP ASSOCIATE announcing announced over a
+// control connection without a remote address and returns the reply.
+func associateWithoutAddr(t *testing.T, s *socks5.Server, announced socks5.Addr) (socks5.Addr, error) {
+	t.Helper()
 	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
 	go func() { _ = s.ServeConn(noAddrConn{server}) }()
 	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
 	_ = socks5.WriteMethods(client, socks5.MethodNoAuth)
 	if _, err := socks5.ReadMethod(client); err != nil {
 		t.Fatal(err)
 	}
-	_ = socks5.WriteRequest(client, socks5.CmdUDPAssociate, socks5.Addr{})
-	if _, err := socks5.ReadReply(client); err != nil {
+	_ = socks5.WriteRequest(client, socks5.CmdUDPAssociate, announced)
+	return socks5.ReadReply(client)
+}
+
+// TestServerUDPWithoutRemoteAddr checks that the shared socket, which routes
+// datagrams by client IP address, needs one from the control connection or
+// the request, and refuses rather than accepts an association it cannot
+// route.
+func TestServerUDPWithoutRemoteAddr(t *testing.T) {
+	echo := udpEcho(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socks5.Server{PacketConn: pc}
+	defer func() { _ = s.Close() }()
+	var replyErr *socks5.ReplyError
+	if _, err := associateWithoutAddr(t, s, socks5.Addr{}); !errors.As(err, &replyErr) {
+		t.Fatalf("unannounced UDP ASSOCIATE reply error = %v, want a refusal", err)
+	}
+	client := newUDPClient(t)
+	relay, err := associateWithoutAddr(t, s, socks5.AddrFromNetAddr(client.LocalAddr()))
+	if err != nil {
+		t.Fatalf("announced UDP ASSOCIATE reply error = %v", err)
+	}
+	if got, _ := exchange(t, client, net.UDPAddrFromAddrPort(netip.AddrPortFrom(relay.IP, relay.Port)), echo, "announced"); got != "echo:announced" {
+		t.Fatalf("reply = %q", got)
+	}
+}
+
+// TestServerUDPOwnSocketWithoutRemoteAddr checks that an association with a
+// socket of its own and no known client IP address takes the first source
+// that sends, and only that one.
+func TestServerUDPOwnSocketWithoutRemoteAddr(t *testing.T) {
+	echo := udpEcho(t)
+	s := &socks5.Server{ListenUDP: func(context.Context, *socks5.Request) (net.PacketConn, error) {
+		return net.ListenPacket("udp", "127.0.0.1:0")
+	}}
+	defer func() { _ = s.Close() }()
+	bound, err := associateWithoutAddr(t, s, socks5.Addr{})
+	if err != nil {
 		t.Fatalf("UDP ASSOCIATE reply error = %v", err)
+	}
+	relay := net.UDPAddrFromAddrPort(netip.AddrPortFrom(bound.IP, bound.Port))
+	first, other := newUDPClient(t), newUDPClient(t)
+	if got, _ := exchange(t, first, relay, echo, "first"); got != "echo:first" {
+		t.Fatalf("first source reply = %q", got)
+	}
+	if got, _ := exchange(t, other, relay, echo, "other"); got != "" {
+		t.Fatalf("second source got reply %q", got)
+	}
+	if got, _ := exchange(t, first, relay, echo, "again"); got != "echo:again" {
+		t.Fatalf("first source reply = %q", got)
 	}
 }
 
@@ -205,6 +255,7 @@ func TestReplyForTranslatesSOCKS4(t *testing.T) {
 		socks5.Reply4Rejected:         socks5.ReplyGeneralFailure,
 		socks5.Reply4IdentdMismatch:   socks5.ReplyNotAllowed,
 		socks5.Reply(200):             socks5.ReplyGeneralFailure,
+		socks5.ReplySucceeded:         socks5.ReplyGeneralFailure, // an error is no success
 	} {
 		if got := socks5.ReplyFor(&socks5.ReplyError{Reply: in}); got != want {
 			t.Errorf("ReplyFor(%v) = %v, want %v", in, got, want)
@@ -212,5 +263,189 @@ func TestReplyForTranslatesSOCKS4(t *testing.T) {
 	}
 	if got := socks5.ReplyFor(io.EOF); got != socks5.ReplyGeneralFailure {
 		t.Errorf("ReplyFor(EOF) = %v", got)
+	}
+}
+
+// temporaryError is a temporary Accept error such as EMFILE.
+type temporaryError struct{}
+
+func (temporaryError) Error() string   { return "too many open files" }
+func (temporaryError) Timeout() bool   { return false }
+func (temporaryError) Temporary() bool { return true }
+
+// failingListener returns its errors from Accept before accepting.
+type failingListener struct {
+	net.Listener
+	mu   sync.Mutex
+	errs []error
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+func TestServeRetriesTemporaryAcceptErrors(t *testing.T) {
+	target := echoTCP(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emfile := &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept", temporaryError{})}
+	s := &socks5.Server{}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(&failingListener{Listener: ln, errs: []error{emfile, emfile}}) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).DialContext(ctx, "tcp", target)
+	if err != nil {
+		t.Fatalf("Dial() after temporary Accept errors = %v", err)
+	}
+	assertEcho(t, c, "still serving")
+	_ = c.Close()
+	_ = s.Close()
+	if err := <-done; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Fatalf("Serve() = %v, want %v", err, socks5.ErrServerClosed)
+	}
+
+	// Other errors still end Serve.
+	fatal := errors.New("listener broken")
+	ln, err = net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	if err := (&socks5.Server{}).Serve(&failingListener{Listener: ln, errs: []error{fatal}}); err != fatal {
+		t.Fatalf("Serve() = %v, want %v", err, fatal)
+	}
+}
+
+// TestServerAllowSeesEveryIPForm checks that Allow sees an IPv4-mapped IPv6
+// address and an IP literal sent as a name, also with a trailing dot, as the
+// IP address, so that an
+// address policy cannot be bypassed with them, and that a refusal without a
+// reply code is not reported as success.
+func TestServerAllowSeesEveryIPForm(t *testing.T) {
+	target := netip.MustParseAddrPort(echoTCP(t))
+	ip, port := target.Addr(), target.Port()
+	loopback := netip.MustParsePrefix("127.0.0.0/8")
+	seen := make(chan socks5.Addr, 1)
+	addr := serve(t, &socks5.Server{
+		SOCKS4: true,
+		Allow: func(_ context.Context, req *socks5.Request) error {
+			if req.Dst.Name == "refused.example" {
+				return &socks5.ReplyError{}
+			}
+			seen <- req.Dst
+			if loopback.Contains(req.Dst.IP) {
+				return errors.New("loopback")
+			}
+			return nil
+		},
+	})
+	portBytes := []byte{byte(port >> 8), byte(port)}
+	name := func(host string) []byte {
+		return append(append([]byte{3, byte(len(host))}, host...), portBytes...)
+	}
+	mapped := netip.AddrFrom16(ip.As16()).AsSlice()
+	for desc, wire := range map[string][]byte{
+		"IPv4":                 append(append([]byte{1}, ip.AsSlice()...), portBytes...),
+		"IPv4-mapped IPv6":     append(append([]byte{4}, mapped...), portBytes...),
+		"IPv4 literal name":    name(ip.String()),
+		"mapped literal name":  name("::ffff:" + ip.String()),
+		"trailing dot name":    name(ip.String() + "."),
+		"refused without code": name("refused.example"),
+	} {
+		c := handshake(t, addr)
+		_, _ = c.Write(append([]byte{socks5.Version, byte(socks5.CmdConnect), 0}, wire...))
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := socks5.ReadReply(c); err == nil {
+			t.Errorf("%s: CONNECT allowed", desc)
+		}
+		if desc == "refused without code" {
+			continue
+		}
+		if got := <-seen; got != (socks5.Addr{IP: ip, Port: port}) {
+			t.Errorf("%s: Allow saw IP %v, Name %q", desc, got.IP, got.Name)
+		}
+	}
+
+	// SOCKS4a names that are IP literals too.
+	for _, host := range []string{ip.String(), ip.String() + "."} {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.Write(append([]byte{4, 1, portBytes[0], portBytes[1], 0, 0, 0, 1, 0}, host+"\x00"...))
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := socks5.ReadReply4(c); err == nil {
+			t.Errorf("SOCKS4a CONNECT to %q allowed", host)
+		}
+		_ = c.Close()
+		if got := <-seen; got != (socks5.Addr{IP: ip, Port: port}) {
+			t.Errorf("SOCKS4a %q: Allow saw IP %v, Name %q", host, got.IP, got.Name)
+		}
+	}
+}
+
+// oversizePacketConn fails to send datagrams larger than limit, as a socket
+// does with EMSGSIZE.
+type oversizePacketConn struct {
+	net.PacketConn
+	limit int
+}
+
+func (c oversizePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if len(p) > c.limit {
+		return 0, &net.OpError{Op: "write", Net: "udp", Addr: addr, Err: errors.New("message too long")}
+	}
+	return c.PacketConn.WriteTo(p, addr)
+}
+
+// TestServerUDPKeepsAssociationAfterUndeliverableReply checks that a reply
+// that cannot be sent to the client, here one too large once wrapped, is
+// reported and dropped without ending the association.
+func TestServerUDPKeepsAssociationAfterUndeliverableReply(t *testing.T) {
+	echo := udpEcho(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 8)
+	addr := serve(t, &socks5.Server{
+		PacketConn: oversizePacketConn{PacketConn: pc, limit: 1024},
+		OnError: func(_ net.Conn, err error) {
+			select {
+			case errs <- err:
+			default:
+			}
+		},
+	})
+	ctl, relay := associate(t, addr, socks5.Addr{})
+	client := newUDPClient(t)
+	if got, _ := exchange(t, client, relay, echo, strings.Repeat("x", 1500)); got != "" {
+		t.Fatalf("oversized reply delivered: %d bytes", len(got))
+	}
+	select {
+	case err := <-errs:
+		if !strings.Contains(err.Error(), "message too long") {
+			t.Fatalf("OnError(%v), want the send error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("undeliverable reply not reported")
+	}
+	if got, _ := exchange(t, client, relay, echo, "small"); got != "echo:small" {
+		t.Fatalf("reply after an undeliverable one = %q", got)
+	}
+	_ = ctl.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("control connection read = %v, want it still open", err)
 	}
 }

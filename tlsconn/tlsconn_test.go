@@ -140,6 +140,58 @@ func TestTLSClientBoundsHandshakeWhenDeadlinesIgnored(t *testing.T) {
 	}
 }
 
+// deadlineUnsupportedConn rejects deadlines, as some tunnelled streams do.
+type deadlineUnsupportedConn struct {
+	net.Conn
+}
+
+func (c *deadlineUnsupportedConn) SetDeadline(time.Time) error      { return errors.ErrUnsupported }
+func (c *deadlineUnsupportedConn) SetReadDeadline(time.Time) error  { return errors.ErrUnsupported }
+func (c *deadlineUnsupportedConn) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
+
+func TestTLSHandshakeWithoutDeadlineSupport(t *testing.T) {
+	cert := testSelfSignedCert(t)
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		tc, err := Server(context.Background(), &deadlineUnsupportedConn{Conn: serverConn}, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}, time.Second)
+		if err == nil {
+			_, err = tc.Write([]byte("ok"))
+		}
+		errCh <- err
+	}()
+	tlsClient, err := Client(context.Background(), &deadlineUnsupportedConn{Conn: clientConn}, &tls.Config{
+		InsecureSkipVerify: true,
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("Client() error = %v", err)
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(tlsClient, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("Read() = %q, %v", buf, err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Server() error = %v", err)
+	}
+
+	// The context still bounds a handshake the peer never answers.
+	serverConn2, clientConn2 := net.Pipe()
+	defer func() { _ = serverConn2.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, serverConn2) }()
+	started := time.Now()
+	_, err = Client(context.Background(), &deadlineUnsupportedConn{Conn: clientConn2}, &tls.Config{
+		InsecureSkipVerify: true,
+	}, 200*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
+		t.Fatalf("Client() error = %v after %v, want %v", err, time.Since(started), context.DeadlineExceeded)
+	}
+}
+
 func TestTLSClientHonorsCanceledContext(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

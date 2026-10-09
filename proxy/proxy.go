@@ -105,7 +105,8 @@ func FromURL(u *url.URL, forward ContextDialer) (ContextDialer, error) {
 // FromEnvironment returns a dialer for the proxy URL in ALL_PROXY (or
 // all_proxy) that dials directly through forward, or a zero net.Dialer if
 // forward is nil, for the targets matched by NO_PROXY (or no_proxy). It
-// returns the direct dialer when ALL_PROXY is unset.
+// returns the direct dialer when ALL_PROXY is unset. A value without a
+// scheme, such as "proxy.example:3128", is taken as an http proxy URL.
 //
 // NO_PROXY uses the syntax of ParseNoProxy.
 func FromEnvironment(forward ContextDialer) (ContextDialer, error) {
@@ -117,6 +118,13 @@ func FromEnvironment(forward ContextDialer) (ContextDialer, error) {
 		return forward, nil
 	}
 	u, err := url.Parse(raw)
+	if (err != nil || u.Scheme == "" || u.Host == "") && !strings.Contains(raw, "://") {
+		// A bare host:port, such as "127.0.0.1:1080" or "proxy:3128", is an
+		// http proxy, as for curl.
+		if bare, bareErr := url.Parse("http://" + raw); bareErr == nil && bare.Host != "" {
+			u, err = bare, nil
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("proxy: parse ALL_PROXY: %w", err)
 	}

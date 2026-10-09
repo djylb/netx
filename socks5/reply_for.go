@@ -8,7 +8,8 @@ import (
 )
 
 // ReplyFor returns the SOCKS5 reply code that reports err to a client: the
-// Reply of a *ReplyError, ReplySucceeded for nil, and otherwise the closest
+// Reply of a *ReplyError (ReplyGeneralFailure if that is ReplySucceeded),
+// ReplySucceeded for nil, and otherwise the closest
 // code for a failed dial, such as ReplyConnectionRefused or
 // ReplyHostUnreachable, or ReplyGeneralFailure. SOCKS4 codes in a *ReplyError,
 // as from an upstream SOCKS4 Dialer, are translated: the identd failures to
@@ -21,6 +22,8 @@ func ReplyFor(err error) Reply {
 		return ReplySucceeded
 	case errors.As(err, &replyErr):
 		switch rep := replyErr.Reply; {
+		case rep == ReplySucceeded: // an error must not report success
+			return ReplyGeneralFailure
 		case rep <= ReplyAddrTypeNotSupported:
 			return rep
 		case rep == Reply4IdentdUnreached, rep == Reply4IdentdMismatch:

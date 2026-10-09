@@ -86,7 +86,10 @@ func TestNetErrorClassifiersMatchText(t *testing.T) {
 		{msg: "dial tcp 192.0.2.1:80: i/o timeout", want: "timeout"},
 		{msg: "dial tcp 192.0.2.1:80: connect: connection timed out", want: "timeout"},
 		{msg: "dial tcp 192.0.2.1:80: connectex: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond.", want: "timeout"},
+		{msg: "dial tcp 192.0.2.1:80: connect: operation timed out", want: "timeout"},
 		{msg: "unexpected failure", want: "other"},
+		{msg: "parse error: datetime outside the allowed range", want: "other"},
+		{msg: "runtime output was truncated", want: "other"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want+"/"+tt.msg, func(t *testing.T) {

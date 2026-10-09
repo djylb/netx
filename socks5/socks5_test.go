@@ -350,7 +350,7 @@ func FuzzParseDatagram(f *testing.F) {
 			t.Fatalf("AppendDatagram() error = %v", err)
 		}
 		addr2, payload2, err := ParseDatagram(again)
-		if err != nil || addr2.String() != addr.String() || !bytes.Equal(payload, payload2) {
+		if err != nil || addr2 != addr || !bytes.Equal(payload, payload2) {
 			t.Fatalf("round trip = %v, %q, %v; want %v, %q", addr2, payload2, err, addr, payload)
 		}
 	})
@@ -359,6 +359,9 @@ func FuzzParseDatagram(f *testing.F) {
 func FuzzReadRequest(f *testing.F) {
 	f.Add([]byte{5, 1, 0, 1, 127, 0, 0, 1, 0, 80})
 	f.Add([]byte{5, 1, 0, 3, 1, 'a', 0, 80})
+	f.Add([]byte{5, 1, 0, 3, 7, ':', ':', '1', '%', 'e', 't', 'h', 0, 80})
+	f.Add([]byte{5, 1, 0, 3, 4, '1', '.', '2', '.', 0, 80})
+	f.Add([]byte{5, 1, 0, 3, 10, '1', '2', '7', '.', '0', '.', '0', '.', '1', '.', 0, 80})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		cmd, addr, err := ReadRequest(bytes.NewReader(b))
 		if err != nil {
@@ -369,7 +372,7 @@ func FuzzReadRequest(f *testing.F) {
 			t.Fatalf("WriteRequest() error = %v", err)
 		}
 		cmd2, addr2, err := ReadRequest(&wire)
-		if err != nil || cmd2 != cmd || addr2.String() != addr.String() {
+		if err != nil || cmd2 != cmd || addr2 != addr {
 			t.Fatalf("round trip = %v, %v, %v", cmd2, addr2, err)
 		}
 	})
@@ -385,6 +388,23 @@ func TestDecodeAddr(t *testing.T) {
 	for _, bad := range [][]byte{nil, {1, 127, 0, 0, 1, 0}, {4}, {3, 0, 0, 80}} {
 		if _, _, err := DecodeAddr(bad); !errors.Is(err, ErrMalformed) {
 			t.Errorf("DecodeAddr(%v) error = %v, want %v", bad, err, ErrMalformed)
+		}
+	}
+	// Every IP address is decoded as IP, in its IPv4 form when mapped.
+	port := []byte{0, 80}
+	for wire, want := range map[string]Addr{
+		string(append(append([]byte{4}, netip.MustParseAddr("::ffff:127.0.0.1").AsSlice()...), port...)): {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		string(append([]byte{3, 9}, "127.0.0.1\x00\x50"...)):                                             {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		string(append([]byte{3, 16}, "::ffff:127.0.0.1\x00\x50"...)):                                     {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		string(append([]byte{3, 12}, "fe80::1%eth0\x00\x50"...)):                                         {IP: netip.MustParseAddr("fe80::1"), Port: 80},
+		string(append([]byte{3, 10}, "127.0.0.1.\x00\x50"...)):                                           {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
+		string(append([]byte{3, 4}, "::1.\x00\x50"...)):                                                  {IP: netip.MustParseAddr("::1"), Port: 80},
+		string(append([]byte{3, 11}, "127.0.0.1..\x00\x50"...)):                                          {Name: "127.0.0.1..", Port: 80},
+		string(append([]byte{3, 1}, ".\x00\x50"...)):                                                     {Name: ".", Port: 80},
+		string(append([]byte{3, 5}, "127.1\x00\x50"...)):                                                 {Name: "127.1", Port: 80},
+	} {
+		if addr, _, err := DecodeAddr([]byte(wire)); err != nil || addr != want {
+			t.Errorf("DecodeAddr(%q) = IP %v, Name %q, %v; want %v", wire, addr.IP, addr.Name, err, want)
 		}
 	}
 	if _, _, err := DecodeAddr([]byte{2, 0}); !errors.Is(err, ErrAddrType) {

@@ -28,10 +28,11 @@ func IsTimeout(err error) bool {
 	if errors.As(err, &ne) {
 		return ne.Timeout()
 	}
-	s := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	// Spaces are kept so that words such as "runtime output" do not match.
+	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "timeout") ||
-		strings.Contains(s, "timedout") ||
-		strings.Contains(s, "didnotproperlyrespondafteraperiodoftime")
+		strings.Contains(s, "timed out") ||
+		strings.Contains(s, "did not properly respond after a period of time")
 }
 
 // IsClosed reports whether err comes from using a closed connection or

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // Address types defined by RFC 1928.
@@ -116,8 +117,9 @@ func (a Addr) AppendBinary(b []byte) ([]byte, error) {
 	return binary.BigEndian.AppendUint16(b, a.Port), nil
 }
 
-// ReadAddr reads an encoded address. It returns ErrAddrType for an unknown
-// address type and ErrMalformed for an empty domain name.
+// ReadAddr reads an encoded address, normalized as by DecodeAddr. It returns
+// ErrAddrType for an unknown address type and ErrMalformed for an empty
+// domain name.
 func ReadAddr(r io.Reader) (Addr, error) {
 	var buf [MaxAddrLen]byte
 	if _, err := io.ReadFull(r, buf[:2]); err != nil {
@@ -144,6 +146,11 @@ func ReadAddr(r io.Reader) (Addr, error) {
 // DecodeAddr decodes the encoded address at the start of b and returns it
 // with its encoded length. It returns ErrAddrType for an unknown address type
 // and ErrMalformed for a truncated address or an empty domain name.
+//
+// Every IP address comes back as IP, in one form: an IPv4-mapped IPv6
+// address as IPv4, and a domain name that is an IP literal, such as
+// "127.0.0.1" or "::1", also with one trailing dot such as "127.0.0.1.", as
+// that address without a zone. Other names are kept unresolved.
 func DecodeAddr(b []byte) (Addr, int, error) {
 	if len(b) < 1 {
 		return Addr{}, 0, ErrMalformed
@@ -161,7 +168,7 @@ func DecodeAddr(b []byte) (Addr, int, error) {
 		if len(b) < pos+16+2 {
 			return Addr{}, 0, ErrMalformed
 		}
-		addr.IP = netip.AddrFrom16([16]byte(b[pos : pos+16]))
+		addr.IP = netip.AddrFrom16([16]byte(b[pos : pos+16])).Unmap()
 		pos += 16
 	case atypDomain:
 		if len(b) < pos+1 {
@@ -172,13 +179,24 @@ func DecodeAddr(b []byte) (Addr, int, error) {
 		if n == 0 || len(b) < pos+n+2 {
 			return Addr{}, 0, ErrMalformed
 		}
-		addr.Name = string(b[pos : pos+n])
+		addr = nameAddr(string(b[pos : pos+n]))
 		pos += n
 	default:
 		return Addr{}, 0, ErrAddrType
 	}
 	addr.Port = binary.BigEndian.Uint16(b[pos:])
 	return addr, pos + 2, nil
+}
+
+// nameAddr returns the Addr of a requested host name: its IP address when it
+// is an IP literal, also with one trailing dot as in "127.0.0.1.", which some
+// resolvers connect to as that address, so that address policies see every
+// form of an address.
+func nameAddr(name string) Addr {
+	if ip, err := netip.ParseAddr(strings.TrimSuffix(name, ".")); err == nil {
+		return Addr{IP: ip.Unmap().WithZone("")}
+	}
+	return Addr{Name: name}
 }
 
 // unexpectedEOF turns an EOF inside a message into io.ErrUnexpectedEOF.
