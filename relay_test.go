@@ -522,9 +522,13 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 			t.Fatalf("datagrams relayed = %v, want [%d]", got, size)
 		}
 	}
+	// macOS refuses to send a datagram larger than the socket's send
+	// buffer, 9 KiB by default.
+	const sendBuffer = 64 << 10
 	t.Run("PacketListener", func(t *testing.T) {
 		l := newUDPListener(t)
 		client := dialUDP(t, l)
+		_ = client.SetWriteBuffer(sendBuffer)
 		if _, err := client.Write(make([]byte, size)); err != nil {
 			t.Fatal(err)
 		}
@@ -536,6 +540,7 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 			t.Skipf("ListenUDP: %v", err)
 		}
 		defer func() { _ = server.Close() }()
+		_ = server.SetWriteBuffer(sendBuffer)
 		client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
 		if err != nil {
 			t.Fatal(err)
