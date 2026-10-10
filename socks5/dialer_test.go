@@ -7,9 +7,11 @@ import (
 	"net"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -247,4 +249,84 @@ func TestDialerResolver(t *testing.T) {
 			t.Fatalf("SOCKS4 %v: server received %v, want a resolved loopback address", socks4, got)
 		}
 	}
+}
+
+// sharedParentConn stands for a connection that several netx.WrapConns
+// borrow, such as the TCP connection beneath SSH channels. It has no deadlines,
+// so timeouts end the handshake by closing the wrapping connection.
+type sharedParentConn struct {
+	noDeadlineConn
+	closed atomic.Bool
+}
+
+func (c *sharedParentConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func newSharedParent(t *testing.T) *sharedParentConn {
+	a, b := net.Pipe()
+	t.Cleanup(func() {
+		_ = a.Close()
+		_ = b.Close()
+	})
+	return &sharedParentConn{noDeadlineConn: noDeadlineConn{a}}
+}
+
+type borrowingDialer struct{ parent net.Conn }
+
+func (d borrowingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return netx.WrapConn(c, d.parent), nil
+}
+
+// silentListener accepts connections and never answers them.
+func silentListener(t *testing.T) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Timeouts close the connection being handshaken, never the connection that
+// a netx.WrapConn borrows for addresses and deadlines.
+func TestHandshakeTimeoutKeepsBorrowedParent(t *testing.T) {
+	t.Run("Server", func(t *testing.T) {
+		parent := newSharedParent(t)
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		s := &socks5.Server{HandshakeTimeout: 50 * time.Millisecond}
+		if err := s.ServeConn(netx.WrapConn(server, parent)); err == nil {
+			t.Fatal("ServeConn() succeeded without a handshake")
+		}
+		if parent.closed.Load() {
+			t.Fatal("the handshake timeout closed the borrowed parent")
+		}
+	})
+	t.Run("Dialer", func(t *testing.T) {
+		parent := newSharedParent(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		d := &socks5.Dialer{ProxyAddr: silentListener(t), Forward: borrowingDialer{parent}}
+		if _, err := d.DialContext(ctx, "tcp", "example.com:80"); err == nil {
+			t.Fatal("DialContext() succeeded without a reply")
+		}
+		if parent.closed.Load() {
+			t.Fatal("the dial timeout closed the borrowed parent")
+		}
+	})
 }

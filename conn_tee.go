@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -90,6 +91,13 @@ func (t *TeeConn) SetWriteDeadline(deadline time.Time) error {
 		return net.ErrClosed
 	}
 	return conn.SetWriteDeadline(deadline)
+}
+
+func (t *TeeConn) innerReader() io.Reader {
+	if conn := t.conn(); conn != nil {
+		return conn
+	}
+	return nil
 }
 
 // RawConn returns the innermost connection beneath t, or nil after Close or

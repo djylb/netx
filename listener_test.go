@@ -293,3 +293,28 @@ func TestSingleConnListenerServesHTTP(t *testing.T) {
 		t.Fatal("Serve() did not return after the connection closed")
 	}
 }
+
+// A context that is already done fails Deliver and Dial every time, even
+// with room in the queue.
+func TestChanListenerDoneContextFails(t *testing.T) {
+	l := NewChanListener(nil, 1000)
+	defer func() { _ = l.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		client, server := net.Pipe()
+		if err := l.Deliver(ctx, server); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Deliver() = %v, want context.Canceled", err)
+		}
+		_ = client.Close()
+		if c, err := l.Dial(ctx, nil); !errors.Is(err, context.Canceled) {
+			if c != nil {
+				_ = c.Close()
+			}
+			t.Fatalf("Dial() = %v, want context.Canceled", err)
+		}
+	}
+	if n := len(l.conns); n != 0 {
+		t.Fatalf("%d connections queued, want none", n)
+	}
+}

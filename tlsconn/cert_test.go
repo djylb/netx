@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -320,4 +321,42 @@ func TestCertCacheWaitersAndReloads(t *testing.T) {
 		}
 	})
 	wg.Wait()
+}
+
+// A certificate cached from PEM data does not keep that data, which holds
+// the private key, reachable.
+func TestCertCacheDoesNotKeepPEMInput(t *testing.T) {
+	cert, err := NewSelfSigned(SelfSignedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := EncodePEM(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c CertCache
+	released := make(chan struct{})
+	func() {
+		// The PEM blocks are slices of a larger buffer, such as a whole
+		// configuration file.
+		buf := new([1 << 20]byte)
+		n := copy(buf[:], certPEM)
+		m := copy(buf[n:], keyPEM)
+		runtime.SetFinalizer(buf, func(*[1 << 20]byte) { close(released) })
+		if _, err := c.LoadPEM(buf[:n:n], buf[n:n+m:n+m]); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	for range 10 {
+		runtime.GC()
+		select {
+		case <-released:
+			if c.Len() != 1 {
+				t.Fatalf("Len() = %d, want 1", c.Len())
+			}
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("the PEM input is still reachable from the cache")
 }

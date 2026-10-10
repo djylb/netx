@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -28,25 +29,35 @@ type PacketConn interface {
 	Close() error
 }
 
-// dnsCacheTTL is how long NewPacketConn reuses a resolved name.
-const dnsCacheTTL = time.Minute
+// How long NewPacketConn reuses a resolved name, and a failed lookup, so
+// that datagrams to a name that does not resolve do not each wait for DNS.
+const (
+	dnsCacheTTL   = time.Minute
+	dnsFailureTTL = 5 * time.Second
+)
 
 // NewPacketConn returns a PacketConn that sends and receives through c,
 // resolving domain names with net.DefaultResolver and caching the results for
-// a minute. Replies from any source are delivered, as with a full-cone NAT.
+// a minute, and failed lookups for five seconds. Close ends the lookups in
+// progress. Replies from any source are delivered, as with a full-cone NAT.
 func NewPacketConn(c *net.UDPConn) PacketConn {
-	return &udpPacketConn{c: c, names: make(map[string]dnsEntry)}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &udpPacketConn{c: c, resolver: net.DefaultResolver, ctx: ctx, cancel: cancel, names: make(map[string]dnsEntry)}
 }
 
 type dnsEntry struct {
 	ip      netip.Addr
+	err     error
 	expires time.Time
 }
 
 type udpPacketConn struct {
-	c     *net.UDPConn
-	mu    sync.Mutex
-	names map[string]dnsEntry
+	c        *net.UDPConn
+	resolver *net.Resolver
+	ctx      context.Context // canceled by Close, ending lookups
+	cancel   context.CancelFunc
+	mu       sync.Mutex
+	names    map[string]dnsEntry
 }
 
 func (u *udpPacketConn) WriteTo(p []byte, dst Addr) (int, error) {
@@ -64,18 +75,39 @@ func (u *udpPacketConn) resolve(name string) (netip.Addr, error) {
 	if name == "" {
 		return netip.IPv4Unspecified(), nil
 	}
-	now := time.Now()
 	u.mu.Lock()
 	entry, ok := u.names[name]
 	u.mu.Unlock()
-	if ok && now.Before(entry.expires) {
-		return entry.ip, nil
+	if ok && time.Now().Before(entry.expires) {
+		return entry.ip, entry.err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultDialTimeout)
+	ip, err := u.lookup(name)
+	if u.ctx.Err() != nil {
+		return netip.Addr{}, net.ErrClosed
+	}
+	ttl := dnsCacheTTL
+	if err != nil {
+		ttl = dnsFailureTTL
+	}
+	u.mu.Lock()
+	if len(u.names) >= 1024 {
+		clear(u.names)
+	}
+	// The lookup may have taken seconds; the entry lasts from its end.
+	u.names[name] = dnsEntry{ip: ip, err: err, expires: time.Now().Add(ttl)}
+	u.mu.Unlock()
+	return ip, err
+}
+
+func (u *udpPacketConn) lookup(name string) (netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(u.ctx, DefaultDialTimeout)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", name)
+	ips, err := u.resolver.LookupNetIP(ctx, "ip", name)
 	if err != nil {
 		return netip.Addr{}, err
+	}
+	if len(ips) == 0 {
+		return netip.Addr{}, &net.DNSError{Err: "no suitable address", Name: name, IsNotFound: true}
 	}
 	ip := ips[0]
 	for _, candidate := range ips {
@@ -84,12 +116,6 @@ func (u *udpPacketConn) resolve(name string) (netip.Addr, error) {
 			break
 		}
 	}
-	u.mu.Lock()
-	if len(u.names) >= 1024 {
-		clear(u.names)
-	}
-	u.names[name] = dnsEntry{ip: ip.Unmap(), expires: now.Add(dnsCacheTTL)}
-	u.mu.Unlock()
 	return ip.Unmap(), nil
 }
 
@@ -101,7 +127,10 @@ func (u *udpPacketConn) ReadFrom(p []byte) (int, Addr, error) {
 	return n, Addr{IP: ap.Addr().Unmap(), Port: ap.Port()}, nil
 }
 
-func (u *udpPacketConn) Close() error { return u.c.Close() }
+func (u *udpPacketConn) Close() error {
+	u.cancel()
+	return u.c.Close()
+}
 
 // udpRelay routes the datagrams arriving on one socket to the associations of
 // their clients.
@@ -164,8 +193,10 @@ func (r *udpRelay) acceptLoop() {
 }
 
 // match takes the association for a new client source: the one that
-// announced it, the only one pending for its IP address, or the one that
-// takes any source.
+// announced it, else the only one pending for its IP address that announced
+// no port, else the only one pending for its IP address, whose client may be
+// behind a NAT that changed the announced port, or the one that takes any
+// source.
 func (r *udpRelay) match(src netip.AddrPort) *association {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -174,11 +205,21 @@ func (r *udpRelay) match(src netip.AddrPort) *association {
 		return a
 	}
 	list := r.pending[src.Addr()]
+	var unannounced *association
+	n := 0
 	for _, a := range list {
 		if a.announced == src {
 			r.removeLocked(a)
 			return a
 		}
+		if !a.announced.IsValid() {
+			unannounced, n = a, n+1
+		}
+	}
+	// The ports that the others announced tell them apart from it.
+	if n == 1 {
+		r.removeLocked(unannounced)
+		return unannounced
 	}
 	if len(list) == 1 {
 		a := list[0]
@@ -188,10 +229,12 @@ func (r *udpRelay) match(src netip.AddrPort) *association {
 	return nil
 }
 
+// add makes a pending, unless the relay is closed or a has already ended:
+// its first-datagram timer may fire before it is added.
 func (r *udpRelay) add(a *association) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
+	if r.closed || isDone(a.done) {
 		return false
 	}
 	if a.key.IsValid() {
@@ -213,11 +256,8 @@ func (r *udpRelay) removeLocked(a *association) {
 		r.anyPeer = nil
 	}
 	list := r.pending[a.key]
-	for i, other := range list {
-		if other == a {
-			list = append(list[:i], list[i+1:]...)
-			break
-		}
+	if i := slices.Index(list, a); i >= 0 {
+		list = slices.Delete(list, i, i+1) // clears the vacated slot
 	}
 	if len(list) == 0 {
 		delete(r.pending, a.key)
@@ -303,14 +343,15 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 		return err
 	}
 	// The association lasts while the control connection is open; it ending
-	// first unblocks the read below.
+	// first closes the control connection, which also ends the read below
+	// on connections without deadline support.
 	go func() {
 		<-a.done
-		_ = req.Conn.SetReadDeadline(time.Unix(1, 0))
+		_ = req.Conn.Close()
 	}()
 	_, err = io.Copy(io.Discard, req.Conn)
-	if netx.IsTimeout(err) {
-		err = nil
+	if isDone(a.done) {
+		err = nil // the association ended and closed the connection
 	}
 	if s.UDPOutlivesControl {
 		select {
@@ -335,8 +376,10 @@ func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort) {
 	case client.IsValid():
 		// Only the control connection's IP address may send: honoring an
 		// announcement of another address would let a client claim the
-		// datagrams of others.
-		if ip == client && req.Dst.Port != 0 {
+		// datagrams of others. Its port still names the source, behind a
+		// NAT that keeps ports and for clients that announce 0.0.0.0, as
+		// RFC 1928 says, or a name when they do not know their address.
+		if req.Dst.Port != 0 {
 			announced = netip.AddrPortFrom(client, req.Dst.Port)
 		}
 		return client, announced
@@ -391,6 +434,15 @@ func (s *Server) udpAddr(req *Request, socket net.Addr) Addr {
 	return addr
 }
 
+func isDone(done chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
 // bind attaches the client's datagram stream and starts relaying.
 func (a *association) bind(c net.Conn) {
 	a.mu.Lock()
@@ -408,9 +460,19 @@ func (a *association) bind(c net.Conn) {
 	go a.targetToClient(c)
 }
 
+// udpBufPool holds the buffers of the UDP relay goroutines, which fit the
+// largest datagram with its header, so that short associations do not each
+// allocate them.
+var udpBufPool = sync.Pool{New: func() any {
+	b := make([]byte, MaxDatagramHeaderLen+65535)
+	return &b
+}}
+
 func (a *association) clientToTarget(c net.Conn) {
 	defer a.close()
-	buf := make([]byte, 65535)
+	bp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bp)
+	buf := *bp
 	for {
 		n, err := c.Read(buf)
 		if err != nil {
@@ -424,45 +486,58 @@ func (a *association) clientToTarget(c net.Conn) {
 			if netx.IsClosed(err) {
 				return
 			}
-			a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp send to %v: %w", dst, err))
+			if a.s.OnError != nil {
+				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp send to %v: %w", dst, err))
+			}
 		}
 	}
 }
 
 func (a *association) targetToClient(c net.Conn) {
 	defer a.close()
-	buf := make([]byte, 65535)
-	packet := make([]byte, 0, MaxDatagramHeaderLen+len(buf))
+	// Replies are read in place after room for the longest header, which is
+	// then written just before the payload, so they are not copied.
+	bp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bp)
+	packet := *bp
+	payload := packet[MaxDatagramHeaderLen:]
+	var hdr [MaxDatagramHeaderLen]byte
 	for {
-		n, src, err := a.out.ReadFrom(buf)
+		n, src, err := a.out.ReadFrom(payload)
 		if err != nil {
-			if !netx.IsClosed(err) && !errors.Is(err, io.EOF) {
+			if a.s.OnError != nil && !netx.IsClosed(err) && !errors.Is(err, io.EOF) {
 				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp receive: %w", err))
 			}
 			return
 		}
-		if packet, err = AppendDatagram(packet[:0], src, buf[:n]); err != nil {
+		h, err := AppendDatagram(hdr[:0], src, nil)
+		if err != nil {
 			continue
 		}
-		if _, err := c.Write(packet); err != nil {
+		start := MaxDatagramHeaderLen - len(h)
+		copy(packet[start:], h)
+		if _, err := c.Write(packet[start : MaxDatagramHeaderLen+n]); err != nil {
 			if netx.IsClosed(err) || errors.Is(err, os.ErrDeadlineExceeded) {
 				return
 			}
 			// One undeliverable reply, such as one too large once wrapped,
 			// does not end the association.
-			a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
+			if a.s.OnError != nil {
+				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
+			}
 		}
 	}
 }
 
 func (a *association) close() {
 	a.once.Do(func() {
-		a.relay.remove(a)
 		a.mu.Lock()
 		close(a.done)
 		a.pending.Stop()
 		conn := a.conn
 		a.mu.Unlock()
+		// After done is closed, so that relay.add refuses a.
+		a.relay.remove(a)
 		if conn != nil {
 			_ = conn.Close()
 		}

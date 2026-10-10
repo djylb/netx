@@ -414,3 +414,24 @@ func TestDecodeAddr(t *testing.T) {
 		t.Errorf("DecodeAddr(atyp 2) error = %v, want %v", err, ErrAddrType)
 	}
 }
+
+// A failure reply is reported by its code even when its address, which
+// servers often leave unset, cannot be decoded.
+func TestReadReplyFailureWithBadAddress(t *testing.T) {
+	_, err := ReadReply(bytes.NewReader([]byte{Version, byte(ReplyConnectionRefused), 0, 0}))
+	var replyErr *ReplyError
+	if !errors.As(err, &replyErr) || replyErr.Reply != ReplyConnectionRefused {
+		t.Fatalf("ReadReply() error = %v, want the connection refused reply", err)
+	}
+	if _, err := ReadReply(bytes.NewReader([]byte{Version, 0, 0, 0, 0})); !errors.Is(err, ErrAddrType) {
+		t.Fatalf("ReadReply() of a success with a bad address = %v, want ErrAddrType", err)
+	}
+}
+
+// Decoding a domain name allocates only the name.
+func TestDecodeAddrNameAllocations(t *testing.T) {
+	b := append([]byte{atypDomain, 11}, "example.com\x01\xbb"...)
+	if n := testing.AllocsPerRun(100, func() { _, _, _ = DecodeAddr(b) }); n > 1 {
+		t.Fatalf("DecodeAddr() of a name = %v allocations, want 1", n)
+	}
+}

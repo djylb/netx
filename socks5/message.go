@@ -151,7 +151,8 @@ func WriteReply(w io.Writer, rep Reply, bound Addr) error {
 }
 
 // ReadReply reads a server reply and returns the bound address. A reply other
-// than ReplySucceeded is returned as a *ReplyError. The reserved byte is
+// than ReplySucceeded is returned as a *ReplyError, also when its address,
+// which servers often leave unset, cannot be read. The reserved byte is
 // ignored.
 func ReadReply(r io.Reader) (Addr, error) {
 	var hdr [3]byte
@@ -162,11 +163,11 @@ func ReadReply(r io.Reader) (Addr, error) {
 		return Addr{}, ErrVersion
 	}
 	addr, err := ReadAddr(r)
-	if err != nil {
-		return Addr{}, err
-	}
 	if rep := Reply(hdr[1]); rep != ReplySucceeded {
 		return addr, &ReplyError{Reply: rep}
+	}
+	if err != nil {
+		return Addr{}, err
 	}
 	return addr, nil
 }

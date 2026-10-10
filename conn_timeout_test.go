@@ -228,8 +228,8 @@ func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {
 		t.Fatalf("deadline calls = %d, want 1", got)
 	}
 
-	// An explicit deadline stays until the next read or write sets the idle
-	// deadline again.
+	// A later explicit deadline is capped by the idle timeout as soon as it
+	// is set, and the next read or write sets the idle deadline again.
 	explicit := time.Now().Add(time.Hour)
 	if err := conn.SetDeadline(explicit); err != nil {
 		t.Fatalf("SetDeadline() error = %v", err)
@@ -238,8 +238,8 @@ func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 	got := raw.deadlines()
-	if len(got) != 3 || !got[1].Equal(explicit) || !got[2].Before(explicit) {
-		t.Fatalf("deadlines = %v, want idle, explicit, idle", got)
+	if len(got) != 3 || !got[1].Before(explicit) || !got[2].Before(explicit) {
+		t.Fatalf("deadlines = %v, want idle, capped explicit, idle", got)
 	}
 }
 
@@ -384,5 +384,42 @@ func TestTimeoutConnIdleClockIsMonotonic(t *testing.T) {
 	// The socket deadline keeps the monotonic reading too.
 	if rd, _ := raw.snapshot(); !strings.Contains(rd.String(), " m=") {
 		t.Fatalf("deadline %v has no monotonic clock reading", rd)
+	}
+}
+
+// Clearing or moving a user deadline must not lift the idle timeout of a Read
+// that is already blocked, as the HTTP/2 server does with SetReadDeadline.
+func TestTimeoutConnBlockedReadKeepsIdleTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		set  func(c *TimeoutConn) error
+	}{
+		{"clear read deadline", func(c *TimeoutConn) error { return c.SetReadDeadline(time.Time{}) }},
+		{"clear deadline", func(c *TimeoutConn) error { return c.SetDeadline(time.Time{}) }},
+		{"far deadline", func(c *TimeoutConn) error { return c.SetDeadline(time.Now().Add(time.Hour)) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := tcpPair(t)
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
+			conn := NewTimeoutConn(client, 100*time.Millisecond)
+			errc := make(chan error, 1)
+			go func() {
+				_, err := conn.Read(make([]byte, 1))
+				errc <- err
+			}()
+			time.Sleep(20 * time.Millisecond) // let Read block
+			if err := tt.set(conn); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-errc:
+				if !IsTimeout(err) {
+					t.Fatalf("Read() error = %v, want a timeout", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("blocked Read lost its idle timeout")
+			}
+		})
 	}
 }

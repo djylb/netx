@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/djylb/netx"
 )
 
 // ContextDialer dials connections. *net.Dialer implements it.
@@ -60,7 +62,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, fmt.Errorf("socks5: invalid target %q: %w", address, err)
 	}
-	if dst, err = d.resolve(ctx, dst); err != nil {
+	if dst, err = d.resolve(ctx, network, dst); err != nil {
 		return nil, err
 	}
 	if d.SOCKS4 && dst.IP.Unmap().Is6() {
@@ -80,16 +82,20 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	return c, nil
 }
 
-// resolve looks dst's name up with d.Resolver, if set.
-func (d *Dialer) resolve(ctx context.Context, dst Addr) (Addr, error) {
+// resolve looks dst's name up with d.Resolver, if set, in the address family
+// of network.
+func (d *Dialer) resolve(ctx context.Context, network string, dst Addr) (Addr, error) {
 	if d.Resolver == nil || dst.IP.IsValid() {
 		return dst, nil
 	}
-	network := "ip"
-	if d.SOCKS4 {
-		network = "ip4"
+	family := "ip"
+	switch {
+	case d.SOCKS4, network == "tcp4":
+		family = "ip4"
+	case network == "tcp6":
+		family = "ip6"
 	}
-	ips, err := d.Resolver.LookupNetIP(ctx, network, dst.Name)
+	ips, err := d.Resolver.LookupNetIP(ctx, family, dst.Name)
 	if err != nil {
 		return Addr{}, err
 	}
@@ -145,7 +151,10 @@ func handshake(ctx context.Context, c net.Conn, fn func() error) error {
 		_ = c.SetDeadline(deadline)
 	}
 	stop := context.AfterFunc(ctx, func() {
-		_ = c.SetDeadline(time.Unix(1, 0))
+		// A connection without deadline support is closed instead.
+		if c.SetDeadline(time.Unix(1, 0)) != nil {
+			_ = c.Close()
+		}
 	})
 	err := fn()
 	if !stop() && err == nil {
@@ -157,6 +166,9 @@ func handshake(ctx context.Context, c net.Conn, fn func() error) error {
 		// here although they have no deadline to clear.
 		_ = c.SetDeadline(time.Time{})
 		return nil
+	}
+	if ctx.Err() != nil || netx.IsTimeout(err) {
+		closeBeneathTLS(c)
 	}
 	_ = c.Close()
 	if ctxErr := ctx.Err(); ctxErr != nil {

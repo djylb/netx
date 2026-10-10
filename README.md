@@ -72,10 +72,11 @@ func main() {
   most 1s), so the per-call cost is an atomic load; a connection may time out
   up to that slack early. Idle tracking uses the monotonic clock.
 - Deadlines set with `SetDeadline`, `SetReadDeadline` or `SetWriteDeadline`
-  stay in effect until changed: each read or write sets a direction's deadline
-  to the earlier of that deadline and now plus the idle timeout, so
-  `SetReadDeadline(time.Now())` interrupts a blocked `Read` even while writes
-  continue.
+  stay in effect until changed: setting them and each read or write set a
+  direction's deadline to the earlier of that deadline and now plus the idle
+  timeout, so `SetReadDeadline(time.Now())` interrupts a blocked `Read` even
+  while writes continue, and a later or zero deadline does not lift the idle
+  timeout of a `Read` or `Write` that is already blocked.
 - `tlsconn.Client` and `tlsconn.Server` bound the handshake by the context and
   the timeout, applied as both a connection deadline and a context deadline,
   and return a `*tls.Conn` with no deadline set. On failure they close the raw
@@ -162,9 +163,11 @@ func relayDatagrams(tunnel net.Conn, udp *net.UDPConn, peer *net.UDPAddr) error 
 }
 ```
 
-- By default `Read` has stream semantics: when a frame is larger than the
-  buffer, the rest of it is returned by the following reads, without buffering
-  or allocating. Empty frames carry no stream bytes and are skipped.
+- By default `Read` has stream semantics: it returns what one read of the
+  connection delivers of the current frame, and when a frame is larger than
+  the buffer or still arriving, the rest of it is returned by the following
+  reads, without buffering or allocating. Empty frames carry no stream bytes
+  and are skipped.
 - `WithReadBuffer(size)` reads the stream through a buffer, so a burst of small
   frames costs one read of the connection (about 30x faster for 64-byte frames
   over loopback TCP).
@@ -173,13 +176,17 @@ func relayDatagrams(tunnel net.Conn, udp *net.UDPConn, peer *net.UDPAddr) error 
   returned as a 0-byte read.
 - `ReadFrame` returns one whole frame, or the rest of a frame that a stream
   `Read` has already started.
-- If a read or write fails partway through a frame, the frame boundaries are
-  lost: that call and every later call in the same direction return an error
-  matching `errors.Is(err, netx.ErrFrameDesync)`, which is never a timeout.
-  The error still matches its cause with `errors.Is` (an EOF inside a frame
-  becomes `io.ErrUnexpectedEOF`), except a timeout cause, which is hidden.
-  Close the connection. An error between frames, such as an expired read
-  deadline, is returned unchanged and may be retried.
+- An error that loses no frame bytes is returned unchanged and may be
+  retried: an expired read deadline between frames or inside a frame header,
+  and anywhere in a frame for stream `Read`s, which keep their place. When
+  frame bytes are lost, by a `ReadFrame` or datagram `Read` that fails after
+  part of the payload, the end of the stream inside a frame, or a write that
+  fails partway through a frame, the frame boundaries are lost: that call and
+  every later call in the same direction return an error matching
+  `errors.Is(err, netx.ErrFrameDesync)`, which is never a timeout. The error
+  still matches its cause with `errors.Is` (an EOF inside a frame becomes
+  `io.ErrUnexpectedEOF`), except a timeout cause, which is hidden. Close the
+  connection.
 
 ### Wrapping and unwrapping
 
@@ -240,14 +247,17 @@ func forward(client, backend net.Conn) {
   client shuts down its sending side and then reads the answer. Ends without
   `CloseWrite` are closed as usual. Pair it with an idle timeout.
 - On Linux, a direction between two `*net.TCPConn`s, or between a
-  `*net.TCPConn` and a `*net.UnixConn` (also beneath a `PrefixConn` on the
-  reading side), is left to the kernel with `splice`.
+  `*net.TCPConn` and a `*net.UnixConn` (also beneath `PrefixConn`s), is left
+  to the kernel with `splice`.
 - Otherwise a direction is copied with the reading end's `WriteTo` or else the
   writing end's `ReadFrom`, as `io.Copy` would, so a datagram connection that
   implements them keeps each datagram whole. The `WriteTo` and `ReadFrom` of
   `*net.TCPConn` and `*net.UnixConn` are skipped (also beneath a `PrefixConn`)
   and the data goes through a pooled 32 KiB buffer instead of one they
-  allocate.
+  allocate. Sources that return one datagram per read (`*net.UDPConn`,
+  `PacketListener` connections, `FramedConn` with `WithDatagramReads`, also
+  beneath this package's wrappers) get a 64 KiB buffer and one write per
+  datagram, so no datagram is cut short and empty ones are passed on.
 
 ## Listeners
 
@@ -318,7 +328,11 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   lets the next datagram of that peer start a new one.
 - Datagrams are dropped, as a socket buffer would, when a connection's queue
   (`WithPacketQueue`, 128) or the accept backlog (`WithAcceptBacklog`, 128) is
-  full. `WithAcceptFilter` rejects peers before a connection is created.
+  full. A datagram larger than 2 KiB takes the room of several, so a queue
+  holds at most 128 × 2 KiB by default however large the datagrams are.
+  `WithAcceptFilter` rejects peers before a connection is created.
+- As on a socket, a closed connection or an expired read deadline fails
+  `Read` even while datagrams are queued.
 - `WithIdleTimeout` closes a connection that has been idle since `Accept`
   returned it; connections still waiting for `Accept` are not closed, and their
   datagrams are kept.
@@ -418,9 +432,12 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
   short address blocks and truncated TLVs fall back to the connection's own
   addresses, or to the whole TLVs, instead of failing.
 - `Listener` reads the header lazily, on the first read or address query, with
-  a timeout (`DefaultHeaderTimeout`), so a slow peer cannot stall `Accept`. Its
-  `Policy` decides per peer between `Required` (the zero value), `Optional` and
-  `Ignore`; only trusted peers should be allowed to send a header.
+  a timeout (`DefaultHeaderTimeout`), so a slow peer cannot stall `Accept`. The
+  read that reaches the timeout returns it; later ones return an error matching
+  `ErrNoHeader` that is not a timeout, so loops that retry timeouts do not
+  spin. Its `Policy` decides per peer between `Required` (the zero value),
+  `Optional` and `Ignore`; only trusted peers should be allowed to send a
+  header.
 - With `Datagram` set, for listeners such as `netx.PacketListener` whose reads
   return one datagram, the header is taken from the first datagram of each
   flow, alone or followed by payload; later datagrams are passed through
@@ -446,18 +463,33 @@ func serve(ctx context.Context, handle func(c net.Conn, target string)) error {
 	if err != nil {
 		return err
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
 		dst, err := transparent.OriginalDestination(c)
-		if err != nil {
+		// A connection made to the listener directly, not redirected,
+		// reports the listener's own address: forwarding it would connect
+		// the proxy to itself, again and again.
+		if err != nil || dst.Port == port && isLocal(dst.IP) {
 			_ = c.Close()
 			continue
 		}
 		go handle(c, dst.String())
 	}
+}
+
+// isLocal reports whether ip is an address of this host.
+func isLocal(ip net.IP) bool {
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return ip.IsLoopback() || ip.IsUnspecified()
 }
 ```
 
@@ -469,6 +501,8 @@ func serve(ctx context.Context, handle func(c net.Conn, target string)) error {
 | Others         | `ErrListenUnsupported`                                           | `ErrOriginalDestinationUnsupported`                                |
 
 Both errors match `errors.ErrUnsupported`. For a plain listener use `net.Listen`.
+`OriginalDestination` looks through wrappers such as `netx.TimeoutConn` with
+`netx.RawConnOf`, so it can be called on a wrapped connection.
 
 On Linux and Android, `ListenPacket`, `ReadFromUDP` and `DialUDP` handle UDP
 redirected by TPROXY: each datagram reports its original destination, and
@@ -483,6 +517,9 @@ func serveRedirectedUDP(ctx context.Context) error {
 	buf := make([]byte, 65535)
 	for {
 		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		if errors.Is(err, transparent.ErrControlTruncated) {
+			continue // this datagram's destination is unknown
+		}
 		if err != nil {
 			return err
 		}
@@ -623,29 +660,38 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 ```
 
 - Hooks: `Auth` (any `Authenticator`), `Allow`, `Dial` (its error picks the
-  reply code through `ReplyFor`), `ConnectAddr`, `Relay`, and for UDP
+  reply code through `ReplyFor`), `ConnectAddr`, `Relay` (by default
+  `netx.Relay` with `WithHalfClose`, so a client that shuts down its sending
+  side still gets the reply; a half-closed connection then lasts until the
+  other side finishes or closes too, so relay through `netx.NewTimeoutConn` to
+  bound idle ones), and for UDP
   `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
   names unresolved, for example to forward through a tunnel), `AllowPacket`
   and `UDPAddr` (the address advertised to clients).
 - `Allow` and `AllowPacket` see every IP address a client sends in
   `Dst.IP`, including IPv4-mapped IPv6 addresses and domain names that are IP
-  literals, also with one trailing dot such as `127.0.0.1.`. Other names arrive unresolved, so an IP policy must also check the
-  resolved address where `Dial` or `DialPacket` resolves it, for example with
-  a `net.Dialer` `Control` function: some resolvers accept forms such as
-  `127.1`.
+  literals, also with one trailing dot such as `127.0.0.1.`. Other names
+  arrive unresolved, so an IP policy must also check the resolved address
+  where `Dial` or `DialPacket` resolves it, for example with a `net.Dialer`
+  `Control` function: some resolvers accept forms such as `127.1`. The
+  unspecified addresses `0.0.0.0` and `::` reach the server's own host on
+  many systems.
 - UDP on a fixed port (`PacketConn`): datagrams must come from the IP address
-  of their association's control connection, and are matched by the exact
-  source the client announced, or else as the only pending association of that
-  IP; ambiguous sources are dropped. Announcements of another IP are ignored,
-  so a client cannot claim the datagrams of others. A control connection
-  without an IP address, such as a tunneled stream, must announce the client's
-  IP address, or the request is refused. `ListenUDP` instead gives each
-  association its own socket, which without a known client IP takes the first
-  source that sends. Replies from any source are relayed (full cone), and a
-  reply that cannot be delivered is reported to `OnError` and dropped. An
-  association ends with its control connection, or after `UDPIdleTimeout`;
-  `UDPOutlivesControl` keeps it for clients that close the control connection
-  early.
+  of their association's control connection, so a client cannot claim the
+  datagrams of others. Among the associations of that IP waiting for their
+  first datagram, a source goes to the one that announced its port, else to
+  the only one that announced no port, else to the only one; ambiguous
+  sources are dropped. An announced port counts at the control connection's
+  IP whatever address comes with it, as clients behind a NAT announce their
+  private address and clients that do not know theirs announce `0.0.0.0` or a
+  name. A control connection without an IP address, such as a tunneled
+  stream, must announce the client's IP address, or the request is refused. `ListenUDP` instead gives each association its own
+  socket, which without a known client IP takes the first source that sends.
+  Replies from any source are relayed (full cone), and a reply that cannot be
+  delivered is reported to `OnError` and dropped. An association ends with its
+  control connection, or after `UDPIdleTimeout`, which closes the control
+  connection; `UDPOutlivesControl` keeps it for clients that close the control
+  connection early.
 - `OnError` receives the errors that end connections and drop datagrams, for
   logging; the package itself does not log.
 - The server runs over any `net.Conn`. For SOCKS over TLS, serve

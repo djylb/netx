@@ -82,6 +82,13 @@ func (c *observedReadWriteCloser) CloseWrite() error {
 	return closeWrite(c.rwc)
 }
 
+func (c *observedReadWriteCloser) innerReader() io.Reader {
+	if c == nil {
+		return nil
+	}
+	return c.rwc
+}
+
 func (c *observedReadWriteCloser) RawConn() net.Conn {
 	if c == nil {
 		return nil

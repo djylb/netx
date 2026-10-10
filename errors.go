@@ -17,18 +17,19 @@ import (
 // (WSAETIMEDOUT on Windows) anywhere in the chain first, then the first
 // net.Error's Timeout method, and only then English timeout messages.
 func IsTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
+	return err != nil && isTimeout(&errText{err: err})
+}
+
+func isTimeout(t *errText) bool {
 	// Checked first because Errno.Timeout is false for WSAETIMEDOUT on Windows.
-	if errorIsAny(err, timedOutErrnos) {
+	if errorIsAny(t.err, timedOutErrnos) {
 		return true
 	}
-	if ne, ok := errors.AsType[net.Error](err); ok {
+	if ne, ok := errors.AsType[net.Error](t.err); ok {
 		return ne.Timeout()
 	}
 	// Spaces are kept so that words such as "runtime output" do not match.
-	s := strings.ToLower(err.Error())
+	s := t.lower()
 	return strings.Contains(s, "timeout") ||
 		strings.Contains(s, "timed out") ||
 		strings.Contains(s, "did not properly respond after a period of time")
@@ -38,113 +39,100 @@ func IsTimeout(err error) bool {
 // listener: net.ErrClosed, io.ErrClosedPipe, or the "use of closed network
 // connection" text that some wrappers pass on without the error value.
 func IsClosed(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+	return err != nil && isClosed(&errText{err: err})
+}
+
+func isClosed(t *errText) bool {
+	if errors.Is(t.err, net.ErrClosed) || errors.Is(t.err, io.ErrClosedPipe) {
 		return true
 	}
-	return strings.Contains(err.Error(), "use of closed network connection")
+	return strings.Contains(t.text(), "use of closed network connection")
 }
 
 // IsConnReset reports whether err looks like a connection reset.
 func IsConnReset(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, connResetErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "connectionresetbypeer") ||
-		strings.Contains(msg, "forciblyclosedbytheremotehost") ||
-		strings.Contains(msg, "networknameisnolongeravailable")
+	return err != nil && isConnReset(&errText{err: err})
+}
+
+func isConnReset(t *errText) bool {
+	return errorIsAny(t.err, connResetErrnos) || t.has(
+		"connectionresetbypeer",
+		"forciblyclosedbytheremotehost",
+		"networknameisnolongeravailable")
 }
 
 // IsConnAborted reports whether err looks like an aborted connection.
 func IsConnAborted(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, connAbortedErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "connectionaborted") ||
-		strings.Contains(msg, "connectionwasaborted") ||
-		strings.Contains(msg, "softwarecausedconnectionabort")
+	return err != nil && isConnAborted(&errText{err: err})
+}
+
+func isConnAborted(t *errText) bool {
+	return errorIsAny(t.err, connAbortedErrnos) || t.has(
+		"connectionaborted",
+		"connectionwasaborted",
+		"softwarecausedconnectionabort")
 }
 
 // IsBrokenPipe reports whether err looks like a broken pipe.
 func IsBrokenPipe(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, brokenPipeErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "brokenpipe") ||
-		strings.Contains(msg, "sockethadalreadybeenshutdown")
+	return err != nil && isBrokenPipe(&errText{err: err})
+}
+
+func isBrokenPipe(t *errText) bool {
+	return errorIsAny(t.err, brokenPipeErrnos) || t.has(
+		"brokenpipe",
+		"sockethadalreadybeenshutdown")
 }
 
 // IsConnRefused reports whether err looks like a refused connection attempt.
 func IsConnRefused(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, connRefusedErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "connectionrefused") ||
-		strings.Contains(msg, "activelyrefusedit")
+	return err != nil && isConnRefused(&errText{err: err})
+}
+
+func isConnRefused(t *errText) bool {
+	return errorIsAny(t.err, connRefusedErrnos) || t.has(
+		"connectionrefused",
+		"activelyrefusedit")
 }
 
 // IsHostUnreachable reports whether err looks like an unreachable host.
 // DNS lookup failures are not included; check for *net.DNSError separately.
 func IsHostUnreachable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, hostUnreachErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "noroutetohost") ||
-		strings.Contains(msg, "hostunreachable") ||
-		strings.Contains(msg, "hostisunreachable") ||
-		strings.Contains(msg, "unreachablehost")
+	return err != nil && isHostUnreachable(&errText{err: err})
+}
+
+func isHostUnreachable(t *errText) bool {
+	return errorIsAny(t.err, hostUnreachErrnos) || t.has(
+		"noroutetohost",
+		"hostunreachable",
+		"hostisunreachable",
+		"unreachablehost")
 }
 
 // IsNetworkUnreachable reports whether err looks like an unreachable network.
 func IsNetworkUnreachable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, netUnreachErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "networkunreachable") ||
-		strings.Contains(msg, "networkisunreachable") ||
-		strings.Contains(msg, "unreachablenetwork")
+	return err != nil && isNetworkUnreachable(&errText{err: err})
+}
+
+func isNetworkUnreachable(t *errText) bool {
+	return errorIsAny(t.err, netUnreachErrnos) || t.has(
+		"networkunreachable",
+		"networkisunreachable",
+		"unreachablenetwork")
 }
 
 // IsPermissionDenied reports whether err looks like a permission failure
 // (EACCES or EPERM), such as a connect blocked by a local firewall rule.
 func IsPermissionDenied(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errorIsAny(err, accessErrnos) || errorIsAny(err, permErrnos) {
-		return true
-	}
-	msg := normalizeNetErrorText(err)
-	return strings.Contains(msg, "permissiondenied") ||
-		strings.Contains(msg, "operationnotpermitted") ||
-		strings.Contains(msg, "accessisdenied") ||
-		strings.Contains(msg, "forbiddenbyitsaccesspermissions")
+	return err != nil && isPermissionDenied(&errText{err: err})
+}
+
+func isPermissionDenied(t *errText) bool {
+	return errorIsAny(t.err, accessErrnos) || errorIsAny(t.err, permErrnos) || t.has(
+		"permissiondenied",
+		"operationnotpermitted",
+		"accessisdenied",
+		"forbiddenbyitsaccesspermissions")
 }
 
 // NetErrorKind returns a stable string category for common network errors:
@@ -152,30 +140,37 @@ func IsPermissionDenied(err error) bool {
 // "network_unreachable", "permission_denied", "timeout", "unexpected_eof",
 // "eof", "closed" or "other".
 func NetErrorKind(err error) string {
-	switch {
-	case err == nil:
+	if err == nil {
 		return "none"
-	case IsConnReset(err):
+	}
+	return netErrorKind(&errText{err: err})
+}
+
+// netErrorKind is NetErrorKind for a non-nil error. The classifiers share t,
+// so the error is formatted and normalized at most once.
+func netErrorKind(t *errText) string {
+	switch {
+	case isConnReset(t):
 		return "rst"
-	case IsConnAborted(err):
+	case isConnAborted(t):
 		return "aborted"
-	case IsBrokenPipe(err):
+	case isBrokenPipe(t):
 		return "broken_pipe"
-	case IsConnRefused(err):
+	case isConnRefused(t):
 		return "refused"
-	case IsHostUnreachable(err):
+	case isHostUnreachable(t):
 		return "host_unreachable"
-	case IsNetworkUnreachable(err):
+	case isNetworkUnreachable(t):
 		return "network_unreachable"
-	case IsPermissionDenied(err):
+	case isPermissionDenied(t):
 		return "permission_denied"
-	case IsTimeout(err):
+	case isTimeout(t):
 		return "timeout"
-	case errors.Is(err, io.ErrUnexpectedEOF):
+	case errors.Is(t.err, io.ErrUnexpectedEOF):
 		return "unexpected_eof"
-	case errors.Is(err, io.EOF):
+	case errors.Is(t.err, io.EOF):
 		return "eof"
-	case IsClosed(err):
+	case isClosed(t):
 		return "closed"
 	default:
 		return "other"
@@ -192,9 +187,10 @@ func DescribeNetError(err error, c net.Conn) string {
 		return "kind=none"
 	}
 
+	t := &errText{err: err}
 	parts := []string{
-		fmt.Sprintf("kind=%s", NetErrorKind(err)),
-		fmt.Sprintf("err=%q", err.Error()),
+		"kind=" + netErrorKind(t),
+		fmt.Sprintf("err=%q", t.text()),
 	}
 
 	if c != nil {
@@ -206,7 +202,7 @@ func DescribeNetError(err error, c net.Conn) string {
 		}
 	}
 
-	parts = append(parts, fmt.Sprintf("timeout=%t", IsTimeout(err)))
+	parts = append(parts, fmt.Sprintf("timeout=%t", isTimeout(t)))
 
 	if opErr, ok := errors.AsType[*net.OpError](err); ok {
 		if opErr.Op != "" {
@@ -232,12 +228,69 @@ func DescribeNetError(err error, c net.Conn) string {
 	return strings.Join(parts, " ")
 }
 
-func normalizeNetErrorText(err error) string {
-	s := strings.ToLower(err.Error())
-	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, "-", "")
-	s = strings.ReplaceAll(s, "_", "")
-	return s
+// errText holds the text of an error for the classifiers' fallbacks. Each
+// form is computed on first use, so that NetErrorKind, which may try every
+// classifier, formats and normalizes the error only once.
+type errText struct {
+	err  error
+	raw  string // err.Error()
+	low  string // raw in lower case
+	norm string // low without spaces, hyphens and underscores
+	have uint8  // which of raw, low and norm are set
+}
+
+const (
+	haveRaw uint8 = 1 << iota
+	haveLow
+	haveNorm
+)
+
+func (t *errText) text() string {
+	if t.have&haveRaw == 0 {
+		t.raw = t.err.Error()
+		t.have |= haveRaw
+	}
+	return t.raw
+}
+
+func (t *errText) lower() string {
+	if t.have&haveLow == 0 {
+		t.low = strings.ToLower(t.text())
+		t.have |= haveLow
+	}
+	return t.low
+}
+
+// has reports whether the normalized text contains any of subs.
+func (t *errText) has(subs ...string) bool {
+	if t.have&haveNorm == 0 {
+		t.norm = stripSeparators(t.lower())
+		t.have |= haveNorm
+	}
+	for _, sub := range subs {
+		if strings.Contains(t.norm, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripSeparators removes the spaces, hyphens and underscores from s, so that
+// "connection reset by peer" and "connection-reset" variants compare alike.
+func stripSeparators(s string) string {
+	if !strings.ContainsAny(s, " -_") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := range len(s) {
+		switch c := s[i]; c {
+		case ' ', '-', '_':
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // errorIsAny reports whether errors.Is(err, target) holds for any target.

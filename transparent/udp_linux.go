@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -34,8 +35,10 @@ func listenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
 }
 
 func readFromUDP(c *net.UDPConn, b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
-	var oob [128]byte
-	n, oobn, _, src, err := c.ReadMsgUDPAddrPort(b, oob[:])
+	// Room for the original destination after other control messages the
+	// socket may have been asked for, such as timestamps or IP_PKTINFO.
+	var oob [512]byte
+	n, oobn, flags, src, err := c.ReadMsgUDPAddrPort(b, oob[:])
 	if err != nil {
 		return n, netip.AddrPort{}, netip.AddrPort{}, err
 	}
@@ -43,31 +46,48 @@ func readFromUDP(c *net.UDPConn, b []byte) (int, netip.AddrPort, netip.AddrPort,
 	if dst, ok := origDstFromControl(oob[:oobn]); ok {
 		return n, src, dst, nil
 	}
+	if flags&syscall.MSG_CTRUNC != 0 {
+		// The local address would name the wrong destination.
+		return n, src, netip.AddrPort{}, ErrControlTruncated
+	}
 	local, _ := c.LocalAddr().(*net.UDPAddr)
 	return n, src, unmapAddrPort(local.AddrPort()), nil
 }
 
+// cmsgHeaderLen is the length of a control message header with its padding.
+var cmsgHeaderLen = syscall.CmsgLen(0)
+
 // origDstFromControl extracts IP_ORIGDSTADDR or IPV6_ORIGDSTADDR from the
-// control messages of a received datagram.
+// control messages of a received datagram. It walks them in place, where
+// syscall.ParseSocketControlMessage would allocate for every datagram.
 func origDstFromControl(oob []byte) (netip.AddrPort, bool) {
-	msgs, err := syscall.ParseSocketControlMessage(oob)
-	if err != nil {
-		return netip.AddrPort{}, false
-	}
-	for _, m := range msgs {
-		switch {
-		case m.Header.Level == solIP && m.Header.Type == ipRecvOrigDstAddr && len(m.Data) >= 8:
-			// struct sockaddr_in: family, port, address.
-			ip := netip.AddrFrom4([4]byte(m.Data[4:8]))
-			return netip.AddrPortFrom(ip, binary.BigEndian.Uint16(m.Data[2:4])), true
-		case m.Header.Level == solIPv6 && m.Header.Type == ipv6RecvOrigDstAddr && len(m.Data) >= 24:
-			// struct sockaddr_in6: family, port, flow info, address, scope.
-			ip := netip.AddrFrom16([16]byte(m.Data[8:24]))
-			if len(m.Data) >= 28 {
-				ip = ip.WithZone(scopeZone(ip, binary.NativeEndian.Uint32(m.Data[24:28])))
-			}
-			return netip.AddrPortFrom(ip.Unmap(), binary.BigEndian.Uint16(m.Data[2:4])), true
+	var h syscall.Cmsghdr
+	for len(oob) >= cmsgHeaderLen {
+		// Copied out rather than cast, since oob need not be aligned.
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&h)), unsafe.Sizeof(h)), oob)
+		n := int(h.Len)
+		if n < cmsgHeaderLen || n > len(oob) {
+			break
 		}
+		data := oob[cmsgHeaderLen:n]
+		switch {
+		case h.Level == solIP && h.Type == ipRecvOrigDstAddr && len(data) >= 8:
+			// struct sockaddr_in: family, port, address.
+			ip := netip.AddrFrom4([4]byte(data[4:8]))
+			return netip.AddrPortFrom(ip, binary.BigEndian.Uint16(data[2:4])), true
+		case h.Level == solIPv6 && h.Type == ipv6RecvOrigDstAddr && len(data) >= 24:
+			// struct sockaddr_in6: family, port, flow info, address, scope.
+			ip := netip.AddrFrom16([16]byte(data[8:24]))
+			if len(data) >= 28 {
+				ip = ip.WithZone(scopeZone(ip, binary.NativeEndian.Uint32(data[24:28])))
+			}
+			return netip.AddrPortFrom(ip.Unmap(), binary.BigEndian.Uint16(data[2:4])), true
+		}
+		next := syscall.CmsgSpace(n - cmsgHeaderLen)
+		if next >= len(oob) {
+			break
+		}
+		oob = oob[next:]
 	}
 	return netip.AddrPort{}, false
 }

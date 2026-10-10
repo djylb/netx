@@ -288,3 +288,26 @@ func TestRawConnOfStopsOnCyclicProviders(t *testing.T) {
 		t.Fatalf("parent Close() calls = %d, want 1", calls)
 	}
 }
+
+// selfConn is a comparable struct type whose interface field holds a value
+// that is not comparable, and whose RawConn returns a value of its own type.
+type selfConn struct {
+	net.Conn
+	tag any
+}
+
+func (c selfConn) RawConn() net.Conn { return selfConn{Conn: c.Conn, tag: c.tag} }
+
+func TestRawConnOfHandlesUncomparableValues(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	c := selfConn{Conn: a, tag: []byte("not comparable")}
+	if got := RawConnOf(c); got == nil {
+		t.Fatal("RawConnOf() = nil")
+	}
+	w := WrapConn(c, c, WithParentClose())
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}

@@ -36,19 +36,27 @@ func Parse(b []byte) (*Header, int, error) {
 //
 // If the stream does not start with a header, Read returns ErrNoHeader and
 // consumes nothing, so the bytes can still be read from r. A valid header is
-// consumed. After an error wrapping ErrMalformed the stream position is
+// consumed. After an error wrapping ErrMalformed, and after any error while
+// reading a version 2 header larger than r's buffer, the stream position is
 // unspecified. Read only blocks while the bytes received so far are the start
 // of a header.
 func Read(r *bufio.Reader) (*Header, error) {
 	for need := 1; ; {
-		data, err := r.Peek(need)
+		// Parse everything already buffered, so a header that has arrived
+		// whole is parsed once instead of once per byte.
+		data, err := r.Peek(max(need, r.Buffered()))
 		if errors.Is(err, bufio.ErrBufferFull) {
 			if data[0] != v2Signature[0] {
 				return nil, malformed("version 1 header longer than the %d-byte read buffer", r.Size())
 			}
 			// A version 2 header larger than r's buffer; its length is known.
-			buf := make([]byte, need)
-			if _, err := io.ReadFull(r, buf); err != nil {
+			// It is read as it arrives rather than into a buffer of the
+			// length it claims, so that a few bytes cannot hold 64 KiB.
+			buf, err := io.ReadAll(io.LimitReader(r, int64(need)))
+			if err == nil && len(buf) < need {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
 				return nil, unexpectedEOF(err)
 			}
 			h, _, _, err := parse(buf)

@@ -193,8 +193,12 @@ func DecodeAddr(b []byte) (Addr, int, error) {
 // resolvers connect to as that address, so that address policies see every
 // form of an address.
 func nameAddr(name string) Addr {
-	if ip, err := netip.ParseAddr(strings.TrimSuffix(name, ".")); err == nil {
-		return Addr{IP: ip.Unmap().WithZone("")}
+	// Only a name that starts with a digit or holds a colon can be an IP
+	// literal; skipping the parse for the others spares an error for each.
+	if host := strings.TrimSuffix(name, "."); host != "" && (host[0] >= '0' && host[0] <= '9' || strings.IndexByte(host, ':') >= 0) {
+		if ip, err := netip.ParseAddr(host); err == nil {
+			return Addr{IP: ip.Unmap().WithZone("")}
+		}
 	}
 	return Addr{Name: name}
 }

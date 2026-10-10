@@ -64,12 +64,53 @@ func TestOrigDstFromControl(t *testing.T) {
 		{"missing", other, ""},
 		{"short", controlMessage(solIP, ipRecvOrigDstAddr, sin[:6]), ""},
 		{"garbage", []byte{1, 2, 3}, ""},
+		{"unaligned", append([]byte{0}, append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...)...)[1:], "203.0.113.9:53"},
+		{"length past the buffer", controlMessage(solIP, ipRecvOrigDstAddr, sin)[:cmsgHeaderLen+8], ""},
 	}
 	for _, tt := range tests {
 		got, ok := origDstFromControl(tt.oob)
 		if (tt.want == "") == ok || ok && got.String() != tt.want {
 			t.Errorf("%s: origDstFromControl() = %v, %v; want %q", tt.name, got, ok, tt.want)
 		}
+	}
+}
+
+// Reading a datagram's original destination does not allocate.
+func TestReadFromUDPDoesNotAllocate(t *testing.T) {
+	sin := make([]byte, 16)
+	binary.LittleEndian.PutUint16(sin[0:2], syscall.AF_INET)
+	oob := append(controlMessage(solIP, 8, []byte{64, 0, 0, 0}), controlMessage(solIP, ipRecvOrigDstAddr, sin)...)
+	if n := testing.AllocsPerRun(100, func() { _, _ = origDstFromControl(oob) }); n != 0 {
+		t.Fatalf("origDstFromControl() = %v allocations, want 0", n)
+	}
+
+	ln, err := ListenPacket(context.Background(), "127.0.0.1:0")
+	skipWithoutPrivilege(t, err)
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	client, err := net.DialUDP("udp4", nil, ln.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	// AllocsPerRun reads one datagram more than the runs it counts.
+	const runs = 50
+	for range runs + 1 {
+		if _, err := client.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = ln.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 64)
+	n := testing.AllocsPerRun(runs, func() {
+		if _, _, _, err := ReadFromUDP(ln, buf); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if n != 0 {
+		t.Fatalf("ReadFromUDP() = %v allocations per datagram, want 0", n)
 	}
 }
 
@@ -126,5 +167,50 @@ func TestListenPacketAndDialUDP(t *testing.T) {
 	n, from, err := client.ReadFromUDPAddrPort(buf)
 	if err != nil || string(buf[:n]) != "answer" || from != spoofed {
 		t.Fatalf("client got %q from %v, %v; want answer from %v", buf[:n], from, err, spoofed)
+	}
+}
+
+// Other control messages the socket asks for do not push the original
+// destination out of the buffer.
+func TestReadFromUDPWithOtherControlMessages(t *testing.T) {
+	ln, err := ListenPacket(context.Background(), "0.0.0.0:0")
+	skipWithoutPrivilege(t, err)
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	raw, err := ln.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var optErr error
+	_ = raw.Control(func(fd uintptr) {
+		for _, opt := range [][2]int{
+			{syscall.SOL_SOCKET, syscall.SO_TIMESTAMPNS},
+			{syscall.SOL_IP, syscall.IP_PKTINFO},
+			{syscall.SOL_IP, syscall.IP_RECVTTL},
+			{syscall.SOL_IP, syscall.IP_RECVTOS},
+		} {
+			if err := syscall.SetsockoptInt(int(fd), opt[0], opt[1], 1); err != nil && optErr == nil {
+				optErr = err
+			}
+		}
+	})
+	if optErr != nil {
+		t.Skipf("setsockopt: %v", optErr)
+	}
+	port := uint16(ln.LocalAddr().(*net.UDPAddr).Port)
+	client, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, dst, err := ReadFromUDP(ln, make([]byte, 16))
+	if want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port); err != nil || dst != want {
+		t.Fatalf("ReadFromUDP() dst = %v, %v, want %v", dst, err, want)
 	}
 }

@@ -155,6 +155,12 @@ type bypassDialer struct {
 	bypass  NoProxy
 }
 
+// Dial is DialContext with a background context, matching the Dialer
+// interface of golang.org/x/net/proxy.
+func (d *bypassDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
 func (d *bypassDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if d.bypass.Match(address) {
 		return d.direct.DialContext(ctx, network, address)
