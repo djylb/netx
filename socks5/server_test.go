@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx/internal/nettest"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -39,20 +40,7 @@ func echoTCP(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = c.Close() }()
-				_, _ = io.Copy(c, c)
-			}()
-		}
-	}()
-	return ln.Addr().String()
+	return nettest.ServeEcho(t, ln)
 }
 
 func assertEcho(t *testing.T, c net.Conn, msg string) {

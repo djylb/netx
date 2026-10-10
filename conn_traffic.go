@@ -46,12 +46,7 @@ func (c *observedReadWriteCloser) Read(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	n, err := c.rwc.Read(p)
-	if c.onRead != nil && n > 0 {
-		if observeErr := c.onRead(int64(n)); observeErr != nil {
-			return n, errors.Join(err, observeErr)
-		}
-	}
-	return n, err
+	return observe(c.onRead, n, err)
 }
 
 func (c *observedReadWriteCloser) Write(p []byte) (int, error) {
@@ -59,8 +54,14 @@ func (c *observedReadWriteCloser) Write(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	n, err := c.rwc.Write(p)
-	if c.onWrite != nil && n > 0 {
-		if observeErr := c.onWrite(int64(n)); observeErr != nil {
+	return observe(c.onWrite, n, err)
+}
+
+// observe reports the n bytes of a Read or Write to fn, if set, and joins
+// its error to err.
+func observe(fn func(int64) error, n int, err error) (int, error) {
+	if fn != nil && n > 0 {
+		if observeErr := fn(int64(n)); observeErr != nil {
 			return n, errors.Join(err, observeErr)
 		}
 	}

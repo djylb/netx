@@ -395,7 +395,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 	if !c.reading {
 		return c.Conn.SetDeadline(t)
 	}
-	if err := c.Conn.SetWriteDeadline(t); err != nil {
+	if err := c.Conn.SetWriteDeadline(t); err != nil { //nolint:staticcheck // QF1008: the wrapped Conn, as around it
 		return err
 	}
 	return c.Conn.SetReadDeadline(c.headerDeadline(t))

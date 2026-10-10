@@ -403,8 +403,11 @@ func TestDecodeAddr(t *testing.T) {
 		string(append([]byte{3, 1}, ".\x00\x50"...)):                                                     {Name: ".", Port: 80},
 		string(append([]byte{3, 5}, "127.1\x00\x50"...)):                                                 {Name: "127.1", Port: 80},
 	} {
-		if addr, _, err := DecodeAddr([]byte(wire)); err != nil || addr != want {
-			t.Errorf("DecodeAddr(%q) = IP %v, Name %q, %v; want %v", wire, addr.IP, addr.Name, err, want)
+		addr, _, err := DecodeAddr([]byte(wire))
+		if err != nil {
+			t.Errorf("DecodeAddr(%q) error = %v", wire, err)
+		} else if addr != want {
+			t.Errorf("DecodeAddr(%q) = IP %v, Name %q; want %v", wire, addr.IP, addr.Name, want)
 		}
 	}
 	if _, _, err := DecodeAddr([]byte{2, 0}); !errors.Is(err, ErrAddrType) {

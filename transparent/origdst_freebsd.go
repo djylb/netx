@@ -144,18 +144,5 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 		return nil, fmt.Errorf("ioctl failed: %v", err)
 	}
 
-	odPort := nl.redirectPort()
-	var odIP net.IP
-	switch nl.Af {
-	case syscall.AF_INET:
-		odIP = make(net.IP, net.IPv4len)
-		copy(odIP, nl.Rdaddr[:net.IPv4len])
-	case syscall.AF_INET6:
-		odIP = make(net.IP, net.IPv6len)
-		copy(odIP, nl.Rdaddr[:])
-	default:
-		return nil, fmt.Errorf("unsupported address family: %d", nl.Af)
-	}
-
-	return &net.TCPAddr{IP: odIP, Port: odPort}, nil
+	return natlookAddr(nl.Af, &nl.Rdaddr, nl.redirectPort())
 }

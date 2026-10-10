@@ -57,6 +57,7 @@ func echoAfter(c net.Conn, greeting string) {
 	_, _ = io.Copy(c, c)
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestHTTPConnect(t *testing.T) {
 	gotReq := make(chan *http.Request, 1)
 	addr := serveOnce(t, func(c net.Conn) {
@@ -98,6 +99,7 @@ func TestHTTPConnect(t *testing.T) {
 	}
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestHTTPConnectRejected(t *testing.T) {
 	addr := serveOnce(t, func(c net.Conn) {
 		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
@@ -111,6 +113,7 @@ func TestHTTPConnectRejected(t *testing.T) {
 	}
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestHTTPConnectRejectsBadTargets(t *testing.T) {
 	// The proxy grants every CONNECT request it gets, so only the target
 	// check can fail these dials.
@@ -314,6 +317,7 @@ func TestDialContextEndsStalledHandshake(t *testing.T) {
 	}
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestFromURLErrors(t *testing.T) {
 	if _, err := FromURL(nil, nil); err == nil {
 		t.Error("FromURL(nil) succeeded")
@@ -354,6 +358,7 @@ func (d *recordingDialer) DialContext(_ context.Context, _, address string) (net
 	return nil, errors.New("recorded")
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestFromEnvironment(t *testing.T) {
 	t.Setenv("ALL_PROXY", "")
 	t.Setenv("all_proxy", "")
@@ -446,6 +451,7 @@ func TestNoProxy(t *testing.T) {
 	}
 }
 
+//goland:noinspection HttpUrlsUsage
 func TestHTTPConnectReplyParsing(t *testing.T) {
 	tests := []struct {
 		name    string

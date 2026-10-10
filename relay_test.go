@@ -135,6 +135,18 @@ func TestRelayReportsFirstError(t *testing.T) {
 // With WithHalfClose a client can shut down its sending side and still read
 // the answer, which the backend sends after it has seen EOF.
 func TestRelayHalfClose(t *testing.T) {
+	testRelayHalfClose(t, func(c net.Conn) net.Conn { return c })
+}
+
+// Half-close and the byte counts work when only one end is a raw TCPConn.
+func TestRelayHalfCloseMixedEnds(t *testing.T) {
+	testRelayHalfClose(t, func(c net.Conn) net.Conn { return NewTimeoutConn(c, 5*time.Second) })
+}
+
+// testRelayHalfClose relays between a client and an echo backend that
+// answers after EOF, with the backend's end of the relay passed through wrap.
+func testRelayHalfClose(t *testing.T, wrap func(net.Conn) net.Conn) {
+	t.Helper()
 	client, relayA := tcpPair(t)
 	relayB, backend := tcpPair(t)
 	defer func() { _ = client.Close() }()
@@ -149,7 +161,7 @@ func TestRelayHalfClose(t *testing.T) {
 	var up, down int64
 	go func() {
 		var err error
-		up, down, err = Relay(relayA, relayB, WithHalfClose())
+		up, down, err = Relay(relayA, wrap(relayB), WithHalfClose())
 		done <- err
 	}()
 
@@ -219,37 +231,6 @@ func TestRelayCopyPoolsBufferWithOneTCPEnd(t *testing.T) {
 	// The race detector drops a quarter of the pool's Puts, so allow some.
 	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
 		t.Fatalf("relayCopy() allocates %d bytes per copy, want the pooled buffer reused", perCopy)
-	}
-}
-
-// Half-close and the byte counts work when only one end is a raw TCPConn.
-func TestRelayHalfCloseMixedEnds(t *testing.T) {
-	client, relayA := tcpPair(t)
-	relayB, backend := tcpPair(t)
-	defer func() { _ = client.Close() }()
-	defer func() { _ = backend.Close() }()
-
-	go func() {
-		request, _ := io.ReadAll(backend)
-		_, _ = backend.Write(append([]byte("echo:"), request...))
-		_ = backend.(*net.TCPConn).CloseWrite()
-	}()
-	done := make(chan error, 1)
-	var up, down int64
-	go func() {
-		var err error
-		up, down, err = Relay(relayA, NewTimeoutConn(relayB, 5*time.Second), WithHalfClose())
-		done <- err
-	}()
-
-	_, _ = client.Write([]byte("ping"))
-	_ = client.(*net.TCPConn).CloseWrite()
-	answer, err := io.ReadAll(client)
-	if err != nil || string(answer) != "echo:ping" {
-		t.Fatalf("answer = %q, %v", answer, err)
-	}
-	if err := <-done; err != nil || up != 4 || down != 9 {
-		t.Fatalf("Relay() = %d, %d, %v", up, down, err)
 	}
 }
 

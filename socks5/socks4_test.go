@@ -69,8 +69,10 @@ func TestReadRequest4LiteralName(t *testing.T) {
 		"example.":    {Name: "example.", Port: 80},
 	} {
 		_, got, _, err := ReadRequest4(strings.NewReader("\x04\x01\x00\x50\x00\x00\x00\x01\x00" + name + "\x00"))
-		if err != nil || got != want {
-			t.Errorf("ReadRequest4(%q) = IP %v, Name %q, %v; want %v", name, got.IP, got.Name, err, want)
+		if err != nil {
+			t.Errorf("ReadRequest4(%q) error = %v", name, err)
+		} else if got != want {
+			t.Errorf("ReadRequest4(%q) = IP %v, Name %q; want %v", name, got.IP, got.Name, want)
 		}
 	}
 }

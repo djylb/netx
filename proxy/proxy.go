@@ -121,6 +121,7 @@ func FromEnvironment(forward ContextDialer) (ContextDialer, error) {
 	if (err != nil || u.Scheme == "" || u.Host == "") && !strings.Contains(raw, "://") {
 		// A bare host:port, such as "127.0.0.1:1080" or "proxy:3128", is an
 		// http proxy, as for curl.
+		//goland:noinspection HttpUrlsUsage
 		if bare, bareErr := url.Parse("http://" + raw); bareErr == nil && bare.Host != "" {
 			u, err = bare, nil
 		}

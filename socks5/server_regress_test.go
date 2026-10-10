@@ -322,7 +322,7 @@ func TestServeRetriesTemporaryAcceptErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	if err := (&socks5.Server{}).Serve(&failingListener{Listener: ln, errs: []error{fatal}}); err != fatal {
+	if err := (&socks5.Server{}).Serve(&failingListener{Listener: ln, errs: []error{fatal}}); !errors.Is(err, fatal) {
 		t.Fatalf("Serve() = %v, want %v", err, fatal)
 	}
 }

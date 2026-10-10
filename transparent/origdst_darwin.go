@@ -113,18 +113,5 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 		return nil, fmt.Errorf("failed to get redirected address: %v", errno)
 	}
 
-	odPort := nl.redirectPort()
-	var odIP net.IP
-	switch nl.af {
-	case syscall.AF_INET:
-		odIP = make(net.IP, net.IPv4len)
-		copy(odIP, nl.rdaddr[:net.IPv4len])
-	case syscall.AF_INET6:
-		odIP = make(net.IP, net.IPv6len)
-		copy(odIP, nl.rdaddr[:])
-	default:
-		return nil, fmt.Errorf("unsupported address family: %d", nl.af)
-	}
-
-	return &net.TCPAddr{IP: odIP, Port: odPort}, nil
+	return natlookAddr(nl.af, &nl.rdaddr, nl.redirectPort())
 }

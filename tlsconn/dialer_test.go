@@ -9,6 +9,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/nettest"
 )
 
 // forwardTo dials target whatever address it is asked for, recording it, as a
@@ -37,20 +39,7 @@ func tlsEcho(t *testing.T, cert tls.Certificate) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = c.Close() }()
-				_, _ = io.Copy(c, c)
-			}()
-		}
-	}()
-	return ln.Addr().String()
+	return nettest.ServeEcho(t, ln)
 }
 
 func TestDialerServerNameFromAddress(t *testing.T) {
