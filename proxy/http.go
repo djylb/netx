@@ -78,7 +78,7 @@ func (d *HTTPDialer) request(address string) ([]byte, error) {
 	}
 	for key, values := range d.Header {
 		for _, v := range values {
-			if key == "" || hasControl(key) || strings.ContainsAny(key, " :") || hasControl(v) {
+			if key == "" || hasControl(key) || strings.ContainsAny(key, " :") || invalidFieldValue(v) {
 				return nil, fmt.Errorf("proxy: invalid header field %q", key)
 			}
 			b = append(b, key+": "+v+"\r\n"...)
@@ -135,6 +135,12 @@ func readConnectStatus(tp *textproto.Reader) (string, error) {
 		return "", fmt.Errorf("malformed status line %q", line)
 	}
 	return status, nil
+}
+
+// invalidFieldValue reports whether v contains a control character other
+// than the horizontal tab, which header values may contain (RFC 9110).
+func invalidFieldValue(v string) bool {
+	return strings.IndexFunc(v, func(r rune) bool { return r != '\t' && (r < ' ' || r == 0x7f) }) >= 0
 }
 
 // hasControl reports whether s contains a control character. Spaces, which

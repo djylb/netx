@@ -247,16 +247,17 @@ func forward(client, backend net.Conn) {
   client shuts down its sending side and then reads the answer. Ends without
   `CloseWrite` are closed as usual. Pair it with an idle timeout.
 - On Linux, a direction between two `*net.TCPConn`s, or between a
-  `*net.TCPConn` and a `*net.UnixConn` (also beneath a `PrefixConn` on the
-  reading side), is left to the kernel with `splice`.
+  `*net.TCPConn` and a `*net.UnixConn` (also beneath `PrefixConn`s), is left
+  to the kernel with `splice`.
 - Otherwise a direction is copied with the reading end's `WriteTo` or else the
   writing end's `ReadFrom`, as `io.Copy` would, so a datagram connection that
   implements them keeps each datagram whole. The `WriteTo` and `ReadFrom` of
   `*net.TCPConn` and `*net.UnixConn` are skipped (also beneath a `PrefixConn`)
   and the data goes through a pooled 32 KiB buffer instead of one they
   allocate. Sources that return one datagram per read (`*net.UDPConn`,
-  `PacketListener` connections, `FramedConn` with `WithDatagramReads`) get a
-  64 KiB buffer, so no datagram is cut short.
+  `PacketListener` connections, `FramedConn` with `WithDatagramReads`, also
+  beneath this package's wrappers) get a 64 KiB buffer and one write per
+  datagram, so no datagram is cut short and empty ones are passed on.
 
 ## Listeners
 
@@ -462,18 +463,33 @@ func serve(ctx context.Context, handle func(c net.Conn, target string)) error {
 	if err != nil {
 		return err
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
 		dst, err := transparent.OriginalDestination(c)
-		if err != nil {
+		// A connection made to the listener directly, not redirected,
+		// reports the listener's own address: forwarding it would connect
+		// the proxy to itself, again and again.
+		if err != nil || dst.Port == port && isLocal(dst.IP) {
 			_ = c.Close()
 			continue
 		}
 		go handle(c, dst.String())
 	}
+}
+
+// isLocal reports whether ip is an address of this host.
+func isLocal(ip net.IP) bool {
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return ip.IsLoopback() || ip.IsUnspecified()
 }
 ```
 
@@ -501,6 +517,9 @@ func serveRedirectedUDP(ctx context.Context) error {
 	buf := make([]byte, 65535)
 	for {
 		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		if errors.Is(err, transparent.ErrControlTruncated) {
+			continue // this datagram's destination is unknown
+		}
 		if err != nil {
 			return err
 		}
@@ -641,25 +660,30 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 ```
 
 - Hooks: `Auth` (any `Authenticator`), `Allow`, `Dial` (its error picks the
-  reply code through `ReplyFor`), `ConnectAddr`, `Relay`, and for UDP
+  reply code through `ReplyFor`), `ConnectAddr`, `Relay` (by default
+  `netx.Relay` with `WithHalfClose`, so a client that shuts down its sending
+  side still gets the reply), and for UDP
   `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
   names unresolved, for example to forward through a tunnel), `AllowPacket`
   and `UDPAddr` (the address advertised to clients).
 - `Allow` and `AllowPacket` see every IP address a client sends in
   `Dst.IP`, including IPv4-mapped IPv6 addresses and domain names that are IP
-  literals, also with one trailing dot such as `127.0.0.1.`. Other names arrive unresolved, so an IP policy must also check the
-  resolved address where `Dial` or `DialPacket` resolves it, for example with
-  a `net.Dialer` `Control` function: some resolvers accept forms such as
-  `127.1`.
+  literals, also with one trailing dot such as `127.0.0.1.`. Other names
+  arrive unresolved, so an IP policy must also check the resolved address
+  where `Dial` or `DialPacket` resolves it, for example with a `net.Dialer`
+  `Control` function: some resolvers accept forms such as `127.1`. The
+  unspecified addresses `0.0.0.0` and `::` reach the server's own host on
+  many systems.
 - UDP on a fixed port (`PacketConn`): datagrams must come from the IP address
-  of their association's control connection, and are matched by the exact
-  source the client announced, or else as the only pending association of that
-  IP; ambiguous sources are dropped. Announcements of another IP are ignored,
-  so a client cannot claim the datagrams of others; a port announced with
-  `0.0.0.0` or a name, by a client that does not know its address, counts at
-  the control connection's IP. A control connection without an IP address,
-  such as a tunneled stream, must announce the client's IP address, or the
-  request is refused. `ListenUDP` instead gives each association its own
+  of their association's control connection, so a client cannot claim the
+  datagrams of others. Among the associations of that IP waiting for their
+  first datagram, a source goes to the one that announced its port, else to
+  the only one that announced no port, else to the only one; ambiguous
+  sources are dropped. An announced port counts at the control connection's
+  IP whatever address comes with it, as clients behind a NAT announce their
+  private address and clients that do not know theirs announce `0.0.0.0` or a
+  name. A control connection without an IP address, such as a tunneled
+  stream, must announce the client's IP address, or the request is refused. `ListenUDP` instead gives each association its own
   socket, which without a known client IP takes the first source that sends.
   Replies from any source are relayed (full cone), and a reply that cannot be
   delivered is reported to `OnError` and dropped. An association ends with its

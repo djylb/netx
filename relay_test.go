@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -556,4 +557,62 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 		go func() { _ = NewFramedConn(b).WriteFrame(make([]byte, size)) }()
 		relayOne(t, NewFramedConn(a, WithDatagramReads()))
 	})
+	// The wrappers of this package are looked through.
+	for _, tt := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"TimeoutConn", func(c net.Conn) net.Conn { return NewTimeoutConn(c, time.Minute) }},
+		{"ObserveConn", func(c net.Conn) net.Conn {
+			return ObserveConn(c, TrafficObserver{OnRead: func(int64) error { return nil }})
+		}},
+		{"TeeConn", func(c net.Conn) net.Conn { return NewTeeConn(c, 0) }},
+		{"PrefixConn", func(c net.Conn) net.Conn { return NewPrefixConn(c, nil) }},
+		{"AddrOverrideConn", func(c net.Conn) net.Conn { return NewAddrOverrideConn(c, nil, nil) }},
+	} {
+		t.Run("FramedConn beneath "+tt.name, func(t *testing.T) {
+			a, b := net.Pipe()
+			defer func() { _ = b.Close() }()
+			go func() { _ = NewFramedConn(b).WriteFrame(make([]byte, size)) }()
+			relayOne(t, tt.wrap(NewFramedConn(a, WithDatagramReads())))
+		})
+	}
+}
+
+// Empty datagrams are relayed too.
+func TestRelayPassesEmptyDatagrams(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	go func() {
+		w := NewFramedConn(b)
+		for _, frame := range []string{"", "x", ""} {
+			_ = w.WriteFrame([]byte(frame))
+		}
+	}()
+	sink := &datagramSink{done: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = Relay(NewFramedConn(a, WithDatagramReads()), sink)
+		close(done)
+	}()
+	waitUntil(t, func() bool { return len(sink.sizes()) >= 3 })
+	_ = a.Close()
+	<-done
+	if got := sink.sizes(); !slices.Equal(got, []int{0, 1, 0}) {
+		t.Fatalf("datagrams relayed = %v, want [0 1 0]", got)
+	}
+}
+
+// A PrefixConn on the writing side does not keep a direction from splicing.
+func TestRelayLooksThroughWritingPrefixConn(t *testing.T) {
+	client, server := tcpPair(t)
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	dst := unwrapPrefixWriter(NewPrefixConn(NewPrefixConn(server, []byte("x")), nil))
+	if dst != server {
+		t.Fatalf("unwrapPrefixWriter() = %T, want the TCP connection", dst)
+	}
+	if spliceOS && !canSplice(dst, client) {
+		t.Fatal("canSplice() = false beneath a writing PrefixConn")
+	}
 }

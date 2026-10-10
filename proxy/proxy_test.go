@@ -624,3 +624,63 @@ func serveEcho(t *testing.T) string {
 	}()
 	return ln.Addr().String()
 }
+
+// The context bounds a dial through a Forward whose connections cannot set
+// deadlines.
+func TestHTTPDialerContextWithoutDeadlines(t *testing.T) {
+	release := make(chan struct{})
+	addr := serveOnce(t, func(c net.Conn) {
+		go func() {
+			<-release
+			_ = c.Close()
+		}()
+		_, _ = io.Copy(io.Discard, c) // reads the request and never answers
+	})
+	defer close(release)
+	d := &HTTPDialer{ProxyAddr: addr, Forward: noDeadlineDialer{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		c, err := d.DialContext(ctx, "tcp", "example.com:443")
+		if c != nil {
+			_ = c.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DialContext() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DialContext() outlived its context")
+	}
+}
+
+// Header values may hold tabs; names may not.
+func TestHTTPDialerHeaderTabs(t *testing.T) {
+	d := &HTTPDialer{Header: map[string][]string{"X-Tab": {"a\tb"}}}
+	if req, err := d.request("example.com:443"); err != nil || !strings.Contains(string(req), "X-Tab: a\tb\r\n") {
+		t.Fatalf("request() = %q, %v; want the tab kept", req, err)
+	}
+	d = &HTTPDialer{Header: map[string][]string{"X\tTab": {"v"}}}
+	if _, err := d.request("example.com:443"); err == nil {
+		t.Fatal("request() accepted a tab in a header name")
+	}
+}
+
+// The NO_PROXY dialer of FromEnvironment has Dial, as FromURL's dialers do.
+func TestFromEnvironmentBypassDialerDial(t *testing.T) {
+	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "localhost")
+	d, err := FromEnvironment(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.(interface {
+		Dial(network, address string) (net.Conn, error)
+	}); !ok {
+		t.Fatalf("FromEnvironment() = %T without Dial", d)
+	}
+}

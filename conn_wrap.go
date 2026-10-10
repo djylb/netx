@@ -137,6 +137,13 @@ func (w *wrappedConn) SetWriteDeadline(t time.Time) error {
 	return w.parent.SetWriteDeadline(t)
 }
 
+func (w *wrappedConn) innerReader() io.Reader {
+	if w == nil {
+		return nil
+	}
+	return w.rwc
+}
+
 func (w *wrappedConn) RawConn() net.Conn {
 	if w == nil {
 		return nil

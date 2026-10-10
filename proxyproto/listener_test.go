@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -373,5 +376,207 @@ func TestListenerOptionalSignaturePrefix(t *testing.T) {
 	server, _ = acceptOne(t, l, []byte("\r\n"))
 	if _, err := server.Read(buf); !isTimeout(err) {
 		t.Fatalf("Read() error = %v, want the header timeout", err)
+	}
+}
+
+// countingListener counts the Reads of the connections it accepts.
+type countingListener struct {
+	net.Listener
+	reads *atomic.Int32
+}
+
+func (l countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return countingConn{c, l.reads}, nil
+}
+
+type countingConn struct {
+	net.Conn
+	reads *atomic.Int32
+}
+
+func (c countingConn) Read(b []byte) (int, error) {
+	c.reads.Add(1)
+	return c.Conn.Read(b)
+}
+
+// A header that has arrived whole is read with one read of the connection,
+// together with the payload after it.
+func TestListenerReadsHeaderAtOnce(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads atomic.Int32
+	l := &Listener{Listener: countingListener{ln, &reads}, Policy: func(net.Addr) Policy { return Optional }}
+	t.Cleanup(func() { _ = l.Close() })
+	for _, data := range [][]byte{
+		append(V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
+		append(V2Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
+		[]byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+	} {
+		reads.Store(0)
+		server, _ := acceptOne(t, l, data)
+		time.Sleep(20 * time.Millisecond) // let the bytes arrive
+		buf := make([]byte, 64)
+		n, err := server.Read(buf)
+		if err != nil || !bytes.HasSuffix(data, buf[:n]) || n < len("payload") {
+			t.Fatalf("Read() = %q, %v", buf[:n], err)
+		}
+		if got := reads.Load(); got != 1 {
+			t.Fatalf("%q: %d reads of the connection, want 1", data, got)
+		}
+	}
+}
+
+// emptyReadConn returns nothing, and no error, from every Read.
+type emptyReadConn struct{ net.Conn }
+
+func (emptyReadConn) Read([]byte) (int, error) { return 0, nil }
+
+type oneConnListener struct {
+	net.Listener
+	c net.Conn
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	if c := l.c; c != nil {
+		l.c = nil
+		return c, nil
+	}
+	return nil, net.ErrClosed
+}
+
+// A connection whose reads keep returning nothing ends the header read
+// instead of spinning on it until the header timeout.
+func TestListenerGivesUpOnEmptyReads(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	l := &Listener{Listener: &oneConnListener{c: emptyReadConn{a}}, HeaderTimeout: time.Minute}
+	server, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.(*Conn).Header()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.ErrNoProgress) {
+			t.Fatalf("Header() error = %v, want io.ErrNoProgress", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Header() kept reading a connection that returns nothing")
+	}
+}
+
+// readFromRecorder records that its ReadFrom was used.
+type readFromRecorder struct {
+	net.Conn
+	used bool
+}
+
+func (c *readFromRecorder) ReadFrom(r io.Reader) (int64, error) {
+	c.used = true
+	return io.Copy(io.Discard, r)
+}
+
+// Copying to a Conn uses the ReadFrom of the connection beneath, which a
+// *net.TCPConn splices with.
+func TestConnReadFromUsesConnection(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	raw := &readFromRecorder{Conn: a}
+	l := &Listener{Listener: &oneConnListener{c: raw}}
+	server, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, ok := server.(io.ReaderFrom)
+	if !ok {
+		t.Fatalf("%T has no ReadFrom", server)
+	}
+	if n, err := rf.ReadFrom(strings.NewReader("data")); err != nil || n != 4 || !raw.used {
+		t.Fatalf("ReadFrom() = %d, %v; the connection's ReadFrom used = %t", n, err, raw.used)
+	}
+}
+
+// A stream reports the addresses of a UDP header as *net.TCPAddr, the
+// address type of its listener; Header keeps them as sent.
+func TestListenerStreamReportsTCPAddrs(t *testing.T) {
+	l := newTestListener(t)
+	for _, header := range [][]byte{
+		[]byte("PROXY UDP4 192.0.2.1 192.0.2.2 1000 2000\r\n"),
+		V2Header(udp("192.0.2.1", 1000), udp("192.0.2.2", 2000)),
+	} {
+		server, _ := acceptOne(t, l, header)
+		if a, ok := server.RemoteAddr().(*net.TCPAddr); !ok || a.String() != "192.0.2.1:1000" {
+			t.Fatalf("RemoteAddr() = %#v, want *net.TCPAddr 192.0.2.1:1000", server.RemoteAddr())
+		}
+		if a, ok := server.LocalAddr().(*net.TCPAddr); !ok || a.String() != "192.0.2.2:2000" {
+			t.Fatalf("LocalAddr() = %#v, want *net.TCPAddr 192.0.2.2:2000", server.LocalAddr())
+		}
+		if h, err := server.(*Conn).Header(); err != nil {
+			t.Fatal(err)
+		} else if _, ok := h.Source.(*net.UDPAddr); !ok {
+			t.Fatalf("Header().Source = %T, want the *net.UDPAddr sent", h.Source)
+		}
+	}
+}
+
+// scriptConn returns data, then io.EOF, from its Reads.
+type scriptConn struct {
+	net.Conn
+	data []byte
+}
+
+func (c *scriptConn) Read(b []byte) (int, error) {
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(b, c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+func (*scriptConn) SetReadDeadline(time.Time) error { return nil }
+
+// WriteTo copies a stream to a writer without ReadFrom through a pooled
+// buffer, rather than one io.Copy allocates for each connection.
+func TestConnWriteToPoolsBuffer(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector makes sync.Pool drop buffers")
+	}
+	const runs = 20
+	copyOnce := func() {
+		a, b := net.Pipe()
+		defer func() { _ = a.Close() }()
+		defer func() { _ = b.Close() }()
+		l := &Listener{Listener: &oneConnListener{c: &scriptConn{Conn: a, data: []byte("no header here")}}, Policy: func(net.Addr) Policy { return Optional }}
+		c, err := l.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sink strings.Builder
+		if n, err := c.(*Conn).WriteTo(struct{ io.Writer }{&sink}); err != nil || n != 14 {
+			t.Fatalf("WriteTo() = %d, %v", n, err)
+		}
+	}
+	copyOnce() // fill the pool
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		copyOnce()
+	}
+	runtime.ReadMemStats(&after)
+	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy > 8<<10 {
+		t.Fatalf("WriteTo allocated %d bytes per connection, want no copy buffer", perCopy)
 	}
 }

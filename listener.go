@@ -3,6 +3,7 @@ package netx
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 )
@@ -47,6 +48,12 @@ func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
 		_ = c.Close()
 		return net.ErrClosed
 	default:
+	}
+	// A context that is already done fails Deliver, rather than the select
+	// below picking between it and free queue space at random.
+	if err := ctx.Err(); err != nil {
+		_ = c.Close()
+		return err
 	}
 	select {
 	case l.conns <- c:
@@ -198,6 +205,8 @@ func (c *singleConn) Close() error {
 func (c *singleConn) CloseWrite() error {
 	return closeWrite(c.Conn)
 }
+
+func (c *singleConn) innerReader() io.Reader { return c.Conn }
 
 func (c *singleConn) RawConn() net.Conn {
 	return c.Conn

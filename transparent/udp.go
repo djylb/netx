@@ -2,9 +2,15 @@ package transparent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 )
+
+// ErrControlTruncated is returned by ReadFromUDP, with the datagram, when the
+// datagram's control messages were cut short before its original
+// destination. It concerns that datagram only.
+var ErrControlTruncated = errors.New("transparent: control messages truncated before the original destination")
 
 // ListenPacket listens on a UDP address for datagrams that a TPROXY rule
 // redirects to it, and asks the kernel to report each datagram's original
@@ -18,8 +24,7 @@ func ListenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
 // and returns its source and the destination it was originally sent to. A
 // datagram sent to the socket's own address reports that address. If the
 // datagram's control messages were cut short before the original
-// destination, it returns the datagram with an error, which ends no more
-// than that datagram.
+// destination, it returns the datagram with ErrControlTruncated.
 func ReadFromUDP(c *net.UDPConn, b []byte) (n int, src, dst netip.AddrPort, err error) {
 	return readFromUDP(c, b)
 }

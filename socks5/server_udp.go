@@ -193,8 +193,10 @@ func (r *udpRelay) acceptLoop() {
 }
 
 // match takes the association for a new client source: the one that
-// announced it, the only one pending for its IP address, or the one that
-// takes any source.
+// announced it, else the only one pending for its IP address that announced
+// no port, else the only one pending for its IP address, whose client may be
+// behind a NAT that changed the announced port, or the one that takes any
+// source.
 func (r *udpRelay) match(src netip.AddrPort) *association {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -203,11 +205,21 @@ func (r *udpRelay) match(src netip.AddrPort) *association {
 		return a
 	}
 	list := r.pending[src.Addr()]
+	var unannounced *association
+	n := 0
 	for _, a := range list {
 		if a.announced == src {
 			r.removeLocked(a)
 			return a
 		}
+		if !a.announced.IsValid() {
+			unannounced, n = a, n+1
+		}
+	}
+	// The ports that the others announced tell them apart from it.
+	if n == 1 {
+		r.removeLocked(unannounced)
+		return unannounced
 	}
 	if len(list) == 1 {
 		a := list[0]
@@ -364,9 +376,10 @@ func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort) {
 	case client.IsValid():
 		// Only the control connection's IP address may send: honoring an
 		// announcement of another address would let a client claim the
-		// datagrams of others. A client that does not know its address
-		// announces its port with 0.0.0.0, as RFC 1928 says, or a name.
-		if req.Dst.Port != 0 && (ip == client || !ip.IsValid() || ip.IsUnspecified()) {
+		// datagrams of others. Its port still names the source, behind a
+		// NAT that keeps ports and for clients that announce 0.0.0.0, as
+		// RFC 1928 says, or a name when they do not know their address.
+		if req.Dst.Port != 0 {
 			announced = netip.AddrPortFrom(client, req.Dst.Port)
 		}
 		return client, announced
@@ -447,9 +460,19 @@ func (a *association) bind(c net.Conn) {
 	go a.targetToClient(c)
 }
 
+// udpBufPool holds the buffers of the UDP relay goroutines, which fit the
+// largest datagram with its header, so that short associations do not each
+// allocate them.
+var udpBufPool = sync.Pool{New: func() any {
+	b := make([]byte, MaxDatagramHeaderLen+65535)
+	return &b
+}}
+
 func (a *association) clientToTarget(c net.Conn) {
 	defer a.close()
-	buf := make([]byte, 65535)
+	bp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bp)
+	buf := *bp
 	for {
 		n, err := c.Read(buf)
 		if err != nil {
@@ -463,7 +486,9 @@ func (a *association) clientToTarget(c net.Conn) {
 			if netx.IsClosed(err) {
 				return
 			}
-			a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp send to %v: %w", dst, err))
+			if a.s.OnError != nil {
+				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp send to %v: %w", dst, err))
+			}
 		}
 	}
 }
@@ -472,13 +497,15 @@ func (a *association) targetToClient(c net.Conn) {
 	defer a.close()
 	// Replies are read in place after room for the longest header, which is
 	// then written just before the payload, so they are not copied.
-	packet := make([]byte, MaxDatagramHeaderLen+65535)
+	bp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bp)
+	packet := *bp
 	payload := packet[MaxDatagramHeaderLen:]
 	var hdr [MaxDatagramHeaderLen]byte
 	for {
 		n, src, err := a.out.ReadFrom(payload)
 		if err != nil {
-			if !netx.IsClosed(err) && !errors.Is(err, io.EOF) {
+			if a.s.OnError != nil && !netx.IsClosed(err) && !errors.Is(err, io.EOF) {
 				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp receive: %w", err))
 			}
 			return
@@ -495,7 +522,9 @@ func (a *association) targetToClient(c net.Conn) {
 			}
 			// One undeliverable reply, such as one too large once wrapped,
 			// does not end the association.
-			a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
+			if a.s.OnError != nil {
+				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
+			}
 		}
 	}
 }

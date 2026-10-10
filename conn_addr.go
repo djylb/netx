@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"io"
 	"net"
 	"time"
 )
@@ -97,6 +98,13 @@ func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error {
 		return net.ErrClosed
 	}
 	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *AddrOverrideConn) innerReader() io.Reader {
+	if c == nil {
+		return nil
+	}
+	return c.Conn
 }
 
 // RawConn returns the innermost connection beneath c; see RawConnProvider.

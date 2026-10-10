@@ -274,6 +274,12 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
 // unless the accept filter rejects it, the backlog is full or the listener
 // is closed. Only the read loop starts connections.
 func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *packetConn {
+	// Drop the datagram before anything is allocated for it while Accept
+	// falls behind. Only the read loop adds to the backlog, so a full one
+	// stays full until newConn checks it again below.
+	if len(l.accept) == cap(l.accept) || isClosedChan(l.done) {
+		return nil
+	}
 	if addr == nil {
 		if !ap.IsValid() {
 			return nil
@@ -523,12 +529,18 @@ func (c *packetConn) LocalAddr() net.Addr  { return c.l.pc.LocalAddr() }
 func (c *packetConn) RemoteAddr() net.Addr { return c.peer }
 
 func (c *packetConn) SetDeadline(t time.Time) error {
+	if isClosedChan(c.closed) {
+		return net.ErrClosed
+	}
 	c.readDeadline.set(t)
 	c.writeDeadline.set(t)
 	return nil
 }
 
 func (c *packetConn) SetReadDeadline(t time.Time) error {
+	if isClosedChan(c.closed) {
+		return net.ErrClosed
+	}
 	c.readDeadline.set(t)
 	return nil
 }
@@ -536,6 +548,9 @@ func (c *packetConn) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline makes later writes fail once t has passed. A write that is
 // already in progress on the shared socket is not interrupted.
 func (c *packetConn) SetWriteDeadline(t time.Time) error {
+	if isClosedChan(c.closed) {
+		return net.ErrClosed
+	}
 	c.writeDeadline.set(t)
 	return nil
 }
@@ -543,9 +558,10 @@ func (c *packetConn) SetWriteDeadline(t time.Time) error {
 // deadline is a resettable deadline whose expiry closes a channel, as in
 // net.Pipe.
 type deadline struct {
-	mu     sync.Mutex
-	timer  *time.Timer
-	cancel chan struct{} // closed when the deadline expires; never nil
+	mu      sync.Mutex
+	timer   *time.Timer
+	cancel  chan struct{} // closed when the deadline expires; never nil
+	stopped bool          // set by stop: no more timers
 }
 
 func makeDeadline() deadline {
@@ -559,6 +575,9 @@ func (d *deadline) set(t time.Time) {
 		<-d.cancel // the timer fired: wait until it closed the channel
 	}
 	d.timer = nil
+	if d.stopped {
+		return
+	}
 	closed := isClosedChan(d.cancel)
 	if t.IsZero() {
 		if closed {
@@ -580,7 +599,7 @@ func (d *deadline) set(t time.Time) {
 }
 
 // stop releases the pending timer, if any, without changing whether the
-// deadline has expired.
+// deadline has expired, and keeps later calls of set from starting another.
 func (d *deadline) stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -588,6 +607,7 @@ func (d *deadline) stop() {
 		<-d.cancel // the timer fired: wait until it closed the channel
 	}
 	d.timer = nil
+	d.stopped = true
 }
 
 func (d *deadline) wait() chan struct{} {

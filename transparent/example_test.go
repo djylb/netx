@@ -2,6 +2,7 @@ package transparent_test
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 
@@ -15,6 +16,17 @@ func ExampleListen() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	// local reports whether ip is an address of this host.
+	local := func(ip net.IP) bool {
+		addrs, _ := net.InterfaceAddrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return true
+			}
+		}
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -22,7 +34,10 @@ func ExampleListen() {
 		}
 		go func() {
 			dst, err := transparent.OriginalDestination(c)
-			if err != nil {
+			// A connection made to the listener directly, not redirected,
+			// reports the listener's own address: forwarding it would
+			// connect the proxy to itself, again and again.
+			if err != nil || dst.Port == port && local(dst.IP) {
 				_ = c.Close()
 				return
 			}
@@ -46,6 +61,9 @@ func ExampleListenPacket() {
 	buf := make([]byte, 65535)
 	for {
 		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		if errors.Is(err, transparent.ErrControlTruncated) {
+			continue // this datagram's destination is unknown
+		}
 		if err != nil {
 			log.Fatal(err)
 		}

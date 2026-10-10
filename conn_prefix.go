@@ -77,6 +77,13 @@ func (c *PrefixConn) CloseWrite() error {
 	return closeWrite(c.Conn)
 }
 
+func (c *PrefixConn) innerReader() io.Reader {
+	if c == nil {
+		return nil
+	}
+	return c.Conn
+}
+
 // RawConn returns the innermost connection beneath c; see RawConnProvider.
 // Reading it directly skips the rest of the prefix.
 func (c *PrefixConn) RawConn() net.Conn {

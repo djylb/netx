@@ -249,10 +249,43 @@ func TestPacketConnCloseStopsDeadlineTimers(t *testing.T) {
 			t.Fatal("deadline timer still pending after Close")
 		}
 	}
-	// Deadlines can still be set on the closed connection.
-	_ = c.SetDeadline(time.Now().Add(-time.Second))
-	_ = c.SetDeadline(time.Now().Add(time.Hour))
-	_ = c.SetDeadline(time.Time{})
+	// Setting a deadline on the closed connection fails and starts no timer.
+	for _, set := range []func(time.Time) error{c.SetDeadline, c.SetReadDeadline, c.SetWriteDeadline} {
+		if err := set(time.Now().Add(time.Hour)); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("setting a deadline after Close = %v, want net.ErrClosed", err)
+		}
+	}
+	c.readDeadline.set(time.Now().Add(time.Hour)) // as by a setter racing with Close
+	if c.readDeadline.timer != nil {
+		t.Fatal("a stopped deadline started a timer")
+	}
+}
+
+// While the accept backlog is full, a new peer's datagram is dropped before
+// the accept filter runs or a connection is allocated.
+func TestPacketListenerFullBacklogDropsEarly(t *testing.T) {
+	var filtered atomic.Int32
+	l := newUDPListener(t, WithAcceptBacklog(1), WithAcceptFilter(func(net.Addr) bool {
+		filtered.Add(1)
+		return true
+	}))
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("a"))
+	waitUntil(t, func() bool { return len(l.accept) == 1 })
+	for range 3 {
+		b := dialUDP(t, l)
+		_, _ = b.Write([]byte("b"))
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := filtered.Load(); n != 1 {
+		t.Fatalf("accept filter ran %d times, want 1 (later peers found the backlog full)", n)
+	}
+	l.mu.Lock()
+	n := len(l.conns)
+	l.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d connections, want 1", n)
+	}
 }
 
 // As on a socket, an expired read deadline fails Read even while datagrams

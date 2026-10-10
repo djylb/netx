@@ -50,9 +50,9 @@ type Listener struct {
 	// read from the first datagram of each connection, where it may be
 	// followed by the first payload or stand alone, and must be whole once
 	// the datagram holds the whole signature; later datagrams are passed
-	// through unchanged. Header addresses are reported as
-	// *net.UDPAddr, since version 1 has no UDP token and UDP senders use TCP4
-	// and TCP6.
+	// through unchanged. TCP addresses in the header are reported as
+	// *net.UDPAddr, since version 1 has no UDP token and UDP senders use
+	// TCP4 and TCP6.
 	Datagram bool
 }
 
@@ -87,6 +87,13 @@ const maxDatagram = 65535
 
 var datagramPool = sync.Pool{New: func() any {
 	b := make([]byte, maxDatagram)
+	return &b
+}}
+
+// streamPool holds the buffers that WriteTo copies a stream through when the
+// writer has no ReadFrom.
+var streamPool = sync.Pool{New: func() any {
+	b := make([]byte, 32<<10)
 	return &b
 }}
 
@@ -322,6 +329,7 @@ func (c *Conn) interrupted(err error) bool {
 // readStreamHeader reads the header into c.hbuf, which a resumed read
 // continues.
 func (c *Conn) readStreamHeader() error {
+	empty := 0 // reads in a row that returned nothing
 	for {
 		h, n, need, err := parse(c.hbuf)
 		switch {
@@ -339,15 +347,25 @@ func (c *Conn) readStreamHeader() error {
 			return nil
 		}
 		if need > cap(c.hbuf) {
-			// Grow with the bytes received, not to the length a version 2
+			// Read headerReadSize bytes at a time, and beyond that grow with
+			// the bytes received rather than to the length a version 2
 			// header claims, so that a few bytes cannot hold 64 KiB.
-			size := min(need, max(2*cap(c.hbuf), headerReadSize))
+			size := max(headerReadSize, min(need, 2*cap(c.hbuf)))
 			c.hbuf = append(make([]byte, 0, size), c.hbuf...)
 		}
 		m, rerr := c.Conn.Read(c.hbuf[len(c.hbuf):cap(c.hbuf)])
 		c.hbuf = c.hbuf[:len(c.hbuf)+m]
-		if m > 0 || rerr == nil {
+		if m > 0 {
+			empty = 0
 			continue
+		}
+		if rerr == nil {
+			// Give up on a connection that keeps returning nothing, as
+			// bufio does, rather than spin.
+			if empty++; empty < 100 {
+				continue
+			}
+			rerr = io.ErrNoProgress
 		}
 		switch {
 		case c.interrupted(rerr):
@@ -491,27 +509,64 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	n, err := io.Copy(w, c.Conn)
+	if _, ok := w.(io.ReaderFrom); ok {
+		// A *net.TCPConn reads from the connection with splice.
+		n, err := io.Copy(w, c.Conn)
+		return total + n, err
+	}
+	// Without ReadFrom, io.Copy would allocate a buffer for every call.
+	bp := streamPool.Get().(*[]byte)
+	defer streamPool.Put(bp)
+	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.Conn}, *bp)
 	return total + n, err
 }
 
+// readerOnly hides every method but Read, so that io.CopyBuffer uses the
+// buffer it is given.
+type readerOnly struct{ io.Reader }
+
 // RemoteAddr returns the source address from the header, or the peer address
-// when the header has none.
+// when the header has none. A stream reports a UDP address as a
+// *net.TCPAddr, so that it has the address type of its listener.
 func (c *Conn) RemoteAddr() net.Addr {
 	if c.init(false) == nil && c.header != nil && c.header.Source != nil {
-		return c.header.Source
+		return c.streamAddr(c.header.Source)
 	}
 	return c.Conn.RemoteAddr()
 }
 
 // LocalAddr returns the destination address from the header, or the local
-// address when the header has none.
+// address when the header has none, with the address type of RemoteAddr.
 func (c *Conn) LocalAddr() net.Addr {
 	if c.init(false) == nil && c.header != nil && c.header.Destination != nil {
-		return c.header.Destination
+		return c.streamAddr(c.header.Destination)
 	}
 	return c.Conn.LocalAddr()
 }
+
+// streamAddr returns a header address as a stream connection reports it: a
+// *net.UDPAddr, from a UDP4 or UDP6 token or a DGRAM transport, as a
+// *net.TCPAddr.
+func (c *Conn) streamAddr(a net.Addr) net.Addr {
+	if u, ok := a.(*net.UDPAddr); ok && u != nil && !c.datagram {
+		return &net.TCPAddr{IP: u.IP, Port: u.Port, Zone: u.Zone}
+	}
+	return a
+}
+
+// ReadFrom copies r to the connection with the ReadFrom of the connection
+// beneath, so that a *net.TCPConn can splice the data. Writes do not wait
+// for the header.
+func (c *Conn) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := c.Conn.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(writerOnly{c.Conn}, r)
+}
+
+// writerOnly hides every method but Write, so that io.Copy does not call
+// ReadFrom again.
+type writerOnly struct{ io.Writer }
 
 // SetDeadline sets the read and write deadlines. During a header read the
 // read deadline takes effect as described for Conn.

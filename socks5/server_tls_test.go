@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,4 +128,41 @@ func echoUDPOnce(t *testing.T) *net.UDPConn {
 		}
 	}()
 	return peer
+}
+
+// A handshake that outlasts HandshakeTimeout ends the TLS connection beneath
+// it, so the client sees the connection end rather than a record it cannot
+// authenticate, which crypto/tls would send after the timed-out reply.
+func TestServerOverTLSHandshakeTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsLn := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}})
+	s := &socks5.Server{
+		HandshakeTimeout: 200 * time.Millisecond,
+		Auth: []socks5.Authenticator{socks5.UserPassAuth{Check: func(string, string) bool {
+			time.Sleep(300 * time.Millisecond) // past the handshake timeout
+			return true
+		}}},
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(tlsLn) }()
+	t.Cleanup(func() {
+		_ = s.Close()
+		<-done
+	})
+	d := &socks5.Dialer{
+		ProxyAddr: ln.Addr().String(),
+		Username:  "alice",
+		Password:  "pw",
+		Forward:   &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}},
+	}
+	_, err = d.Dial("tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("Dial() succeeded past the server's handshake timeout")
+	}
+	if strings.Contains(err.Error(), "bad record MAC") {
+		t.Fatalf("Dial() error = %v, want the connection to end, not a TLS integrity failure", err)
+	}
 }

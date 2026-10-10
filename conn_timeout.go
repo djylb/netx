@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -188,6 +189,13 @@ func (c *TimeoutConn) capDeadline(t time.Time) time.Time {
 		return idle
 	}
 	return t
+}
+
+func (c *TimeoutConn) innerReader() io.Reader {
+	if c == nil {
+		return nil
+	}
+	return c.Conn
 }
 
 // RawConn returns the innermost connection beneath c; see RawConnProvider.

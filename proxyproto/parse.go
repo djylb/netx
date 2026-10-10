@@ -36,7 +36,8 @@ func Parse(b []byte) (*Header, int, error) {
 //
 // If the stream does not start with a header, Read returns ErrNoHeader and
 // consumes nothing, so the bytes can still be read from r. A valid header is
-// consumed. After an error wrapping ErrMalformed the stream position is
+// consumed. After an error wrapping ErrMalformed, and after any error while
+// reading a version 2 header larger than r's buffer, the stream position is
 // unspecified. Read only blocks while the bytes received so far are the start
 // of a header.
 func Read(r *bufio.Reader) (*Header, error) {

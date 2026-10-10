@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -504,6 +505,7 @@ func TestServerUDPAnnouncedPortWithoutAddress(t *testing.T) {
 		{"exact address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
 		{"unspecified address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
 		{"name", func(p uint16) socks5.Addr { return socks5.Addr{Name: "0", Port: p} }},
+		{"private address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.MustParseAddr("192.168.1.5"), Port: p} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -555,5 +557,214 @@ func TestServerUDPIdleClosesControlWithoutDeadlines(t *testing.T) {
 	}
 	if err := <-served; err != nil {
 		t.Fatalf("ServeConn() = %v, want nil", err)
+	}
+}
+
+// halfCloseTarget answers each connection, once the client has finished
+// sending, with "response:" and what it received, as whois and HTTP/1.0
+// servers do for clients that shut down their sending side.
+func halfCloseTarget(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				req, _ := io.ReadAll(c)
+				// Give the relay time to act on the client's FIN first.
+				time.Sleep(50 * time.Millisecond)
+				_, _ = c.Write(append([]byte("response:"), req...))
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// The default CONNECT relay passes a client's half-close on and still
+// delivers the reply.
+func TestServerConnectPassesHalfClose(t *testing.T) {
+	target := halfCloseTarget(t)
+	addr := serve(t, &socks5.Server{})
+	c, err := (&socks5.Dialer{ProxyAddr: addr}).Dial("tcp", target)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := io.WriteString(c, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got, err := io.ReadAll(c); err != nil || string(got) != "response:hello" {
+		t.Fatalf("reply = %q, %v; want %q", got, err, "response:hello")
+	}
+}
+
+// stalledProxy accepts connections and never answers.
+func stalledProxy(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// The context bounds a dial through a Forward whose connections cannot set
+// deadlines.
+func TestDialerContextWithoutDeadlines(t *testing.T) {
+	d := &socks5.Dialer{ProxyAddr: stalledProxy(t), Forward: noDeadlineDialer{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		c, err := d.DialContext(ctx, "tcp", "example.com:80")
+		if c != nil {
+			_ = c.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DialContext() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DialContext() outlived its context")
+	}
+}
+
+// HandshakeTimeout bounds the handshake of a connection that cannot set
+// deadlines.
+func TestServerHandshakeTimeoutWithoutDeadlines(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	s := &socks5.Server{HandshakeTimeout: 100 * time.Millisecond}
+	defer func() { _ = s.Close() }()
+	served := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		served <- s.ServeConn(noDeadlineConn{c})
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	select {
+	case err := <-served:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("ServeConn() = %v, want os.ErrDeadlineExceeded", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServeConn() outlived its HandshakeTimeout")
+	}
+}
+
+// Serve after Close closes the listener it refuses, as Close would have.
+func TestServeAfterCloseClosesListener(t *testing.T) {
+	s := &socks5.Server{}
+	_ = s.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	if err := s.Serve(ln); !errors.Is(err, socks5.ErrServerClosed) {
+		t.Fatalf("Serve() = %v, want ErrServerClosed", err)
+	}
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second))
+	if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept() after Serve = %v, want net.ErrClosed", err)
+	}
+}
+
+// alwaysTemporaryListener fails every Accept with a temporary error.
+type alwaysTemporaryListener struct {
+	net.Listener
+	calls atomic.Int32
+}
+
+func (l *alwaysTemporaryListener) Accept() (net.Conn, error) {
+	l.calls.Add(1)
+	return nil, temporaryError{}
+}
+
+// Close ends Serve's wait between retries of a failing Accept.
+func TestServerCloseInterruptsAcceptRetry(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &alwaysTemporaryListener{Listener: ln}
+	s := &socks5.Server{}
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(l) }()
+	// The retry delay doubles from 5ms; after 8 attempts it is 640ms.
+	for l.calls.Load() < 8 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	_ = s.Close()
+	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Fatalf("Serve() = %v, want ErrServerClosed", err)
+	}
+	if d := time.Since(start); d > 300*time.Millisecond {
+		t.Fatalf("Serve() returned %v after Close, want at once", d)
+	}
+}
+
+// An association that announced its port and has not sent yet does not keep
+// one that announced none from receiving its source.
+func TestServerUDPAnnouncedPendingDoesNotBlockUnannounced(t *testing.T) {
+	echo := udpEcho(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := serve(t, &socks5.Server{PacketConn: pc})
+	a, b := newUDPClient(t), newUDPClient(t)
+	_, _ = associate(t, addr, socks5.AddrFromNetAddr(a.LocalAddr()))
+	_, relayB := associate(t, addr, socks5.Addr{})
+	if got, _ := exchange(t, b, relayB, echo, "b"); got != "echo:b" {
+		t.Fatalf("reply = %q, want %q", got, "echo:b")
 	}
 }
