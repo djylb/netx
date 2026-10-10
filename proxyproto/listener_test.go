@@ -580,3 +580,23 @@ func TestConnWriteToPoolsBuffer(t *testing.T) {
 		t.Fatalf("WriteTo allocated %d bytes per connection, want no copy buffer", perCopy)
 	}
 }
+
+// On a connection without deadlines the header timeout closes it, so an
+// Optional connection reports the timeout rather than passing a closed
+// connection on.
+func TestListenerOptionalHeaderTimeoutWithoutDeadlines(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{Listener: noDeadlineListener{ln}, HeaderTimeout: 100 * time.Millisecond,
+		Policy: func(net.Addr) Policy { return Optional }}
+	t.Cleanup(func() { _ = l.Close() })
+	server, _ := acceptOne(t, l, nil)
+	if _, err := server.Read(make([]byte, 8)); !isTimeout(err) {
+		t.Fatalf("Read() error = %v, want the header timeout", err)
+	}
+	if _, err := server.(*Conn).Header(); isTimeout(err) || !errors.Is(err, ErrNoHeader) {
+		t.Fatalf("Header() error = %v, want ErrNoHeader and no timeout", err)
+	}
+}

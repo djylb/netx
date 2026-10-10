@@ -65,8 +65,8 @@ func WithHalfClose() RelayOption {
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
 // PacketListener connection or a FramedConn with WithDatagramReads, also
 // beneath the wrappers of this package, gets a 64 KiB buffer instead and has
-// each datagram written with one Write, so that no datagram is cut short and
-// empty ones are passed on.
+// each datagram written with one Write, so that no datagram up to that size,
+// the largest UDP datagram, is cut short and empty ones are passed on.
 func Relay(a, b io.ReadWriteCloser, opts ...RelayOption) (aToB, bToA int64, err error) {
 	var cfg relayOptions
 	for _, opt := range opts {
@@ -131,13 +131,15 @@ func relayCopy(dst io.Writer, src io.Reader) (int64, error) {
 	if wt, ok := ownWriterTo(src); ok {
 		return wt.WriteTo(dst)
 	}
-	if rf, ok := dst.(io.ReaderFrom); ok && !isStdConn(dst) {
-		return rf.ReadFrom(src)
-	}
+	// Before the writing end's ReadFrom, which would copy datagrams through
+	// a buffer of its own, perhaps cutting them, and drop empty ones.
 	if datagramReader(src) {
 		buf := relayDatagramBufPool.Get().(*[]byte)
 		defer relayDatagramBufPool.Put(buf)
 		return copyDatagrams(dst, src, *buf)
+	}
+	if rf, ok := dst.(io.ReaderFrom); ok && !isStdConn(dst) {
+		return rf.ReadFrom(src)
 	}
 	buf := relayBufPool.Get().(*[]byte)
 	defer relayBufPool.Put(buf)

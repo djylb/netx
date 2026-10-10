@@ -768,3 +768,63 @@ func TestServerUDPAnnouncedPendingDoesNotBlockUnannounced(t *testing.T) {
 		t.Fatalf("reply = %q, want %q", got, "echo:b")
 	}
 }
+
+// silentTarget accepts one connection, sends it on and never writes to it.
+func silentTarget(t *testing.T) (string, <-chan net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := make(chan net.Conn, 1)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		conns <- c
+	}()
+	return ln.Addr().String(), conns
+}
+
+// Close ends a CONNECT relay that waits on a silent target, as one does after
+// the client half-closed.
+func TestServerCloseEndsRelayWaitingOnTarget(t *testing.T) {
+	target, targetConns := silentTarget(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	s := &socks5.Server{}
+	served := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		served <- s.ServeConn(c)
+	}()
+	c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).Dial("tcp", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	tc := <-targetConns
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := tc.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("target Read() = %v, want the half-close passed on", err)
+	}
+	_ = s.Close()
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeConn kept relaying after Close")
+	}
+}

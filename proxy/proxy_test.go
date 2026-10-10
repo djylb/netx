@@ -13,9 +13,11 @@ import (
 	"net/textproto"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 	"github.com/djylb/netx/tlsconn"
 )
@@ -682,5 +684,45 @@ func TestFromEnvironmentBypassDialerDial(t *testing.T) {
 		Dial(network, address string) (net.Conn, error)
 	}); !ok {
 		t.Fatalf("FromEnvironment() = %T without Dial", d)
+	}
+}
+
+// borrowedParentConn stands for a connection that several netx.WrapConns
+// borrow, such as the TCP connection beneath SSH channels.
+type borrowedParentConn struct {
+	noDeadlineConn
+	closed atomic.Bool
+}
+
+func (c *borrowedParentConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+type borrowingDialer struct{ parent net.Conn }
+
+func (d borrowingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return netx.WrapConn(c, d.parent), nil
+}
+
+// A CONNECT that times out closes its connection, never the connection that
+// a netx.WrapConn borrows for addresses and deadlines.
+func TestHTTPConnectTimeoutKeepsBorrowedParent(t *testing.T) {
+	addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	parent := &borrowedParentConn{noDeadlineConn: noDeadlineConn{a}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := (&HTTPDialer{ProxyAddr: addr, Forward: borrowingDialer{parent}}).DialContext(ctx, "tcp", "example.com:443"); err == nil {
+		t.Fatal("DialContext() succeeded without a reply")
+	}
+	if parent.closed.Load() {
+		t.Fatal("the CONNECT timeout closed the borrowed parent")
 	}
 }

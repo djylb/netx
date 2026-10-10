@@ -863,8 +863,9 @@ func TestFramedConnLostFrameBytesDesync(t *testing.T) {
 	}
 }
 
-// Over a real deadline: a stream Read interrupted inside a frame keeps its
-// place, while a ReadFrame interrupted inside a payload desyncs.
+// Over a real deadline: a stream Read interrupted inside a frame returns what
+// has arrived and keeps its place, while a ReadFrame interrupted inside a
+// payload desyncs.
 func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -885,10 +886,10 @@ func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 	// A stream Read returns what has arrived and keeps its place in the frame.
 	go func() { _, _ = server.Write([]byte{0, 10, 'x', 'y', 'z'}) }()
 	buf := make([]byte, 64)
+	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	if n, err := fc.Read(buf); err != nil || string(buf[:n]) != "xyz" {
 		t.Fatalf("Read() = %q, %v, want %q", buf[:n], err, "xyz")
 	}
-	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	if _, err := fc.Read(buf); !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
 		t.Fatalf("Read() error = %v, want the plain timeout", err)
 	}
@@ -914,5 +915,42 @@ func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 	_ = fc.SetReadDeadline(time.Time{})
 	if _, err := fc.Read(buf); !errors.Is(err, ErrFrameDesync) {
 		t.Fatalf("Read() after desync error = %v, want %v", err, ErrFrameDesync)
+	}
+}
+
+// A datagram Read whose discarding of a frame fails before any byte of it
+// was taken leaves the frame for the next Read.
+func TestFramedConnDatagramDiscardErrorIsRetryable(t *testing.T) {
+	fc := NewFramedConn(&framedScriptConn{steps: []framedReadStep{
+		{data: []byte{0, 5}},
+		{err: framedTimeoutError()},
+		{data: []byte("hello")},
+		{data: frameBytes("abc")},
+	}}, WithDatagramReads())
+	if _, err := fc.Read(nil); !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
+		t.Fatalf("Read(nil) error = %v, want the plain timeout", err)
+	}
+	if n, err := fc.Read(nil); n != 0 || err != nil {
+		t.Fatalf("Read(nil) = %d, %v; want the frame discarded", n, err)
+	}
+	buf := make([]byte, 8)
+	if n, err := fc.Read(buf); err != nil || string(buf[:n]) != "abc" {
+		t.Fatalf("Read() = %q, %v; want the next frame", buf[:n], err)
+	}
+}
+
+// A stream Read with room for the frame returns it whole even when it
+// arrives in pieces, as over TLS.
+func TestFramedConnStreamReadWaitsForWholeFrame(t *testing.T) {
+	steps := []framedReadStep{{data: []byte{0, 10}}}
+	for _, part := range []string{"01", "234", "56789"} {
+		steps = append(steps, framedReadStep{data: []byte(part)})
+	}
+	fc := NewFramedConn(&framedScriptConn{steps: append(steps, framedReadStep{data: frameBytes("ab")})})
+	buf := make([]byte, MaxFramePayload)
+	for _, want := range []string{"0123456789", "ab"} {
+		if n, err := fc.Read(buf); err != nil || string(buf[:n]) != want {
+			t.Fatalf("Read() = %q, %v; want %q", buf[:n], err, want)
+		}
 	}
 }

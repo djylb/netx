@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"os"
@@ -38,9 +39,10 @@ func handshake(ctx context.Context, c net.Conn, fn func() (net.Conn, error)) (ne
 		if ctx.Err() != nil || netx.IsTimeout(err) {
 			// A *tls.Conn whose write timed out would still send
 			// close_notify, under a record number that the proxy cannot
-			// authenticate; close the connection beneath it instead.
-			if raw := netx.RawConnOf(c); raw != nil {
-				_ = raw.Close()
+			// authenticate; close the connection beneath it instead, which
+			// its Close would close too.
+			if tc, ok := c.(*tls.Conn); ok {
+				_ = tc.NetConn().Close()
 			}
 		}
 		_ = c.Close()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"io"
 	"maps"
@@ -141,7 +142,10 @@ type Server struct {
 	ConnectAddr func(req *Request, target net.Conn) Addr
 	// Relay copies data between the client and target of a CONNECT request
 	// and closes both; nil uses netx.Relay with netx.WithHalfClose, so that
-	// a client that shuts down its writing side still gets the reply.
+	// a client that shuts down its writing side still gets the reply. As
+	// with TCP itself, a half-closed connection then lasts until the other
+	// side finishes or closes too; to bound how long an idle one may last,
+	// relay through netx.NewTimeoutConn on both ends.
 	Relay func(ctx context.Context, req *Request, client, target net.Conn) error
 	// ListenUDP, used when PacketConn is nil, opens a UDP socket for one
 	// association, which the association owns. Datagrams are taken as on
@@ -275,7 +279,10 @@ func (s *Server) ServeConn(c net.Conn) error {
 		// to end a handshake that outlasts the timeout.
 		guard = time.AfterFunc(timeout, func() { _ = c.Close() })
 	}
-	req, err := s.handshake(ctx, c)
+	// The authenticators' context ends with the handshake timeout too.
+	hctx, hcancel := context.WithTimeout(ctx, timeout)
+	req, err := s.handshake(hctx, c)
+	hcancel()
 	if guard != nil && !guard.Stop() {
 		err = os.ErrDeadlineExceeded
 	}
@@ -446,6 +453,11 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 		_ = target.Close()
 		return err
 	}
+	// Close closes the client connections it tracks; the target is closed
+	// too, or a relay waiting on it, for example after the client
+	// half-closed, would outlive Close.
+	stop := context.AfterFunc(ctx, func() { _ = target.Close() })
+	defer stop()
 	if s.Relay != nil {
 		return s.Relay(ctx, req, req.Conn, target)
 	}
@@ -553,14 +565,15 @@ func (s *Server) onError(c net.Conn, err error) {
 	}
 }
 
-// closeBeneathTLS closes the connection beneath c, such as the TCP connection
-// of a *tls.Conn, after a timeout. A *tls.Conn whose write timed out would
-// still send close_notify on Close, under a record number that the peer
-// cannot authenticate, so the peer would see a TLS failure instead of the
-// end of the connection.
+// closeBeneathTLS closes the connection beneath c after a timeout when c is a
+// *tls.Conn. One whose write timed out would still send close_notify on
+// Close, under a record number that the peer cannot authenticate, so the peer
+// would see a TLS failure instead of the end of the connection. Only the
+// connection that c's Close closes anyway is closed, never one that c merely
+// borrows, such as the parent of a netx.WrapConn.
 func closeBeneathTLS(c net.Conn) {
-	if raw := netx.RawConnOf(c); raw != nil {
-		_ = raw.Close()
+	if tc, ok := c.(*tls.Conn); ok {
+		_ = tc.NetConn().Close()
 	}
 }
 

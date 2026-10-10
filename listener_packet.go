@@ -150,8 +150,8 @@ func (l *PacketListener) Accept() (net.Conn, error) {
 }
 
 // Close closes the packet connection and every connection of the listener,
-// and waits for the listener's goroutines to stop unless the accept filter
-// called it.
+// and waits for the listener's goroutines to stop unless the accept filter,
+// which may call Close, is running.
 func (l *PacketListener) Close() error {
 	l.closeOnce.Do(func() {
 		// Nothing here waits for the read loop, which may itself be calling

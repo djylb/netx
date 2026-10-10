@@ -616,3 +616,36 @@ func TestRelayLooksThroughWritingPrefixConn(t *testing.T) {
 		t.Fatal("canSplice() = false beneath a writing PrefixConn")
 	}
 }
+
+// readFromSink is a datagramSink with a ReadFrom of its own, which copies
+// through a buffer it allocates, as an *os.File does.
+type readFromSink struct{ *datagramSink }
+
+func (s readFromSink) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(writerOnly{s.datagramSink}, r)
+}
+
+// A datagram source keeps its datagrams whole, empty ones included, also
+// when the writing end has a ReadFrom.
+func TestRelayDatagramsIntoReaderFrom(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	go func() {
+		w := NewFramedConn(b)
+		for _, frame := range [][]byte{make([]byte, 40000), {}, []byte("x")} {
+			_ = w.WriteFrame(frame)
+		}
+	}()
+	sink := readFromSink{&datagramSink{done: make(chan struct{})}}
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = Relay(NewFramedConn(a, WithDatagramReads()), sink)
+		close(done)
+	}()
+	waitUntil(t, func() bool { return len(sink.sizes()) >= 3 })
+	_ = a.Close()
+	<-done
+	if got := sink.sizes(); !slices.Equal(got, []int{40000, 0, 1}) {
+		t.Fatalf("datagrams relayed = %v, want [40000 0 1]", got)
+	}
+}

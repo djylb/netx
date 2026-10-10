@@ -291,10 +291,11 @@ func (c *Conn) readHeader(callerBound bool) error {
 	} else {
 		err = c.readStreamHeader()
 	}
-	if guard != nil && !guard.Stop() && c.err != nil {
-		// The guard closed the connection: report the header timeout
-		// rather than the use of a closed connection.
-		c.err = nil
+	if guard != nil && !guard.Stop() {
+		// The guard closed the connection, so not even an Optional one can
+		// pass its bytes on: report the header timeout rather than the use
+		// of a closed connection.
+		c.header, c.pending, c.err = nil, nil, nil
 		c.fail(os.ErrDeadlineExceeded)
 	}
 
@@ -509,8 +510,11 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	if _, ok := w.(io.ReaderFrom); ok {
-		// A *net.TCPConn reads from the connection with splice.
+	switch w.(type) {
+	case io.ReaderFrom, *net.UnixConn:
+		// A *net.TCPConn splices into these: a *net.TCPConn with its
+		// ReadFrom, a *net.UnixConn, whose ReadFrom reads datagrams, with
+		// the WriteTo of the *net.TCPConn.
 		n, err := io.Copy(w, c.Conn)
 		return total + n, err
 	}

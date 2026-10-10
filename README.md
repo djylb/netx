@@ -662,7 +662,9 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 - Hooks: `Auth` (any `Authenticator`), `Allow`, `Dial` (its error picks the
   reply code through `ReplyFor`), `ConnectAddr`, `Relay` (by default
   `netx.Relay` with `WithHalfClose`, so a client that shuts down its sending
-  side still gets the reply), and for UDP
+  side still gets the reply; a half-closed connection then lasts until the
+  other side finishes or closes too, so relay through `netx.NewTimeoutConn` to
+  bound idle ones), and for UDP
   `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
   names unresolved, for example to forward through a tunnel), `AllowPacket`
   and `UDPAddr` (the address advertised to clients).
