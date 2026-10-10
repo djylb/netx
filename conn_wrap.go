@@ -226,7 +226,9 @@ func sameNetConn(a, b net.Conn) bool {
 	}
 	av := reflect.ValueOf(a)
 	bv := reflect.ValueOf(b)
-	if av.Type() != bv.Type() || !av.Type().Comparable() {
+	// Value.Comparable also looks at the values in interface fields, which
+	// Type.Comparable does not and on which Equal would panic.
+	if av.Type() != bv.Type() || !av.Comparable() || !bv.Comparable() {
 		return false
 	}
 	return av.Equal(bv)

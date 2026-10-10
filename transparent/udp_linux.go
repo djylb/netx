@@ -33,15 +33,25 @@ func listenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
 	return pc.(*net.UDPConn), nil
 }
 
+// errControlTruncated reports a datagram whose control messages did not fit,
+// so that its original destination is unknown.
+var errControlTruncated = errors.New("transparent: control messages truncated before the original destination")
+
 func readFromUDP(c *net.UDPConn, b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
-	var oob [128]byte
-	n, oobn, _, src, err := c.ReadMsgUDPAddrPort(b, oob[:])
+	// Room for the original destination after other control messages the
+	// socket may have been asked for, such as timestamps or IP_PKTINFO.
+	var oob [512]byte
+	n, oobn, flags, src, err := c.ReadMsgUDPAddrPort(b, oob[:])
 	if err != nil {
 		return n, netip.AddrPort{}, netip.AddrPort{}, err
 	}
 	src = unmapAddrPort(src)
 	if dst, ok := origDstFromControl(oob[:oobn]); ok {
 		return n, src, dst, nil
+	}
+	if flags&syscall.MSG_CTRUNC != 0 {
+		// The local address would name the wrong destination.
+		return n, src, netip.AddrPort{}, errControlTruncated
 	}
 	local, _ := c.LocalAddr().(*net.UDPAddr)
 	return n, src, unmapAddrPort(local.AddrPort()), nil

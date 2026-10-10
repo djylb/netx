@@ -41,14 +41,21 @@ func Parse(b []byte) (*Header, int, error) {
 // of a header.
 func Read(r *bufio.Reader) (*Header, error) {
 	for need := 1; ; {
-		data, err := r.Peek(need)
+		// Parse everything already buffered, so a header that has arrived
+		// whole is parsed once instead of once per byte.
+		data, err := r.Peek(max(need, r.Buffered()))
 		if errors.Is(err, bufio.ErrBufferFull) {
 			if data[0] != v2Signature[0] {
 				return nil, malformed("version 1 header longer than the %d-byte read buffer", r.Size())
 			}
 			// A version 2 header larger than r's buffer; its length is known.
-			buf := make([]byte, need)
-			if _, err := io.ReadFull(r, buf); err != nil {
+			// It is read as it arrives rather than into a buffer of the
+			// length it claims, so that a few bytes cannot hold 64 KiB.
+			buf, err := io.ReadAll(io.LimitReader(r, int64(need)))
+			if err == nil && len(buf) < need {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
 				return nil, unexpectedEOF(err)
 			}
 			h, _, _, err := parse(buf)

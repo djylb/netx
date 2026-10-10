@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,8 +48,9 @@ type Listener struct {
 	// Datagram is for listeners whose connections return one datagram per
 	// Read, such as netx.PacketListener over a UDP socket. The header is then
 	// read from the first datagram of each connection, where it may be
-	// followed by the first payload or stand alone; later datagrams are
-	// passed through unchanged. Header addresses are reported as
+	// followed by the first payload or stand alone, and must be whole once
+	// the datagram holds the whole signature; later datagrams are passed
+	// through unchanged. Header addresses are reported as
 	// *net.UDPAddr, since version 1 has no UDP token and UDP senders use TCP4
 	// and TCP6.
 	Datagram bool
@@ -93,24 +95,29 @@ var datagramPool = sync.Pool{New: func() any {
 // called. Avoid querying the addresses in the accept loop: that waits for the
 // header.
 //
-// The header must arrive within the Listener's HeaderTimeout. A read deadline
-// set by the caller that expires sooner also ends a header read started by
-// Read or WriteTo, which then returns the timeout; the next call resumes the
-// header. An Optional connection that stops, by the header timeout or the end
-// of the stream, while the bytes received are only the start of a signature
-// has no header, and those bytes are passed through.
+// The header must arrive within the Listener's HeaderTimeout. The read that
+// reaches it returns the timeout, and later ones an error matching
+// ErrNoHeader that is not a timeout, so that loops retrying timeouts do not
+// spin. A connection that cannot set deadlines is closed when the header
+// timeout expires. A read deadline set by the caller that expires sooner also
+// ends a header read started by Read or WriteTo, or their wait for one
+// started by another call, which then returns the timeout; the next call
+// resumes the header. An Optional connection that stops, by the header
+// timeout or the end of the stream, while the bytes received are only the
+// start of a signature has no header, and those bytes are passed through.
 type Conn struct {
 	net.Conn
 	policy   Policy
 	timeout  time.Duration
 	datagram bool
 
-	// hmu serializes header reads; header and err are set before done.
-	hmu    sync.Mutex
-	done   atomic.Bool
-	hbuf   []byte // stream bytes received while the header is incomplete
-	header *Header
-	err    error
+	// hsem serializes header reads; header and err are set before done.
+	hsem      chan struct{}
+	done      atomic.Bool
+	hbuf      []byte // stream bytes received while the header is incomplete
+	header    *Header
+	err       error
+	timeoutAt error // the header timeout, returned once before err
 
 	// Bytes read with the header that belong to the stream, or the first
 	// datagram's payload.
@@ -119,10 +126,11 @@ type Conn struct {
 	drained   atomic.Bool
 
 	mu           sync.Mutex
-	readDeadline time.Time // set by the caller
-	expires      time.Time // end of the header timeout, from the first header read
-	reading      bool      // a header read is in progress
-	callerBound  bool      // and it honors readDeadline
+	readDeadline time.Time     // set by the caller
+	deadlineSet  chan struct{} // closed when readDeadline changes
+	expires      time.Time     // end of the header timeout, from the first header read
+	reading      bool          // a header read is in progress
+	callerBound  bool          // and it honors readDeadline
 }
 
 // Header returns the connection's PROXY protocol header, reading it first if
@@ -142,8 +150,11 @@ func (c *Conn) init(callerBound bool) error {
 	if c.done.Load() {
 		return nil
 	}
-	c.hmu.Lock()
-	defer c.hmu.Unlock()
+	sem, err := c.lockHeader(callerBound)
+	if err != nil {
+		return err
+	}
+	defer func() { <-sem }()
 	if c.done.Load() {
 		return nil
 	}
@@ -151,10 +162,107 @@ func (c *Conn) init(callerBound bool) error {
 		return err
 	}
 	c.hbuf = nil
-	c.drained.Store(len(c.pending) == 0)
+	if !c.datagram && len(c.pending) == 0 {
+		c.pending = nil // a stream has no empty pending reads
+	}
+	c.drained.Store(c.pending == nil)
 	c.done.Store(true)
+	if err := c.timeoutAt; err != nil {
+		c.timeoutAt = nil
+		return err
+	}
 	return nil
 }
+
+// lockHeader waits for the right to read the header and returns the
+// semaphore to release. With callerBound it gives up, as a blocked Read would,
+// when the caller's read deadline passes first.
+func (c *Conn) lockHeader(callerBound bool) (chan struct{}, error) {
+	c.mu.Lock()
+	if c.hsem == nil {
+		c.hsem = make(chan struct{}, 1)
+	}
+	sem := c.hsem
+	c.mu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return sem, nil
+	default:
+	}
+	if !callerBound {
+		sem <- struct{}{}
+		return sem, nil
+	}
+	for {
+		c.mu.Lock()
+		deadline := c.readDeadline
+		if c.deadlineSet == nil {
+			c.deadlineSet = make(chan struct{})
+		}
+		changed := c.deadlineSet
+		c.mu.Unlock()
+		var expired <-chan time.Time
+		var timer *time.Timer
+		if !deadline.IsZero() {
+			wait := time.Until(deadline)
+			if wait <= 0 {
+				return nil, os.ErrDeadlineExceeded
+			}
+			timer = time.NewTimer(wait)
+			expired = timer.C
+		}
+		select {
+		case sem <- struct{}{}:
+			stopTimer(timer)
+			return sem, nil
+		case <-expired:
+			return nil, os.ErrDeadlineExceeded
+		case <-changed:
+			stopTimer(timer)
+		}
+	}
+}
+
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
+}
+
+// deadlineChangedLocked wakes the calls waiting in lockHeader to look at the
+// new read deadline. c.mu must be held.
+func (c *Conn) deadlineChangedLocked() {
+	if c.deadlineSet != nil {
+		close(c.deadlineSet)
+		c.deadlineSet = nil
+	}
+}
+
+// fail records err as the error that ended the header read. A timeout, which
+// can only be the header timeout here, is returned once as it is; the error
+// kept is not a timeout, so that loops retrying timeouts do not spin on it.
+func (c *Conn) fail(err error) {
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		c.timeoutAt = err
+		err = &headerTimeoutError{cause: err}
+	}
+	c.err = err
+}
+
+// headerTimeoutError is the lasting error of a connection whose header did
+// not arrive within the header timeout. It matches ErrNoHeader and is not a
+// timeout.
+type headerTimeoutError struct {
+	cause error
+}
+
+func (e *headerTimeoutError) Error() string {
+	return "proxyproto: no header within the header timeout: " + e.cause.Error()
+}
+
+func (e *headerTimeoutError) Unwrap() error   { return ErrNoHeader }
+func (e *headerTimeoutError) Timeout() bool   { return false }
+func (e *headerTimeoutError) Temporary() bool { return false }
 
 func (c *Conn) readHeader(callerBound bool) error {
 	c.mu.Lock()
@@ -162,7 +270,12 @@ func (c *Conn) readHeader(callerBound bool) error {
 		c.expires = time.Now().Add(c.timeout)
 	}
 	c.reading, c.callerBound = true, callerBound
-	_ = c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline))
+	var guard *time.Timer
+	if c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline)) != nil {
+		// Without deadline support, closing the connection is the only way
+		// to end a header read that outlasts the header timeout.
+		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.Conn.Close() })
+	}
 	c.mu.Unlock()
 
 	var err error
@@ -170,6 +283,12 @@ func (c *Conn) readHeader(callerBound bool) error {
 		err = c.readDatagramHeader()
 	} else {
 		err = c.readStreamHeader()
+	}
+	if guard != nil && !guard.Stop() && c.err != nil {
+		// The guard closed the connection: report the header timeout
+		// rather than the use of a closed connection.
+		c.err = nil
+		c.fail(os.ErrDeadlineExceeded)
 	}
 
 	c.mu.Lock()
@@ -220,7 +339,10 @@ func (c *Conn) readStreamHeader() error {
 			return nil
 		}
 		if need > cap(c.hbuf) {
-			c.hbuf = append(make([]byte, 0, max(need, headerReadSize)), c.hbuf...)
+			// Grow with the bytes received, not to the length a version 2
+			// header claims, so that a few bytes cannot hold 64 KiB.
+			size := min(need, max(2*cap(c.hbuf), headerReadSize))
+			c.hbuf = append(make([]byte, 0, size), c.hbuf...)
 		}
 		m, rerr := c.Conn.Read(c.hbuf[len(c.hbuf):cap(c.hbuf)])
 		c.hbuf = c.hbuf[:len(c.hbuf)+m]
@@ -233,9 +355,9 @@ func (c *Conn) readStreamHeader() error {
 		case c.policy == Optional && signaturePrefix(c.hbuf):
 			c.pending = c.hbuf
 		case len(c.hbuf) == 0:
-			c.err = rerr
+			c.fail(rerr)
 		default:
-			c.err = unexpectedEOF(rerr)
+			c.fail(unexpectedEOF(rerr))
 		}
 		return nil
 	}
@@ -260,7 +382,7 @@ func (c *Conn) readDatagramHeader() error {
 		case c.interrupted(err):
 			return err
 		case c.policy != Optional:
-			c.err = err
+			c.fail(err)
 		}
 		return nil
 	}
@@ -274,9 +396,13 @@ func (c *Conn) readDatagramHeader() error {
 		}
 	case errors.Is(err, ErrMalformed):
 		c.err = err
+	case errors.Is(err, io.ErrUnexpectedEOF) && !signaturePrefix(buf[:n]):
+		// A whole signature, in a datagram too short for its header.
+		c.err = malformed("header cut short by the end of a %d-byte datagram", n)
 	case c.policy == Optional:
-		// No header, or a datagram as short as the start of a signature.
-		c.pending = bytes.Clone(buf[:n])
+		// No header, or a datagram as short as the start of a signature. It
+		// is passed on even when empty: a datagram is a message.
+		c.pending = append(make([]byte, 0, n), buf[:n]...)
 	default:
 		c.err = ErrNoHeader
 	}
@@ -307,13 +433,14 @@ func (c *Conn) Read(b []byte) (int, error) {
 	}
 	if !c.drained.Load() {
 		c.pendingMu.Lock()
-		if len(c.pending) > 0 {
-			n := copy(b, c.pending)
-			if c.datagram || n == len(c.pending) {
+		// A datagram is pending even when it is empty.
+		if p := c.pending; p != nil {
+			n := copy(b, p)
+			if c.datagram || n == len(p) {
 				c.pending = nil
 				c.drained.Store(true)
 			} else {
-				c.pending = c.pending[n:]
+				c.pending = p[n:]
 			}
 			c.pendingMu.Unlock()
 			return n, nil
@@ -392,6 +519,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.readDeadline = t
+	c.deadlineChangedLocked()
 	if !c.reading {
 		return c.Conn.SetDeadline(t)
 	}
@@ -407,6 +535,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.readDeadline = t
+	c.deadlineChangedLocked()
 	if c.reading {
 		t = c.headerDeadline(t)
 	}

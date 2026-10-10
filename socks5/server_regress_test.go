@@ -449,3 +449,111 @@ func TestServerUDPKeepsAssociationAfterUndeliverableReply(t *testing.T) {
 		t.Fatalf("control connection read = %v, want it still open", err)
 	}
 }
+
+// sliceConn and sliceListener are value types that cannot be map keys, like
+// wrappers that carry a buffer.
+type sliceConn struct {
+	net.Conn
+	scratch []byte
+}
+
+type sliceListener struct {
+	net.Listener
+	tags []string
+}
+
+func TestServerServesUncomparableConnsAndListeners(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socks5.Server{}
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(sliceListener{Listener: ln, tags: []string{"socks"}}) }()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	done := make(chan error, 1)
+	go func() { done <- s.ServeConn(sliceConn{Conn: server, scratch: make([]byte, 1)}) }()
+	if _, err := client.Write([]byte{socks5.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Fatalf("Serve() = %v, want ErrServerClosed", err)
+	}
+	<-done // Close closed the connection
+}
+
+// A client that does not know its address announces its port with 0.0.0.0
+// (RFC 1928) or a name such as "0"; the port still tells two associations of
+// one IP address apart.
+func TestServerUDPAnnouncedPortWithoutAddress(t *testing.T) {
+	echo := udpEcho(t)
+	for _, tt := range []struct {
+		name     string
+		announce func(port uint16) socks5.Addr
+	}{
+		{"exact address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
+		{"unspecified address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
+		{"name", func(p uint16) socks5.Addr { return socks5.Addr{Name: "0", Port: p} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := serve(t, &socks5.Server{PacketConn: pc})
+			a, b := newUDPClient(t), newUDPClient(t)
+			port := func(c *net.UDPConn) uint16 { return uint16(c.LocalAddr().(*net.UDPAddr).Port) }
+			_, relayA := associate(t, addr, tt.announce(port(a)))
+			_, relayB := associate(t, addr, tt.announce(port(b)))
+			gotA, _ := exchange(t, a, relayA, echo, "a")
+			gotB, _ := exchange(t, b, relayB, echo, "b")
+			if gotA != "echo:a" || gotB != "echo:b" {
+				t.Fatalf("replies a=%q b=%q, want both echoed", gotA, gotB)
+			}
+		})
+	}
+}
+
+// An association that ends closes its control connection also when that
+// connection has no deadlines to interrupt the read with.
+func TestServerUDPIdleClosesControlWithoutDeadlines(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socks5.Server{PacketConn: pc, UDPIdleTimeout: 100 * time.Millisecond}
+	defer func() { _ = s.Close() }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	served := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		served <- s.ServeConn(noDeadlineConn{c})
+	}()
+	ctl, _ := associate(t, ln.Addr().String(), socks5.Addr{})
+	defer func() { _ = ctl.Close() }()
+	_ = ctl.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("control Read() error = %v, want EOF once the association idles out", err)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("ServeConn() = %v, want nil", err)
+	}
+}

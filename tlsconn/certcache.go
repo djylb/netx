@@ -39,7 +39,7 @@ type CertCache struct {
 
 type certEntry struct {
 	key       string
-	load      func() (*tls.Certificate, error)
+	load      func() (*tls.Certificate, error) // reloads files; nil for PEM data
 	files     bool
 	ready     chan struct{} // closed when the first load ends
 	cert      *tls.Certificate
@@ -128,7 +128,12 @@ func (c *CertCache) get(key string, files bool, load func() (*tls.Certificate, e
 		return cert, nil
 	}
 
-	e := &certEntry{key: key, load: load, files: files, ready: make(chan struct{}), lastUsed: now}
+	e := &certEntry{key: key, files: files, ready: make(chan struct{}), lastUsed: now}
+	if files {
+		// PEM data is never read again; keeping its loader would keep the
+		// caller's PEM, private key included, for as long as it is cached.
+		e.load = load
+	}
 	if c.entries == nil {
 		c.entries = make(map[string]*list.Element)
 	}

@@ -16,7 +16,10 @@ func ListenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
 
 // ReadFromUDP reads one datagram from c, a socket from ListenPacket, into b
 // and returns its source and the destination it was originally sent to. A
-// datagram sent to the socket's own address reports that address.
+// datagram sent to the socket's own address reports that address. If the
+// datagram's control messages were cut short before the original
+// destination, it returns the datagram with an error, which ends no more
+// than that datagram.
 func ReadFromUDP(c *net.UDPConn, b []byte) (n int, src, dst netip.AddrPort, err error) {
 	return readFromUDP(c, b)
 }

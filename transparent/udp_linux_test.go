@@ -128,3 +128,48 @@ func TestListenPacketAndDialUDP(t *testing.T) {
 		t.Fatalf("client got %q from %v, %v; want answer from %v", buf[:n], from, err, spoofed)
 	}
 }
+
+// Other control messages the socket asks for do not push the original
+// destination out of the buffer.
+func TestReadFromUDPWithOtherControlMessages(t *testing.T) {
+	ln, err := ListenPacket(context.Background(), "0.0.0.0:0")
+	skipWithoutPrivilege(t, err)
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	raw, err := ln.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var optErr error
+	_ = raw.Control(func(fd uintptr) {
+		for _, opt := range [][2]int{
+			{syscall.SOL_SOCKET, syscall.SO_TIMESTAMPNS},
+			{syscall.SOL_IP, syscall.IP_PKTINFO},
+			{syscall.SOL_IP, syscall.IP_RECVTTL},
+			{syscall.SOL_IP, syscall.IP_RECVTOS},
+		} {
+			if err := syscall.SetsockoptInt(int(fd), opt[0], opt[1], 1); err != nil && optErr == nil {
+				optErr = err
+			}
+		}
+	})
+	if optErr != nil {
+		t.Skipf("setsockopt: %v", optErr)
+	}
+	port := uint16(ln.LocalAddr().(*net.UDPAddr).Port)
+	client, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, dst, err := ReadFromUDP(ln, make([]byte, 16))
+	if want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port); err != nil || dst != want {
+		t.Fatalf("ReadFromUDP() dst = %v, %v, want %v", dst, err, want)
+	}
+}

@@ -7,14 +7,27 @@ import (
 	"sync"
 )
 
-const relayBufSize = 32 << 10
+const (
+	relayBufSize = 32 << 10
+	// relayDatagramBufSize holds the largest UDP datagram, so that a source
+	// returning one datagram per Read is not truncated.
+	relayDatagramBufSize = 64 << 10
+)
 
-var relayBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]byte, relayBufSize)
-		return &buf
-	},
-}
+var (
+	relayBufPool = sync.Pool{
+		New: func() any {
+			buf := make([]byte, relayBufSize)
+			return &buf
+		},
+	}
+	relayDatagramBufPool = sync.Pool{
+		New: func() any {
+			buf := make([]byte, relayDatagramBufSize)
+			return &buf
+		},
+	}
+)
 
 type relayOptions struct {
 	halfClose bool
@@ -50,6 +63,9 @@ func WithHalfClose() RelayOption {
 // connection can keep each datagram whole; the WriteTo and ReadFrom of
 // *net.TCPConn and *net.UnixConn are skipped, also beneath a PrefixConn, and
 // the data goes through a pooled 32 KiB buffer instead of one they allocate.
+// A source that returns one datagram per Read, such as a *net.UDPConn, a
+// PacketListener connection or a FramedConn with WithDatagramReads, gets a
+// 64 KiB buffer instead, so that no datagram is cut short.
 func Relay(a, b io.ReadWriteCloser, opts ...RelayOption) (aToB, bToA int64, err error) {
 	var cfg relayOptions
 	for _, opt := range opts {
@@ -115,8 +131,12 @@ func relayCopy(dst io.Writer, src io.Reader) (int64, error) {
 	if rf, ok := dst.(io.ReaderFrom); ok && !isStdConn(dst) {
 		return rf.ReadFrom(src)
 	}
-	buf := relayBufPool.Get().(*[]byte)
-	defer relayBufPool.Put(buf)
+	pool := &relayBufPool
+	if datagramReader(src) {
+		pool = &relayDatagramBufPool
+	}
+	buf := pool.Get().(*[]byte)
+	defer pool.Put(buf)
 	// Hide ReadFrom and WriteTo, or a *net.TCPConn that cannot splice copies
 	// through a buffer of its own instead of the pooled one.
 	return io.CopyBuffer(writerOnly{dst}, readerOnly{src}, *buf)
@@ -135,6 +155,23 @@ func ownWriterTo(src io.Reader) (io.WriterTo, bool) {
 		return nil, false
 	}
 	return wt, !isStdConn(inner)
+}
+
+// datagramReader reports whether each Read of r returns one datagram, which a
+// buffer shorter than the datagram would truncate: a FramedConn with
+// WithDatagramReads, or a connection over a PacketListener peer or a UDP, IP
+// or Unix datagram socket.
+func datagramReader(r io.Reader) bool {
+	if fc, ok := r.(*FramedConn); ok && fc != nil && fc.datagram {
+		return true
+	}
+	switch c := rawConnOf(r).(type) {
+	case *packetConn, *net.UDPConn, *net.IPConn:
+		return true
+	case *net.UnixConn:
+		return !isStreamUnix(c)
+	}
+	return false
 }
 
 // isStdConn reports whether c is a *net.TCPConn or a *net.UnixConn.

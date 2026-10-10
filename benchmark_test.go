@@ -3,8 +3,10 @@ package netx
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -100,3 +102,24 @@ func (c *loopReadConn) RemoteAddr() net.Addr { return dummyAddr("remote") }
 func (c *loopReadConn) SetDeadline(time.Time) error      { return nil }
 func (c *loopReadConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *loopReadConn) SetWriteDeadline(time.Time) error { return nil }
+
+var netErrorKindSink string
+
+func BenchmarkNetErrorKind(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"closed", &net.OpError{Op: "read", Net: "tcp", Err: net.ErrClosed}},
+		{"closed_text", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("use of closed network connection")}},
+		{"reset_text", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errors.New("connection reset by peer"))}},
+		{"eof", io.EOF},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				netErrorKindSink = NetErrorKind(tc.err)
+			}
+		})
+	}
+}

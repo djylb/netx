@@ -105,7 +105,9 @@ type Server struct {
 	// clients are told to send to. Datagrams are routed to an association by
 	// their source, which must have the IP address of its control
 	// connection: the exact address the client announced in its request, or
-	// else the only pending association of that IP address. While several
+	// else the only pending association of that IP address. A client that
+	// announces a port with an unspecified address or a name, not knowing
+	// its address, announces that port at the control connection's IP. While several
 	// associations of one IP address wait for their first datagram, an
 	// unannounced source is ambiguous and its datagrams are dropped. An
 	// announced address with another IP is ignored, unless the control
@@ -159,9 +161,11 @@ type Server struct {
 	// with the association's control connection. It is called from serving
 	// goroutines and must be safe for concurrent use. The package does not
 	// log; route errors to a logger such as log/slog here.
-	OnError   func(c net.Conn, err error)
-	listeners map[net.Listener]struct{}
-	conns     map[net.Conn]struct{}
+	OnError func(c net.Conn, err error)
+	// Tracked by pointer, as in net/http, since the dynamic types of a
+	// net.Listener or a net.Conn need not be comparable.
+	listeners map[*net.Listener]struct{}
+	conns     map[*net.Conn]struct{}
 	shared    *udpRelay
 	cancel    context.CancelFunc
 	// Auth lists the accepted authentication methods in order of
@@ -200,10 +204,10 @@ type Server struct {
 // Temporary Accept errors, such as timeouts and running out of file
 // descriptors (EMFILE, ENFILE), are retried with a growing delay.
 func (s *Server) Serve(l net.Listener) error {
-	if !s.track(l, true) {
+	if !s.track(&l, true) {
 		return ErrServerClosed
 	}
-	defer s.track(l, false)
+	defer s.track(&l, false)
 	var delay time.Duration
 	for {
 		c, err := l.Accept()
@@ -241,11 +245,11 @@ func temporary(err error) bool {
 // ServeConn serves one client connection and closes it. It returns the error
 // that ended the exchange, if any.
 func (s *Server) ServeConn(c net.Conn) error {
-	if !s.trackConn(c, true) {
+	if !s.trackConn(&c, true) {
 		_ = c.Close()
 		return ErrServerClosed
 	}
-	defer s.trackConn(c, false)
+	defer s.trackConn(&c, false)
 	defer func() { _ = c.Close() }()
 	ctx, cancel := context.WithCancel(s.baseContext())
 	defer cancel()
@@ -450,15 +454,19 @@ func (s *Server) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	var errs []error
-	for l := range s.listeners {
-		errs = append(errs, l.Close())
-	}
-	for c := range s.conns {
-		_ = c.Close()
-	}
+	// Close outside the lock: closing a *tls.Conn can block for seconds while
+	// it sends close_notify, and serving goroutines need the lock to finish.
+	listeners := slices.Collect(maps.Keys(s.listeners))
+	conns := slices.Collect(maps.Keys(s.conns))
 	shared := s.shared
 	s.mu.Unlock()
+	var errs []error
+	for _, l := range listeners {
+		errs = append(errs, (*l).Close())
+	}
+	for _, c := range conns {
+		_ = (*c).Close()
+	}
 	if shared != nil {
 		errs = append(errs, shared.close())
 	} else if s.PacketConn != nil {
@@ -473,7 +481,7 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
-func (s *Server) track(l net.Listener, add bool) bool {
+func (s *Server) track(l *net.Listener, add bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if add {
@@ -481,7 +489,7 @@ func (s *Server) track(l net.Listener, add bool) bool {
 			return false
 		}
 		if s.listeners == nil {
-			s.listeners = make(map[net.Listener]struct{})
+			s.listeners = make(map[*net.Listener]struct{})
 		}
 		s.listeners[l] = struct{}{}
 		return true
@@ -490,7 +498,7 @@ func (s *Server) track(l net.Listener, add bool) bool {
 	return true
 }
 
-func (s *Server) trackConn(c net.Conn, add bool) bool {
+func (s *Server) trackConn(c *net.Conn, add bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if add {
@@ -498,7 +506,7 @@ func (s *Server) trackConn(c net.Conn, add bool) bool {
 			return false
 		}
 		if s.conns == nil {
-			s.conns = make(map[net.Conn]struct{})
+			s.conns = make(map[*net.Conn]struct{})
 		}
 		s.conns[c] = struct{}{}
 		return true

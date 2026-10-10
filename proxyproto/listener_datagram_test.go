@@ -143,6 +143,34 @@ func TestListenerDatagramErrors(t *testing.T) {
 	}
 }
 
+// An Optional connection passes an empty first datagram on like any other.
+func TestListenerDatagramOptionalEmptyFirstDatagram(t *testing.T) {
+	l := newDatagramListener(t, Optional)
+	server, _ := sendDatagrams(t, l, []byte{}, []byte("next"))
+	buf := make([]byte, 64)
+	if n, err := server.Read(buf); n != 0 || err != nil {
+		t.Fatalf("first Read() = %q, %v; want the empty datagram", buf[:n], err)
+	}
+	if got := readDatagram(t, server, 64); got != "next" {
+		t.Fatalf("second Read() = %q, want %q", got, "next")
+	}
+}
+
+// A datagram with a whole signature but too short for its header is a
+// malformed header under any policy, as a stream that ends inside one fails.
+func TestListenerDatagramTruncatedHeader(t *testing.T) {
+	v2 := V2Header(udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
+	for _, policy := range []Policy{Required, Optional} {
+		for _, d := range [][]byte{[]byte("PROXY TCP4 203.0.113.7"), v2[:20]} {
+			l := newDatagramListener(t, policy)
+			server, _ := sendDatagrams(t, l, d)
+			if _, err := server.Read(make([]byte, 64)); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("policy %d, datagram %q: Read() error = %v, want %v", policy, d, err, ErrMalformed)
+			}
+		}
+	}
+}
+
 // datagramRecorder records each Write as one datagram.
 type datagramRecorder struct{ writes []string }
 
