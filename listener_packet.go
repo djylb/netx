@@ -149,17 +149,16 @@ func (l *PacketListener) Accept() (net.Conn, error) {
 	}
 }
 
-// Close closes the packet connection and every connection of the listener.
+// Close closes the packet connection and every connection of the listener,
+// and waits for the listener's goroutines to stop unless the accept filter
+// called it.
 func (l *PacketListener) Close() error {
 	l.closeOnce.Do(func() {
+		// Nothing here waits for the read loop, which may itself be calling
+		// Close from the accept filter. newConn refuses peers once done is
+		// closed, so the connections collected below are all there will be.
 		close(l.done)
 		l.closeErr = l.pc.Close()
-		// Close called by the accept filter runs on the read loop, which it
-		// cannot wait for; newConn refuses peers once done is closed, so the
-		// connections collected below are all there will be.
-		if !l.filtering.Load() {
-			l.wg.Wait()
-		}
 		l.mu.Lock()
 		conns := make([]*packetConn, 0, len(l.conns)+len(l.other))
 		for _, c := range l.conns {
@@ -181,6 +180,11 @@ func (l *PacketListener) Close() error {
 			}
 		}
 	})
+	// Wait for the read loop to stop, unless the accept filter called Close
+	// on it: it cannot wait for itself.
+	if !l.filtering.Load() {
+		l.wg.Wait()
+	}
 	return l.closeErr
 }
 
@@ -477,6 +481,11 @@ func (c *packetConn) Read(b []byte) (int, error) {
 	}
 	select {
 	case p := <-c.queue:
+		if isClosedChan(c.closed) {
+			// Close came first while select chose between them.
+			putPacketBuf(p)
+			return 0, c.err
+		}
 		return c.take(b, p), nil
 	case <-c.closed:
 		return 0, c.err

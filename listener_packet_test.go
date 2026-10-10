@@ -409,6 +409,52 @@ func TestPacketListenerFilterMayUseListener(t *testing.T) {
 	})
 }
 
+// Close from the accept filter and Close from another goroutine may run at
+// the same time without either waiting for the other forever.
+func TestPacketListenerConcurrentCloseFromFilter(t *testing.T) {
+	for range 100 {
+		var self atomic.Pointer[PacketListener]
+		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+			_ = self.Load().Close()
+			return true
+		}))
+		self.Store(l)
+		a := dialUDP(t, l)
+		closed := make(chan struct{})
+		go func() {
+			_ = l.Close()
+			close(closed)
+		}()
+		_, _ = a.Write([]byte("x"))
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close deadlocked with a Close from the accept filter")
+		}
+	}
+}
+
+// A Read racing with Close returns the close error rather than data.
+func TestPacketConnReadAfterCloseReturnsNoData(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c := acceptWithin(t, l).(*packetConn)
+	_, _ = c.Read(make([]byte, 1))
+	for range 200 {
+		c.enqueue([]byte("y"))
+		go func() { _ = c.Close() }()
+		if _, err := c.Read(make([]byte, 1)); err == nil {
+			// The Read won the race: it began before Close.
+			continue
+		}
+		break
+	}
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read() after Close = %v, want net.ErrClosed", err)
+	}
+}
+
 // The listener also works on a PacketConn that is not a *net.UDPConn.
 func TestPacketListenerGenericPacketConn(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
