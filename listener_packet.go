@@ -31,10 +31,11 @@ type PacketListener struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	mu    sync.Mutex
-	conns map[netip.AddrPort]*packetConn
-	other map[string]*packetConn // peers that are not *net.UDPAddr
-	wg    sync.WaitGroup
+	mu        sync.Mutex
+	conns     map[netip.AddrPort]*packetConn
+	other     map[string]*packetConn // peers that are not *net.UDPAddr
+	wg        sync.WaitGroup
+	filtering atomic.Bool // the read loop is in the accept filter
 }
 
 type packetListenerOptions struct {
@@ -49,9 +50,8 @@ type packetListenerOptions struct {
 type PacketListenerOption func(*packetListenerOptions)
 
 // WithAcceptFilter drops the datagrams of a new peer for which filter returns
-// false instead of starting a connection for it. filter runs on the read loop
-// while the listener is locked, so it must be fast and must not call the
-// listener's methods or close its connections.
+// false instead of starting a connection for it. filter runs on the read loop,
+// so it must be fast. It may close the listener or its connections.
 func WithAcceptFilter(filter func(peer net.Addr) bool) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.filter = filter
@@ -154,7 +154,12 @@ func (l *PacketListener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.done)
 		l.closeErr = l.pc.Close()
-		l.wg.Wait()
+		// Close called by the accept filter runs on the read loop, which it
+		// cannot wait for; newConn refuses peers once done is closed, so the
+		// connections collected below are all there will be.
+		if !l.filtering.Load() {
+			l.wg.Wait()
+		}
 		l.mu.Lock()
 		conns := make([]*packetConn, 0, len(l.conns)+len(l.other))
 		for _, c := range l.conns {
@@ -247,33 +252,42 @@ func (l *PacketListener) sleep(d time.Duration) bool {
 
 // deliver queues one datagram for its peer's connection.
 func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
-	l.mu.Lock()
+	var key string
 	var c *packetConn
+	l.mu.Lock()
 	if ap.IsValid() {
 		c = l.conns[ap]
 	} else if addr != nil {
-		c = l.other[addr.String()]
+		key = addr.String()
+		c = l.other[key]
 	}
+	l.mu.Unlock()
 	if c == nil {
-		c = l.newConnLocked(ap, addr)
-		if c == nil {
-			l.mu.Unlock()
+		if c = l.newConn(ap, addr, key); c == nil {
 			return
 		}
 	}
-	l.mu.Unlock()
 	c.enqueue(p)
 }
 
-func (l *PacketListener) newConnLocked(ap netip.AddrPort, addr net.Addr) *packetConn {
+// newConn starts a connection for a new peer, keyed by ap or else by key,
+// unless the accept filter rejects it, the backlog is full or the listener
+// is closed. Only the read loop starts connections.
+func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *packetConn {
 	if addr == nil {
 		if !ap.IsValid() {
 			return nil
 		}
 		addr = net.UDPAddrFromAddrPort(ap)
 	}
-	if l.opts.filter != nil && !l.opts.filter(addr) {
-		return nil
+	// The filter runs without the lock, so it may use the listener.
+	if l.opts.filter != nil {
+		l.filtering.Store(true)
+		ok := l.opts.filter(addr)
+		l.filtering.Store(false)
+		if !ok {
+			return nil
+		}
 	}
 	c := &packetConn{
 		l:             l,
@@ -284,6 +298,11 @@ func (l *PacketListener) newConnLocked(ap netip.AddrPort, addr net.Addr) *packet
 		readDeadline:  makeDeadline(),
 		writeDeadline: makeDeadline(),
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if isClosedChan(l.done) {
+		return nil
+	}
 	select {
 	case l.accept <- c:
 	default:
@@ -292,7 +311,7 @@ func (l *PacketListener) newConnLocked(ap netip.AddrPort, addr net.Addr) *packet
 	if ap.IsValid() {
 		l.conns[ap] = c
 	} else {
-		l.other[addr.String()] = c
+		l.other[key] = c
 	}
 	return c
 }

@@ -163,9 +163,11 @@ func relayDatagrams(tunnel net.Conn, udp *net.UDPConn, peer *net.UDPAddr) error 
 }
 ```
 
-- By default `Read` has stream semantics: when a frame is larger than the
-  buffer, the rest of it is returned by the following reads, without buffering
-  or allocating. Empty frames carry no stream bytes and are skipped.
+- By default `Read` has stream semantics: it returns what one read of the
+  connection delivers of the current frame, and when a frame is larger than
+  the buffer or still arriving, the rest of it is returned by the following
+  reads, without buffering or allocating. Empty frames carry no stream bytes
+  and are skipped.
 - `WithReadBuffer(size)` reads the stream through a buffer, so a burst of small
   frames costs one read of the connection (about 30x faster for 64-byte frames
   over loopback TCP).
@@ -174,13 +176,17 @@ func relayDatagrams(tunnel net.Conn, udp *net.UDPConn, peer *net.UDPAddr) error 
   returned as a 0-byte read.
 - `ReadFrame` returns one whole frame, or the rest of a frame that a stream
   `Read` has already started.
-- If a read or write fails partway through a frame, the frame boundaries are
-  lost: that call and every later call in the same direction return an error
-  matching `errors.Is(err, netx.ErrFrameDesync)`, which is never a timeout.
-  The error still matches its cause with `errors.Is` (an EOF inside a frame
-  becomes `io.ErrUnexpectedEOF`), except a timeout cause, which is hidden.
-  Close the connection. An error between frames, such as an expired read
-  deadline, is returned unchanged and may be retried.
+- An error that loses no frame bytes is returned unchanged and may be
+  retried: an expired read deadline between frames or inside a frame header,
+  and anywhere in a frame for stream `Read`s, which keep their place. When
+  frame bytes are lost, by a `ReadFrame` or datagram `Read` that fails after
+  part of the payload, the end of the stream inside a frame, or a write that
+  fails partway through a frame, the frame boundaries are lost: that call and
+  every later call in the same direction return an error matching
+  `errors.Is(err, netx.ErrFrameDesync)`, which is never a timeout. The error
+  still matches its cause with `errors.Is` (an EOF inside a frame becomes
+  `io.ErrUnexpectedEOF`), except a timeout cause, which is hidden. Close the
+  connection.
 
 ### Wrapping and unwrapping
 

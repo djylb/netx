@@ -48,8 +48,9 @@ type Listener struct {
 	// Datagram is for listeners whose connections return one datagram per
 	// Read, such as netx.PacketListener over a UDP socket. The header is then
 	// read from the first datagram of each connection, where it may be
-	// followed by the first payload or stand alone; later datagrams are
-	// passed through unchanged. Header addresses are reported as
+	// followed by the first payload or stand alone, and must be whole once
+	// the datagram holds the whole signature; later datagrams are passed
+	// through unchanged. Header addresses are reported as
 	// *net.UDPAddr, since version 1 has no UDP token and UDP senders use TCP4
 	// and TCP6.
 	Datagram bool
@@ -97,12 +98,13 @@ var datagramPool = sync.Pool{New: func() any {
 // The header must arrive within the Listener's HeaderTimeout. The read that
 // reaches it returns the timeout, and later ones an error matching
 // ErrNoHeader that is not a timeout, so that loops retrying timeouts do not
-// spin. A read deadline set by the caller that expires sooner also ends a
-// header read started by Read or WriteTo, or their wait for one started by
-// another call, which then returns the timeout; the next call resumes the
-// header. An Optional connection that stops, by the header timeout or the end
-// of the stream, while the bytes received are only the start of a signature
-// has no header, and those bytes are passed through.
+// spin. A connection that cannot set deadlines is closed when the header
+// timeout expires. A read deadline set by the caller that expires sooner also
+// ends a header read started by Read or WriteTo, or their wait for one
+// started by another call, which then returns the timeout; the next call
+// resumes the header. An Optional connection that stops, by the header
+// timeout or the end of the stream, while the bytes received are only the
+// start of a signature has no header, and those bytes are passed through.
 type Conn struct {
 	net.Conn
 	policy   Policy
@@ -160,7 +162,10 @@ func (c *Conn) init(callerBound bool) error {
 		return err
 	}
 	c.hbuf = nil
-	c.drained.Store(len(c.pending) == 0)
+	if !c.datagram && len(c.pending) == 0 {
+		c.pending = nil // a stream has no empty pending reads
+	}
+	c.drained.Store(c.pending == nil)
 	c.done.Store(true)
 	if err := c.timeoutAt; err != nil {
 		c.timeoutAt = nil
@@ -265,7 +270,12 @@ func (c *Conn) readHeader(callerBound bool) error {
 		c.expires = time.Now().Add(c.timeout)
 	}
 	c.reading, c.callerBound = true, callerBound
-	_ = c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline))
+	var guard *time.Timer
+	if c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline)) != nil {
+		// Without deadline support, closing the connection is the only way
+		// to end a header read that outlasts the header timeout.
+		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.Conn.Close() })
+	}
 	c.mu.Unlock()
 
 	var err error
@@ -273,6 +283,12 @@ func (c *Conn) readHeader(callerBound bool) error {
 		err = c.readDatagramHeader()
 	} else {
 		err = c.readStreamHeader()
+	}
+	if guard != nil && !guard.Stop() && c.err != nil {
+		// The guard closed the connection: report the header timeout
+		// rather than the use of a closed connection.
+		c.err = nil
+		c.fail(os.ErrDeadlineExceeded)
 	}
 
 	c.mu.Lock()
@@ -380,9 +396,13 @@ func (c *Conn) readDatagramHeader() error {
 		}
 	case errors.Is(err, ErrMalformed):
 		c.err = err
+	case errors.Is(err, io.ErrUnexpectedEOF) && !signaturePrefix(buf[:n]):
+		// A whole signature, in a datagram too short for its header.
+		c.err = malformed("header cut short by the end of a %d-byte datagram", n)
 	case c.policy == Optional:
-		// No header, or a datagram as short as the start of a signature.
-		c.pending = bytes.Clone(buf[:n])
+		// No header, or a datagram as short as the start of a signature. It
+		// is passed on even when empty: a datagram is a message.
+		c.pending = append(make([]byte, 0, n), buf[:n]...)
 	default:
 		c.err = ErrNoHeader
 	}
@@ -413,13 +433,14 @@ func (c *Conn) Read(b []byte) (int, error) {
 	}
 	if !c.drained.Load() {
 		c.pendingMu.Lock()
-		if len(c.pending) > 0 {
-			n := copy(b, c.pending)
-			if c.datagram || n == len(c.pending) {
+		// A datagram is pending even when it is empty.
+		if p := c.pending; p != nil {
+			n := copy(b, p)
+			if c.datagram || n == len(p) {
 				c.pending = nil
 				c.drained.Store(true)
 			} else {
-				c.pending = c.pending[n:]
+				c.pending = p[n:]
 			}
 			c.pendingMu.Unlock()
 			return n, nil

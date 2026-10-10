@@ -280,6 +280,50 @@ func TestListenerGrowsHeaderBufferWithData(t *testing.T) {
 	}
 }
 
+// noDeadlineConn cannot set deadlines, as some tunneled streams cannot.
+type noDeadlineConn struct{ net.Conn }
+
+func (noDeadlineConn) SetDeadline(time.Time) error      { return errors.ErrUnsupported }
+func (noDeadlineConn) SetReadDeadline(time.Time) error  { return errors.ErrUnsupported }
+func (noDeadlineConn) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
+
+type noDeadlineListener struct{ net.Listener }
+
+func (l noDeadlineListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return noDeadlineConn{c}, nil
+}
+
+// The header timeout also ends the wait of a connection without deadlines.
+func TestListenerHeaderTimeoutWithoutDeadlines(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{Listener: noDeadlineListener{ln}, HeaderTimeout: 100 * time.Millisecond}
+	t.Cleanup(func() { _ = l.Close() })
+	server, _ := acceptOne(t, l, []byte("PROXY "))
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.Read(make([]byte, 1))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !isTimeout(err) {
+			t.Fatalf("Read() error = %v, want the header timeout", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read() outlived the header timeout")
+	}
+	if _, err := server.Read(make([]byte, 1)); isTimeout(err) || !errors.Is(err, ErrNoHeader) {
+		t.Fatalf("Read() after the header timeout = %v, want ErrNoHeader and no timeout", err)
+	}
+}
+
 func TestListenerOptionalSignaturePrefix(t *testing.T) {
 	l := newTestListener(t)
 	l.HeaderTimeout = 100 * time.Millisecond

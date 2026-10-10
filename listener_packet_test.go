@@ -323,6 +323,59 @@ func TestPacketConnQueueBoundsBytes(t *testing.T) {
 	}
 }
 
+// The accept filter may use the listener: close it, or close one of its
+// connections.
+func TestPacketListenerFilterMayUseListener(t *testing.T) {
+	t.Run("close listener", func(t *testing.T) {
+		var self atomic.Pointer[PacketListener]
+		closed := make(chan error, 1)
+		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+			closed <- self.Load().Close()
+			return true
+		}))
+		self.Store(l)
+		a := dialUDP(t, l)
+		_, _ = a.Write([]byte("x"))
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close called by the accept filter did not return")
+		}
+		if _, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept() after Close = %v, want net.ErrClosed", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			_ = l.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("a second Close blocked")
+		}
+	})
+	t.Run("close connection", func(t *testing.T) {
+		var first atomic.Pointer[net.Conn]
+		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+			if c := first.Load(); c != nil {
+				_ = (*c).Close()
+			}
+			return true
+		}))
+		a := dialUDP(t, l)
+		_, _ = a.Write([]byte("a"))
+		c := acceptWithin(t, l)
+		first.Store(&c)
+		b := dialUDP(t, l)
+		_, _ = b.Write([]byte("b"))
+		acceptWithin(t, l)
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Read() of the connection the filter closed = %v, want net.ErrClosed", err)
+		}
+	})
+}
+
 // The listener also works on a PacketConn that is not a *net.UDPConn.
 func TestPacketListenerGenericPacketConn(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")

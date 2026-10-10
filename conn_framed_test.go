@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -337,125 +338,6 @@ func TestFramedConnStreamReadsKeepFrameTailAcrossFrames(t *testing.T) {
 	}
 }
 
-func TestFramedConnMidFrameReadErrorIsStickyDesync(t *testing.T) {
-	tests := []struct {
-		name     string
-		datagram bool
-		bufLen   int
-		steps    []framedReadStep
-		wantEOF  bool
-		// firstRead is the length a stream Read returns before the failure,
-		// which then surfaces on the next Read.
-		firstRead int
-	}{
-		{
-			name:  "timeout inside header",
-			steps: []framedReadStep{{data: []byte{0}}, {err: framedTimeoutError()}},
-		},
-		{
-			name:  "timeout after header",
-			steps: []framedReadStep{{data: []byte{0, 10}}, {err: framedTimeoutError()}},
-		},
-		{
-			name:  "timeout inside payload",
-			steps: []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
-		},
-		{
-			name:      "timeout inside stream tail",
-			bufLen:    2,
-			steps:     []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
-			firstRead: 2,
-		},
-		{
-			name:     "timeout inside datagram tail",
-			datagram: true,
-			bufLen:   2,
-			steps:    []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}, {err: framedTimeoutError()}},
-		},
-		{
-			name:    "eof inside header",
-			steps:   []framedReadStep{{data: []byte{0}}},
-			wantEOF: true,
-		},
-		{
-			name:    "eof after header",
-			steps:   []framedReadStep{{data: []byte{0, 10}}},
-			wantEOF: true,
-		},
-		{
-			name:    "eof inside payload",
-			steps:   []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}},
-			wantEOF: true,
-		},
-		{
-			name:     "eof inside datagram tail",
-			datagram: true,
-			bufLen:   2,
-			steps:    []framedReadStep{{data: []byte{0, 10, 'x', 'y', 'z'}}},
-			wantEOF:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		for _, useReadFrame := range []bool{false, true} {
-			name := tt.name + "/Read"
-			if useReadFrame {
-				name = tt.name + "/ReadFrame"
-			}
-			t.Run(name, func(t *testing.T) {
-				steps := append([]framedReadStep(nil), tt.steps...)
-				if tt.wantEOF {
-					steps = append(steps, framedReadStep{err: io.EOF})
-				}
-				// A complete frame after the failure must not be decoded from the desynced stream.
-				steps = append(steps, framedReadStep{data: frameBytes("abc")})
-				var opts []FramedOption
-				if tt.datagram {
-					opts = append(opts, WithDatagramReads())
-				}
-				fc := NewFramedConn(&framedScriptConn{steps: steps}, opts...)
-				bufLen := tt.bufLen
-				if bufLen == 0 {
-					bufLen = 64
-				}
-
-				read := func() error {
-					if useReadFrame {
-						_, err := fc.ReadFrame()
-						return err
-					}
-					n, err := fc.Read(make([]byte, bufLen))
-					if n != 0 {
-						t.Fatalf("Read() n = %d, want 0 on a partial frame", n)
-					}
-					return err
-				}
-				if tt.firstRead > 0 && !useReadFrame {
-					// Read returns the start of the frame without waiting for the rest.
-					if n, err := fc.Read(make([]byte, bufLen)); n != tt.firstRead || err != nil {
-						t.Fatalf("first Read() = %d, %v; want %d, nil", n, err, tt.firstRead)
-					}
-				}
-
-				err := read()
-				assertFrameDesync(t, err)
-				if tt.wantEOF {
-					if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-						t.Fatalf("error = %v, want io.ErrUnexpectedEOF and not io.EOF", err)
-					}
-				} else if !strings.Contains(err.Error(), "timeout") {
-					t.Fatalf("error = %q, want the timeout cause in the message", err)
-				}
-				// Sticky failures must return the same error object, not just a matching cause.
-				//noinspection GoDirectComparisonOfErrors
-				if err2 := read(); err2 != err {
-					t.Fatalf("second read error = %v, want sticky %v", err2, err)
-				}
-			})
-		}
-	}
-}
-
 // IsTimeout matches the ETIMEDOUT errno table before net.Error.Timeout, so a
 // desync caused by a kernel-reported timeout must hide that errno as well.
 func TestFramedConnMidFrameErrnoTimeoutIsNotTimeout(t *testing.T) {
@@ -562,42 +444,6 @@ func TestFramedConnBoundaryReadErrorsStayRetryable(t *testing.T) {
 		if _, err := fc.Read(buf); err != io.EOF {
 			t.Fatalf("datagram=%t Read() at end error = %v, want clean %v", datagram, err, io.EOF)
 		}
-	}
-}
-
-func TestFramedConnPipeDeadlineMidFrameDesyncs(t *testing.T) {
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
-	fc := NewFramedConn(client)
-
-	// A deadline between frames leaves the stream usable.
-	if err := fc.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
-	}
-	if _, err := fc.ReadFrame(); !IsTimeout(err) {
-		t.Fatalf("ReadFrame() error = %v, want timeout", err)
-	}
-	if err := fc.SetReadDeadline(time.Time{}); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
-	}
-	go func() { _, _ = server.Write(frameBytes("ok")) }()
-	if frame, err := fc.ReadFrame(); err != nil || string(frame) != "ok" {
-		t.Fatalf("ReadFrame() = %q, %v, want %q", frame, err, "ok")
-	}
-
-	// A deadline inside a frame desyncs it for good.
-	go func() { _, _ = server.Write([]byte{0, 10, 'x', 'y', 'z'}) }()
-	if err := fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
-	}
-	_, err := fc.Read(make([]byte, 64))
-	assertFrameDesync(t, err)
-	if err := fc.SetReadDeadline(time.Time{}); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
-	}
-	if _, err := fc.ReadFrame(); !errors.Is(err, ErrFrameDesync) {
-		t.Fatalf("ReadFrame() after desync error = %v, want %v", err, ErrFrameDesync)
 	}
 }
 
@@ -872,5 +718,201 @@ func TestFramedConnStreamReadSkipsEmptyFrames(t *testing.T) {
 		if err != nil || line != "hello\n" {
 			t.Fatalf("readBuffer=%d bufio ReadString() = %q, %v, want %q", readBuffer, line, err, "hello\n")
 		}
+	}
+}
+
+// framedReadMode selects how a test reads a FramedConn.
+type framedReadMode int
+
+const (
+	streamReads framedReadMode = iota
+	frameReads
+	datagramReads
+)
+
+func (m framedReadMode) String() string {
+	return [...]string{"Read", "ReadFrame", "datagram Read"}[m]
+}
+
+func (m framedReadMode) conn(raw net.Conn) *FramedConn {
+	if m == datagramReads {
+		return NewFramedConn(raw, WithDatagramReads())
+	}
+	return NewFramedConn(raw)
+}
+
+// read reads one frame, or one Read's worth of a stream, with a buffer of
+// bufLen bytes.
+func (m framedReadMode) read(fc *FramedConn, bufLen int) ([]byte, error) {
+	if m == frameReads {
+		return fc.ReadFrame()
+	}
+	buf := make([]byte, bufLen)
+	n, err := fc.Read(buf)
+	return buf[:n], err
+}
+
+// Errors that lose no frame bytes are returned unchanged, and the rest of the
+// frame and the frames after it are read afterwards.
+func TestFramedConnReadErrorsKeepFramePosition(t *testing.T) {
+	frame := frameBytes("hello")
+	for _, tt := range []struct {
+		name   string
+		split  int // the timeout comes after this many bytes of the frame
+		modes  []framedReadMode
+		bufLen int
+	}{
+		{"inside header", 1, []framedReadMode{streamReads, frameReads, datagramReads}, 64},
+		{"after header", 2, []framedReadMode{streamReads, frameReads, datagramReads}, 64},
+		{"inside payload", 4, []framedReadMode{streamReads}, 64},
+		{"inside payload, small buffer", 4, []framedReadMode{streamReads}, 2},
+	} {
+		for _, mode := range tt.modes {
+			t.Run(tt.name+"/"+mode.String(), func(t *testing.T) {
+				fc := mode.conn(&framedScriptConn{steps: []framedReadStep{
+					{data: frame[:tt.split]},
+					{err: framedTimeoutError()},
+					{data: frame[tt.split:]},
+					{data: frameBytes("abc")},
+				}})
+				var got []string
+				var timeouts int
+				for {
+					b, err := mode.read(fc, tt.bufLen)
+					if errors.Is(err, io.EOF) {
+						break
+					}
+					if err != nil {
+						if !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
+							t.Fatalf("%v error = %v, want the plain timeout", mode, err)
+						}
+						timeouts++
+						continue
+					}
+					got = append(got, string(b))
+				}
+				want := []string{"hello", "abc"}
+				if mode == streamReads {
+					got, want = []string{strings.Join(got, "")}, []string{"helloabc"}
+				}
+				if timeouts != 1 || !slices.Equal(got, want) {
+					t.Fatalf("read %q with %d timeouts, want %q with 1", got, timeouts, want)
+				}
+			})
+		}
+	}
+}
+
+// Errors that lose frame bytes end the frame boundaries for good.
+func TestFramedConnLostFrameBytesDesync(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mode    framedReadMode
+		bufLen  int
+		steps   []framedReadStep
+		first   string // what a stream Read returns before the failure
+		wantEOF bool
+	}{
+		{name: "timeout inside payload", mode: frameReads,
+			steps: []framedReadStep{{data: []byte{0, 5, 'h', 'e'}}, {err: framedTimeoutError()}}},
+		{name: "timeout inside payload", mode: datagramReads, bufLen: 64,
+			steps: []framedReadStep{{data: []byte{0, 5, 'h', 'e'}}, {err: framedTimeoutError()}}},
+		{name: "timeout inside discarded tail", mode: datagramReads, bufLen: 2,
+			steps: []framedReadStep{{data: []byte{0, 5, 'h', 'e', 'l'}}, {err: framedTimeoutError()}}},
+		{name: "eof inside header", mode: streamReads, bufLen: 64,
+			steps: []framedReadStep{{data: []byte{0}}}, wantEOF: true},
+		{name: "eof after header", mode: streamReads, bufLen: 64,
+			steps: []framedReadStep{{data: []byte{0, 5}}}, wantEOF: true},
+		{name: "eof inside payload", mode: streamReads, bufLen: 64,
+			steps: []framedReadStep{{data: []byte{0, 5, 'h', 'e'}}}, first: "he", wantEOF: true},
+		{name: "eof inside header", mode: frameReads,
+			steps: []framedReadStep{{data: []byte{0}}}, wantEOF: true},
+		{name: "eof after header", mode: frameReads,
+			steps: []framedReadStep{{data: []byte{0, 5}}}, wantEOF: true},
+		{name: "eof inside payload", mode: datagramReads, bufLen: 64,
+			steps: []framedReadStep{{data: []byte{0, 5, 'h', 'e'}}}, wantEOF: true},
+	} {
+		t.Run(tt.name+"/"+tt.mode.String(), func(t *testing.T) {
+			// A complete frame after the failure must not be decoded from the
+			// desynced stream.
+			steps := append(tt.steps, framedReadStep{err: io.EOF}, framedReadStep{data: frameBytes("abc")})
+			fc := tt.mode.conn(&framedScriptConn{steps: steps})
+			if tt.first != "" {
+				if b, err := tt.mode.read(fc, tt.bufLen); err != nil || string(b) != tt.first {
+					t.Fatalf("first %v = %q, %v; want %q, nil", tt.mode, b, err, tt.first)
+				}
+			}
+			b, err := tt.mode.read(fc, tt.bufLen)
+			if len(b) != 0 {
+				t.Fatalf("%v returned %q with the failure", tt.mode, b)
+			}
+			assertFrameDesync(t, err)
+			if tt.wantEOF {
+				if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+					t.Fatalf("error = %v, want io.ErrUnexpectedEOF and not io.EOF", err)
+				}
+			} else if !strings.Contains(err.Error(), "timeout") {
+				t.Fatalf("error = %q, want the timeout cause in the message", err)
+			}
+			// Sticky failures must return the same error object, not just a matching cause.
+			//noinspection GoDirectComparisonOfErrors
+			if _, err2 := tt.mode.read(fc, tt.bufLen); err2 != err {
+				t.Fatalf("second %v error = %v, want sticky %v", tt.mode, err2, err)
+			}
+		})
+	}
+}
+
+// Over a real deadline: a stream Read interrupted inside a frame keeps its
+// place, while a ReadFrame interrupted inside a payload desyncs.
+func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	fc := NewFramedConn(client)
+
+	// A deadline between frames leaves the stream usable.
+	_ = fc.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if _, err := fc.ReadFrame(); !IsTimeout(err) {
+		t.Fatalf("ReadFrame() error = %v, want timeout", err)
+	}
+	_ = fc.SetReadDeadline(time.Time{})
+	go func() { _, _ = server.Write(frameBytes("ok")) }()
+	if frame, err := fc.ReadFrame(); err != nil || string(frame) != "ok" {
+		t.Fatalf("ReadFrame() = %q, %v, want %q", frame, err, "ok")
+	}
+
+	// A stream Read returns what has arrived and keeps its place in the frame.
+	go func() { _, _ = server.Write([]byte{0, 10, 'x', 'y', 'z'}) }()
+	buf := make([]byte, 64)
+	if n, err := fc.Read(buf); err != nil || string(buf[:n]) != "xyz" {
+		t.Fatalf("Read() = %q, %v, want %q", buf[:n], err, "xyz")
+	}
+	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := fc.Read(buf); !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
+		t.Fatalf("Read() error = %v, want the plain timeout", err)
+	}
+	_ = fc.SetReadDeadline(time.Time{})
+	go func() { _, _ = server.Write(append([]byte("1234567"), frameBytes("next")...)) }()
+	var got []byte
+	for len(got) < len("1234567next") {
+		n, err := fc.Read(buf)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		got = append(got, buf[:n]...)
+	}
+	if string(got) != "1234567next" {
+		t.Fatalf("stream = %q, want %q", got, "1234567next")
+	}
+
+	// A ReadFrame interrupted inside a payload loses the frame boundaries.
+	go func() { _, _ = server.Write([]byte{0, 5, 'a'}) }()
+	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	_, err := fc.ReadFrame()
+	assertFrameDesync(t, err)
+	_ = fc.SetReadDeadline(time.Time{})
+	if _, err := fc.Read(buf); !errors.Is(err, ErrFrameDesync) {
+		t.Fatalf("Read() after desync error = %v, want %v", err, ErrFrameDesync)
 	}
 }
