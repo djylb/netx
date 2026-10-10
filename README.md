@@ -2,7 +2,7 @@
 
 Reusable Go networking helpers with no third-party dependencies.
 
-Requires Go 1.25. Every package builds on all major Go ports, including
+Requires Go 1.26. Every package builds on all major Go ports, including
 Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
 return an error matching `errors.ErrUnsupported` where they are not available.
 

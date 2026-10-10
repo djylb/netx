@@ -27,8 +27,7 @@ func extractErrno(err error) (syscall.Errno, bool) {
 	if err == nil {
 		return 0, false
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		return errno, true
 	}
 	return 0, false

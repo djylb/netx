@@ -24,8 +24,7 @@ func IsTimeout(err error) bool {
 	if errorIsAny(err, timedOutErrnos) {
 		return true
 	}
-	var ne net.Error
-	if errors.As(err, &ne) {
+	if ne, ok := errors.AsType[net.Error](err); ok {
 		return ne.Timeout()
 	}
 	// Spaces are kept so that words such as "runtime output" do not match.
@@ -209,8 +208,7 @@ func DescribeNetError(err error, c net.Conn) string {
 
 	parts = append(parts, fmt.Sprintf("timeout=%t", IsTimeout(err)))
 
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
 		if opErr.Op != "" {
 			parts = append(parts, fmt.Sprintf("op=%s", opErr.Op))
 		}
@@ -225,8 +223,7 @@ func DescribeNetError(err error, c net.Conn) string {
 		}
 	}
 
-	var sysErr *os.SyscallError
-	if errors.As(err, &sysErr) {
+	if sysErr, ok := errors.AsType[*os.SyscallError](err); ok {
 		parts = append(parts, fmt.Sprintf("syscall=%s", sysErr.Syscall))
 	}
 

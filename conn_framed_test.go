@@ -472,8 +472,7 @@ func TestFramedConnMidFrameErrnoTimeoutIsNotTimeout(t *testing.T) {
 	if kind := NetErrorKind(err); kind == "timeout" {
 		t.Fatalf("NetErrorKind(%v) = %q, want a non-timeout kind", err, kind)
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		t.Fatalf("errors.As(%v, *net.OpError) = true, want the timeout cause hidden", err)
 	}
 }

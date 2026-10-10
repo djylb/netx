@@ -200,8 +200,7 @@ func TestHTTPSProxyUsesTLS(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 	_, err := mustDialer(t, "https://"+srv.Listener.Addr().String()).DialContext(context.Background(), "tcp", "example.com:443")
-	var certErr *tls.CertificateVerificationError
-	if !errors.As(err, &certErr) {
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 		t.Fatalf("DialContext() error = %v, want certificate verification error", err)
 	}
 }
@@ -576,8 +575,7 @@ func TestSOCKSOverTLS(t *testing.T) {
 	for _, scheme := range []string{"socks5+tls", "socks5h+tls", "socks4a+tls"} {
 		d := mustDialer(t, scheme+"://"+ln.Addr().String())
 		_, err := d.DialContext(context.Background(), "tcp", target)
-		var certErr *tls.CertificateVerificationError
-		if !errors.As(err, &certErr) {
+		if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 			t.Fatalf("%s with system roots error = %v, want a certificate error", scheme, err)
 		}
 
