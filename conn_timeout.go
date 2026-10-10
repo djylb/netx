@@ -26,12 +26,13 @@ func normalizeLinkTimeout(timeout time.Duration) time.Duration {
 // it lags behind by more than a small slack (idle/16, at most one second), so
 // a connection may time out up to that slack early.
 //
-// SetDeadline, SetReadDeadline and SetWriteDeadline are passed through and
-// remembered until they are changed again: reads and writes then move each
-// direction's deadline to the earlier of the remembered one and now plus the
+// SetDeadline, SetReadDeadline and SetWriteDeadline are remembered until they
+// are changed again. Setting them and every read and write keep each
+// direction's deadline at the earlier of the remembered one and now plus the
 // idle timeout, so a deadline set to interrupt a blocked Read or Write stays in
-// effect while the other direction is in use. A zero time leaves only the idle
-// timeout.
+// effect while the other direction is in use, and a later or zero one does not
+// lift the idle timeout of a Read or Write that is already blocked. A zero time
+// leaves only the idle timeout.
 type TimeoutConn struct {
 	net.Conn
 	idleTimeout time.Duration
@@ -152,7 +153,7 @@ func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	defer c.mu.Unlock()
 	c.userRead, c.userWrite = t, t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
-	return c.Conn.SetDeadline(t)
+	return c.Conn.SetDeadline(c.capDeadline(t))
 }
 
 func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
@@ -163,7 +164,7 @@ func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
 	defer c.mu.Unlock()
 	c.userRead = t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
-	return c.Conn.SetReadDeadline(t)
+	return c.Conn.SetReadDeadline(c.capDeadline(t))
 }
 
 func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
@@ -174,7 +175,19 @@ func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	defer c.mu.Unlock()
 	c.userWrite = t
 	c.deadline.Store(0) // the next read or write sets the idle deadline again
-	return c.Conn.SetWriteDeadline(t)
+	return c.Conn.SetWriteDeadline(c.capDeadline(t))
+}
+
+// capDeadline returns the deadline to set on the wrapped connection for a user
+// deadline t: t when it comes before the idle deadline of an operation
+// starting now, and that idle deadline otherwise, so that a Read or Write
+// already blocked keeps its idle timeout.
+func (c *TimeoutConn) capDeadline(t time.Time) time.Time {
+	idle := time.Now().Add(normalizeLinkTimeout(c.idleTimeout))
+	if t.IsZero() || t.After(idle) {
+		return idle
+	}
+	return t
 }
 
 // RawConn returns the innermost connection beneath c; see RawConnProvider.

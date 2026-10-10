@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/djylb/netx"
 )
 
 // soOriginalDst is SO_ORIGINAL_DST for SOL_IP and IP6T_SO_ORIGINAL_DST for SOL_IPV6.
@@ -23,11 +25,15 @@ const soOriginalDst = 80
 // IP_BINDANY sockets. A direct, non-redirected connection therefore yields its
 // own local address rather than an error. On macOS it queries pf with
 // DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
-// platforms it returns ErrOriginalDestinationUnsupported. A nil conn returns
-// net.ErrClosed.
+// platforms it returns ErrOriginalDestinationUnsupported. Wrappers such as
+// netx.TimeoutConn are looked through with netx.RawConnOf, so the lookup uses
+// the accepted socket. A nil conn returns net.ErrClosed.
 func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
+	}
+	if raw := netx.RawConnOf(conn); raw != nil {
+		conn = raw
 	}
 	dst, err := redirectedDestinationFromConn(conn)
 	if err == nil {

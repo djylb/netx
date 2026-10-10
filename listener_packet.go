@@ -49,8 +49,9 @@ type packetListenerOptions struct {
 type PacketListenerOption func(*packetListenerOptions)
 
 // WithAcceptFilter drops the datagrams of a new peer for which filter returns
-// false instead of starting a connection for it. filter runs on the read loop,
-// so it must be fast.
+// false instead of starting a connection for it. filter runs on the read loop
+// while the listener is locked, so it must be fast and must not call the
+// listener's methods or close its connections.
 func WithAcceptFilter(filter func(peer net.Addr) bool) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.filter = filter
@@ -58,7 +59,9 @@ func WithAcceptFilter(filter func(peer net.Addr) bool) PacketListenerOption {
 }
 
 // WithPacketQueue sets how many datagrams a connection holds until they are
-// read, 128 by default.
+// read, 128 by default. A datagram larger than 2 KiB takes the room of several
+// in proportion to its size, so a connection holds at most n × 2 KiB of
+// queued datagrams, or a single larger one.
 func WithPacketQueue(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.queue = n
@@ -342,12 +345,22 @@ func (l *PacketListener) sweepLoop() {
 	}
 }
 
+// packetBufSize is the size of the pooled buffers that queued datagrams of
+// common sizes are copied into.
+const packetBufSize = 2048
+
 // packetBufPool holds buffers for queued datagrams of common sizes.
 var packetBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, 2048)
+		b := make([]byte, 0, packetBufSize)
 		return &b
 	},
+}
+
+// packetCost is the memory that a queued datagram of n bytes holds: a pooled
+// buffer, or an allocation of its own when it is larger.
+func packetCost(n int) int64 {
+	return int64(max(n, packetBufSize))
 }
 
 // packetConn is one peer of a PacketListener.
@@ -357,6 +370,7 @@ type packetConn struct {
 	peer net.Addr
 
 	queue  chan *[]byte // datagrams, in packetBufPool buffers when they fit
+	queued atomic.Int64 // packetCost of the datagrams in queue
 	closed chan struct{}
 	once   sync.Once
 	err    error // reported by Read after shutdown
@@ -379,8 +393,15 @@ func (c *packetConn) idleAt(now time.Time, d time.Duration) bool {
 }
 
 func (c *packetConn) enqueue(p []byte) {
+	// Bound the bytes queued as well as the datagrams, so that large
+	// datagrams cannot pin up to 64 KiB per queue slot. An empty queue
+	// always takes one.
+	cost := packetCost(len(p))
+	if q := c.queued.Load(); q > 0 && q+cost > int64(c.l.opts.queue)*packetBufSize {
+		return // queue full: drop like a socket buffer would
+	}
 	var bp *[]byte
-	if len(p) <= 2048 {
+	if len(p) <= packetBufSize {
 		bp = packetBufPool.Get().(*[]byte)
 		*bp = (*bp)[:len(p)]
 	} else {
@@ -388,19 +409,30 @@ func (c *packetConn) enqueue(p []byte) {
 		bp = &b
 	}
 	copy(*bp, p)
+	c.queued.Add(cost) // before the send, so that Read never subtracts first
 	select {
 	case <-c.closed:
+		c.queued.Add(-cost)
 		putPacketBuf(bp)
 	case c.queue <- bp:
 		c.touch()
 	default:
+		c.queued.Add(-cost)
 		putPacketBuf(bp) // queue full: drop like a socket buffer would
 	}
 }
 
+// take copies the queued datagram p into b and releases it.
+func (c *packetConn) take(b []byte, p *[]byte) int {
+	n := copy(b, *p)
+	c.queued.Add(-packetCost(len(*p)))
+	putPacketBuf(p)
+	return n
+}
+
 // putPacketBuf returns a datagram buffer to packetBufPool if it came from it.
 func putPacketBuf(bp *[]byte) {
-	if cap(*bp) == 2048 {
+	if cap(*bp) == packetBufSize {
 		*bp = (*bp)[:0]
 		packetBufPool.Put(bp)
 	}
@@ -408,21 +440,22 @@ func putPacketBuf(bp *[]byte) {
 
 // Read returns the next datagram from the peer, truncated to len(b).
 func (c *packetConn) Read(b []byte) (int, error) {
+	expired := c.readDeadline.wait()
+	// As on a socket, a closed connection or an expired deadline fails the
+	// Read even while datagrams are queued.
 	select {
-	case p := <-c.queue:
-		n := copy(b, *p)
-		putPacketBuf(p)
-		return n, nil
+	case <-c.closed:
+		return 0, c.err
+	case <-expired:
+		return 0, os.ErrDeadlineExceeded
 	default:
 	}
 	select {
 	case p := <-c.queue:
-		n := copy(b, *p)
-		putPacketBuf(p)
-		return n, nil
+		return c.take(b, p), nil
 	case <-c.closed:
 		return 0, c.err
-	case <-c.readDeadline.wait():
+	case <-expired:
 		return 0, os.ErrDeadlineExceeded
 	}
 }
@@ -454,6 +487,8 @@ func (c *packetConn) shutdown(err error) {
 		c.err = err
 		c.l.remove(c)
 		close(c.closed)
+		c.readDeadline.stop()
+		c.writeDeadline.stop()
 		for {
 			select {
 			case p := <-c.queue:
@@ -523,6 +558,17 @@ func (d *deadline) set(t time.Time) {
 	if !closed {
 		close(d.cancel)
 	}
+}
+
+// stop releases the pending timer, if any, without changing whether the
+// deadline has expired.
+func (d *deadline) stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil && !d.timer.Stop() {
+		<-d.cancel // the timer fired: wait until it closed the channel
+	}
+	d.timer = nil
 }
 
 func (d *deadline) wait() chan struct{} {

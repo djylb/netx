@@ -187,8 +187,16 @@ func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
 	if _, err := server.Read(buf); !isTimeout(err) || time.Since(start) > 2*time.Second {
 		t.Fatalf("Read() error = %v after %v, want the header timeout", err, time.Since(start))
 	}
-	if _, err := server.Read(buf); !isTimeout(err) {
-		t.Fatalf("Read() after the header timeout = %v, want it again", err)
+	// Later reads fail for good, with an error that is not a timeout, so
+	// that a loop retrying timeouts does not spin.
+	for range 3 {
+		_ = server.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := server.Read(buf); isTimeout(err) || !errors.Is(err, ErrNoHeader) {
+			t.Fatalf("Read() after the header timeout = %v, want ErrNoHeader and no timeout", err)
+		}
+	}
+	if _, err := server.(*Conn).Header(); isTimeout(err) || !errors.Is(err, ErrNoHeader) {
+		t.Fatalf("Header() after the header timeout = %v, want ErrNoHeader and no timeout", err)
 	}
 
 	// Clearing the caller's deadline during a header read keeps the header
@@ -208,6 +216,67 @@ func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Read() outlived the header timeout")
+	}
+}
+
+// A Read whose deadline passes while another call, such as RemoteAddr, reads
+// the header returns the timeout instead of waiting for that read.
+func TestListenerReadDeadlineWhileHeaderPending(t *testing.T) {
+	l := newTestListener(t)
+	l.HeaderTimeout = 2 * time.Second
+	server, client := acceptOne(t, l, nil) // the peer sends nothing yet
+	go func() { _ = server.RemoteAddr() }()
+	time.Sleep(50 * time.Millisecond)
+
+	_ = server.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	start := time.Now()
+	if _, err := server.Read(make([]byte, 1)); !isTimeout(err) || time.Since(start) > time.Second {
+		t.Fatalf("Read() = %v after %v, want the caller's timeout", err, time.Since(start))
+	}
+
+	// Moving the deadline into the past wakes a waiting Read.
+	_ = server.SetReadDeadline(time.Time{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.Read(make([]byte, 1))
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	_ = server.SetReadDeadline(time.Now())
+	select {
+	case err := <-done:
+		if !isTimeout(err) {
+			t.Fatalf("Read() = %v, want a timeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read() kept waiting after its deadline was moved into the past")
+	}
+
+	// The header still arrives for the call that reads it.
+	_ = server.SetReadDeadline(time.Time{})
+	if _, err := client.Write(append(V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), 'x')); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	if n, err := server.Read(buf); err != nil || string(buf[:n]) != "x" {
+		t.Fatalf("Read() = %q, %v, want the payload", buf[:n], err)
+	}
+}
+
+// A version 2 header that claims 64 KiB does not make the connection
+// allocate that before the bytes arrive.
+func TestListenerGrowsHeaderBufferWithData(t *testing.T) {
+	l := newTestListener(t)
+	l.HeaderTimeout = 2 * time.Second
+	prefix := []byte(v2Signature + "\x21\x11\xff\xff")
+	server, _ := acceptOne(t, l, prefix)
+	c := server.(*Conn)
+	_ = server.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := server.Read(make([]byte, 1)); !isTimeout(err) {
+		t.Fatalf("Read() = %v, want the caller's timeout", err)
+	}
+	if got := cap(c.hbuf); got > 2*headerReadSize {
+		t.Fatalf("header buffer of %d bytes after %d bytes received", got, len(prefix))
 	}
 }
 

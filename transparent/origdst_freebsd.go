@@ -8,6 +8,8 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/djylb/netx"
 )
 
 const (
@@ -61,11 +63,15 @@ func pfIoctl(s uintptr, ioc int, b []byte) error {
 // IP_BINDANY sockets. A direct, non-redirected connection therefore yields its
 // own local address rather than an error. On macOS it queries pf with
 // DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
-// platforms it returns ErrOriginalDestinationUnsupported. A nil conn returns
-// net.ErrClosed.
+// platforms it returns ErrOriginalDestinationUnsupported. Wrappers such as
+// netx.TimeoutConn are looked through with netx.RawConnOf, so the lookup uses
+// the accepted socket. A nil conn returns net.ErrClosed.
 func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
+	}
+	if raw := netx.RawConnOf(conn); raw != nil {
+		conn = raw
 	}
 	dst, err := redirectedDestinationFromPF(conn)
 	if err == nil {

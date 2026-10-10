@@ -77,3 +77,17 @@ func BenchmarkFramedConnReadTCP(b *testing.B) { benchmarkFramedReadTCP(b) }
 func BenchmarkFramedConnReadTCPBuffered(b *testing.B) {
 	benchmarkFramedReadTCP(b, WithReadBuffer(64<<10))
 }
+
+func BenchmarkFramedConnWriteTCP(b *testing.B) {
+	client, server := benchTCPPair(b)
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+	fc := NewFramedConn(client)
+	msg := make([]byte, 1024)
+	b.SetBytes(int64(len(msg)))
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := fc.WriteFrame(msg); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

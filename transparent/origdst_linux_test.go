@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/djylb/netx"
 )
 
 type stubTransparentConn struct {
@@ -202,5 +204,26 @@ func TestOriginalDestinationOfDirectConn(t *testing.T) {
 				t.Fatalf("original destination lookup rejected the getsockopt buffer: %v", lookupErr)
 			}
 		})
+	}
+}
+
+func TestOriginalDestinationUnwrapsConn(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	_, server := dialAccepted(t, ln)
+
+	// The wrapper is not a syscall.Conn and reports another local address;
+	// the lookup must still use the socket beneath it.
+	fake := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1}
+	wrapped := netx.NewTimeoutConn(netx.NewAddrOverrideConn(server, nil, fake), time.Minute)
+	dst, err := OriginalDestination(wrapped)
+	if err != nil {
+		t.Fatalf("OriginalDestination error = %v", err)
+	}
+	if dst.String() != ln.Addr().String() {
+		t.Fatalf("OriginalDestination = %v, want %v", dst, ln.Addr())
 	}
 }

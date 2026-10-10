@@ -51,7 +51,10 @@ type FramedConn struct {
 	remain   int // payload bytes of the current frame not yet read (stream mode)
 	rmu      sync.Mutex
 	wmu      sync.Mutex
+	wbufs    net.Buffers // header and payload of a vectored write, guarded by wmu
+	wvec     [2][]byte   // backing array of wbufs
 	rhdr     [2]byte
+	whdr     [2]byte // header of a vectored write, guarded by wmu
 	datagram bool
 }
 
@@ -333,9 +336,12 @@ func (fc *FramedConn) writeFrameLocked(p []byte) error {
 		err     error
 	)
 	if _, ok := fc.Conn.(*net.TCPConn); ok {
-		var hdr [2]byte
-		binary.BigEndian.PutUint16(hdr[:], uint16(len(p)))
-		written, err = writeBuffers(fc.Conn, hdr[:], p)
+		// The header and vector live in fc, so the writev does not allocate.
+		binary.BigEndian.PutUint16(fc.whdr[:], uint16(len(p)))
+		fc.wvec = [2][]byte{fc.whdr[:], p}
+		fc.wbufs = fc.wvec[:]
+		written, err = writeBuffers(fc.Conn, &fc.wbufs)
+		fc.wvec = [2][]byte{} // do not keep p reachable
 	} else {
 		// One Write per frame, so wrappers such as TLS or mux streams do not
 		// emit a separate record or packet for the 2-byte header.
@@ -392,10 +398,13 @@ func writeAll(w io.Writer, p []byte) (int, error) {
 	return written, nil
 }
 
-func writeBuffers(w io.Writer, first, second []byte) (int64, error) {
-	want := int64(len(first) + len(second))
-	buffers := net.Buffers{first, second}
-	n, err := buffers.WriteTo(w)
+// writeBuffers writes every buffer of bufs to w, consuming bufs.
+func writeBuffers(w io.Writer, bufs *net.Buffers) (int64, error) {
+	var want int64
+	for _, b := range *bufs {
+		want += int64(len(b))
+	}
+	n, err := bufs.WriteTo(w)
 	if err == nil && n != want {
 		err = io.ErrShortWrite
 	}

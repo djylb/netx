@@ -385,3 +385,17 @@ func TestTLVTypeString(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkReadV1(b *testing.B) {
+	wire := []byte("PROXY TCP6 2001:db8::10 2001:db8::20 54321 443\r\nGET / HTTP/1.1\r\n\r\n")
+	src := bytes.NewReader(wire)
+	br := bufio.NewReader(src)
+	b.ReportAllocs()
+	for b.Loop() {
+		src.Reset(wire)
+		br.Reset(src)
+		if _, err := Read(br); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

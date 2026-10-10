@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,6 +232,95 @@ func TestPacketListenerDeadlinesAndClose(t *testing.T) {
 		t.Fatalf("Accept() after Close error = %v", err)
 	}
 	_ = l.Close()
+}
+
+func TestPacketConnCloseStopsDeadlineTimers(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c := acceptWithin(t, l).(*packetConn)
+	_ = c.SetDeadline(time.Now().Add(time.Hour))
+	_ = c.Close()
+	for _, d := range []*deadline{&c.readDeadline, &c.writeDeadline} {
+		d.mu.Lock()
+		timer := d.timer
+		d.mu.Unlock()
+		if timer != nil {
+			t.Fatal("deadline timer still pending after Close")
+		}
+	}
+	// Deadlines can still be set on the closed connection.
+	_ = c.SetDeadline(time.Now().Add(-time.Second))
+	_ = c.SetDeadline(time.Now().Add(time.Hour))
+	_ = c.SetDeadline(time.Time{})
+}
+
+// As on a socket, an expired read deadline fails Read even while datagrams
+// are queued, and they are still there once the deadline is cleared.
+func TestPacketConnReadHonorsDeadlineBeforeQueue(t *testing.T) {
+	l := newUDPListener(t)
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c := acceptWithin(t, l)
+	_ = c.SetReadDeadline(time.Now().Add(-time.Second))
+	for range 3 {
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Read() past the deadline error = %v, want ErrDeadlineExceeded", err)
+		}
+	}
+	_ = c.SetReadDeadline(time.Time{})
+	if n, err := c.Read(make([]byte, 1)); err != nil || n != 1 {
+		t.Fatalf("Read() = %d, %v, want the queued datagram", n, err)
+	}
+	_ = c.Close()
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read() after Close error = %v, want net.ErrClosed", err)
+	}
+}
+
+// The queue of a connection is bounded in bytes too, so large datagrams
+// cannot hold 64 KiB per slot.
+func TestPacketConnQueueBoundsBytes(t *testing.T) {
+	l := newUDPListener(t, WithPacketQueue(4)) // 4 datagrams, 8 KiB
+	a := dialUDP(t, l)
+	_, _ = a.Write([]byte("x"))
+	c := acceptWithin(t, l).(*packetConn)
+	buf := make([]byte, 65535)
+	if _, err := c.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	// The read loop is idle now, so the test can queue datagrams itself.
+	readAll := func() []int {
+		var sizes []int
+		_ = c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				_ = c.SetReadDeadline(time.Time{})
+				return sizes
+			}
+			sizes = append(sizes, n)
+		}
+	}
+	for _, tt := range []struct {
+		name string
+		send []int
+		want []int
+	}{
+		{"small datagrams by count", []int{100, 100, 100, 100, 100}, []int{100, 100, 100, 100}},
+		{"one large datagram when empty", []int{60000, 100}, []int{60000}},
+		{"large datagrams by bytes", []int{3000, 3000, 3000}, []int{3000, 3000}},
+	} {
+		for _, n := range tt.send {
+			c.enqueue(make([]byte, n))
+		}
+		if got := readAll(); !slices.Equal(got, tt.want) {
+			t.Fatalf("%s: read %v, want %v", tt.name, got, tt.want)
+		}
+		if q := c.queued.Load(); q != 0 {
+			t.Fatalf("%s: %d bytes still counted as queued", tt.name, q)
+		}
+	}
 }
 
 // The listener also works on a PacketConn that is not a *net.UDPConn.

@@ -484,3 +484,71 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 		}
 	}
 }
+
+// datagramSink records the size of each datagram written to it and blocks
+// reads until it is closed.
+type datagramSink struct {
+	datagramConn
+	done chan struct{}
+	once sync.Once
+}
+
+func (s *datagramSink) Read([]byte) (int, error) {
+	<-s.done
+	return 0, io.EOF
+}
+
+func (s *datagramSink) Close() error {
+	s.once.Do(func() { close(s.done) })
+	return nil
+}
+
+// Sources that return one datagram per Read relay datagrams larger than the
+// 32 KiB stream buffer whole.
+func TestRelayKeepsLargeDatagrams(t *testing.T) {
+	const size = 40000
+	relayOne := func(t *testing.T, src io.ReadWriteCloser) {
+		t.Helper()
+		sink := &datagramSink{done: make(chan struct{})}
+		done := make(chan struct{})
+		go func() {
+			_, _, _ = Relay(src, sink)
+			close(done)
+		}()
+		waitUntil(t, func() bool { return len(sink.sizes()) > 0 })
+		_ = src.Close()
+		<-done
+		if got := sink.sizes(); len(got) != 1 || got[0] != size {
+			t.Fatalf("datagrams relayed = %v, want [%d]", got, size)
+		}
+	}
+	t.Run("PacketListener", func(t *testing.T) {
+		l := newUDPListener(t)
+		client := dialUDP(t, l)
+		if _, err := client.Write(make([]byte, size)); err != nil {
+			t.Fatal(err)
+		}
+		relayOne(t, acceptWithin(t, l))
+	})
+	t.Run("UDPConn", func(t *testing.T) {
+		server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Skipf("ListenUDP: %v", err)
+		}
+		defer func() { _ = server.Close() }()
+		client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := server.WriteTo(make([]byte, size), client.LocalAddr()); err != nil {
+			t.Fatal(err)
+		}
+		relayOne(t, client)
+	})
+	t.Run("FramedConn", func(t *testing.T) {
+		a, b := net.Pipe()
+		defer func() { _ = b.Close() }()
+		go func() { _ = NewFramedConn(b).WriteFrame(make([]byte, size)) }()
+		relayOne(t, NewFramedConn(a, WithDatagramReads()))
+	})
+}

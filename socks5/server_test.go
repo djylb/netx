@@ -533,6 +533,58 @@ type nopConn struct{ net.Conn }
 
 func (nopConn) Close() error { return nil }
 
+// slowCloseConn blocks in Close until release is closed, as a *tls.Conn does
+// while it sends close_notify to a peer that does not read.
+type slowCloseConn struct {
+	net.Conn
+	closing chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *slowCloseConn) Close() error {
+	c.once.Do(func() {
+		close(c.closing)
+		<-c.release
+	})
+	return c.Conn.Close()
+}
+
+// A connection that is slow to close must not stall the rest of the server
+// while Close runs.
+func TestServerCloseDoesNotHoldLockWhileClosing(t *testing.T) {
+	s := &socks5.Server{}
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	slow := &slowCloseConn{Conn: server, closing: make(chan struct{}), release: make(chan struct{})}
+	served := make(chan error, 1)
+	go func() { served <- s.ServeConn(slow) }()
+	// The pipe is synchronous: once the server has read this byte, it tracks
+	// the connection.
+	if _, err := client.Write([]byte{socks5.Version}); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	<-slow.closing
+
+	other := make(chan error, 1)
+	go func() { other <- s.ServeConn(nopConn{}) }()
+	select {
+	case err := <-other:
+		if !errors.Is(err, socks5.ErrServerClosed) {
+			t.Fatalf("ServeConn() during Close = %v, want ErrServerClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeConn() blocked while Close was closing a connection")
+	}
+	close(slow.release)
+	if err := <-closed; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	<-served
+}
+
 // Clients that do not follow the method negotiation are still served when the
 // server does not require authentication.
 func TestServerLenientNegotiation(t *testing.T) {
