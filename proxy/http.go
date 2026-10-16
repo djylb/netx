@@ -52,20 +52,16 @@ func (d *HTTPDialer) DialContext(ctx context.Context, network, address string) (
 	if err != nil {
 		return nil, err
 	}
-	c, err := forwardOf(d.Forward).DialContext(ctx, "tcp", d.ProxyAddr)
+	forward := forwardOf(d.Forward)
+	if d.TLSConfig != nil {
+		forward = &tlsDialer{config: d.tlsConfig(), forward: d.Forward}
+	}
+	c, err := forward.DialContext(ctx, "tcp", d.ProxyAddr)
 	if err != nil {
 		return nil, err
 	}
 	return handshake(ctx, c, func() (net.Conn, error) {
-		conn := c
-		if d.TLSConfig != nil {
-			tc := tls.Client(c, d.tlsConfig())
-			if err := tc.HandshakeContext(ctx); err != nil {
-				return nil, err
-			}
-			conn = tc
-		}
-		return connect(conn, address, req)
+		return connect(c, address, req)
 	})
 }
 
@@ -98,7 +94,11 @@ func (d *HTTPDialer) tlsConfig() *tls.Config {
 		return d.TLSConfig
 	}
 	cfg := d.TLSConfig.Clone()
-	cfg.ServerName, _, _ = net.SplitHostPort(d.ProxyAddr)
+	host, _, err := net.SplitHostPort(d.ProxyAddr)
+	if err != nil {
+		host = d.ProxyAddr // no port, as for a Forward dialer of Unix sockets
+	}
+	cfg.ServerName = host
 	return cfg
 }
 
@@ -119,7 +119,9 @@ func connect(c net.Conn, address string, req []byte) (net.Conn, error) {
 		return nil, fmt.Errorf("proxy: read CONNECT response: %w", err)
 	}
 	if status[0] != '2' {
-		return nil, fmt.Errorf("proxy: CONNECT %s: %s", address, status)
+		// Quoted: the proxy chooses the text, which may hold control
+		// characters.
+		return nil, fmt.Errorf("proxy: CONNECT %s: %q", address, status)
 	}
 	if n := br.Buffered(); n > 0 {
 		prefix, _ := br.Peek(n)

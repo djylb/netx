@@ -1,6 +1,7 @@
 package transparent
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -20,10 +21,13 @@ const soOriginalDst = 80
 // TCP connection.
 //
 // On Linux it reads SO_ORIGINAL_DST or IP6T_SO_ORIGINAL_DST (REDIRECT/DNAT),
-// and on FreeBSD it queries pf with DIOCNATLOOK. If that lookup fails, both
-// fall back to conn's local address, which is the target for TPROXY or
-// IP_BINDANY sockets. A direct, non-redirected connection therefore yields its
-// own local address rather than an error. On macOS it queries pf with
+// and on FreeBSD it queries pf with DIOCNATLOOK. When that lookup finds no
+// redirect, as for a connection that conntrack or pf has no translation for
+// or a host without them, both fall back to conn's local address, which is
+// the target for TPROXY or IP_BINDANY sockets. A direct, non-redirected
+// connection therefore yields its own local address rather than an error.
+// Other lookup failures, such as for a closed connection or, on FreeBSD,
+// without permission to read /dev/pf, are returned. On macOS it queries pf with
 // DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
 // platforms it returns ErrOriginalDestinationUnsupported. Wrappers such as
 // netx.TimeoutConn are looked through with netx.RawConnOf, so the lookup, and
@@ -42,6 +46,9 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if err == nil {
 		return dst, nil
 	}
+	if !errors.Is(err, errNotRedirected) {
+		return nil, fmt.Errorf("transparent: original destination: %w", err)
+	}
 	localDst, localErr := destinationFromLocalAddr(conn.LocalAddr())
 	if localErr == nil {
 		return localDst, nil
@@ -52,7 +59,8 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 func redirectedDestinationFromConn(conn net.Conn) (*net.TCPAddr, error) {
 	sysconn, ok := conn.(syscall.Conn)
 	if !ok {
-		return nil, fmt.Errorf("connection does not support SyscallConn")
+		// No socket that conntrack could have translated.
+		return nil, fmt.Errorf("%w: connection does not support SyscallConn", errNotRedirected)
 	}
 	raw, err := sysconn.SyscallConn()
 	if err != nil {
@@ -92,7 +100,17 @@ func originalDestinationFromFD(fd int) (*net.TCPAddr, error) {
 	if err6 == nil {
 		return dst, nil
 	}
-	return nil, fmt.Errorf("not a redirected connection (errno4=%w, errno6=%w)", err4, err6)
+	if noTranslation(err4) && noTranslation(err6) {
+		return nil, fmt.Errorf("%w (errno4=%w, errno6=%w)", errNotRedirected, err4, err6)
+	}
+	return nil, fmt.Errorf("errno4=%w, errno6=%w", err4, err6)
+}
+
+// noTranslation reports whether a lookup error means that conntrack has no
+// translation for the socket: ENOENT, or the option unknown, as without
+// conntrack or for the other address family.
+func noTranslation(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOPROTOOPT) || errors.Is(err, syscall.EOPNOTSUPP)
 }
 
 // originalDestinationIPv4 reads SO_ORIGINAL_DST into an IPv6Mreq (20 bytes),
@@ -134,7 +152,7 @@ func tcpAddrFromSockaddrInet6(sa *syscall.RawSockaddrInet6) *net.TCPAddr {
 // scope: the name of the interface with that index, or the index itself when
 // no interface has it. It returns "" for other addresses.
 func scopeZone(ip netip.Addr, scope uint32) string {
-	if scope == 0 || !ip.Is6() || ip.Is4In6() || !(ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+	if scope == 0 || !ip.Is6() || ip.Is4In6() || !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() {
 		return ""
 	}
 	zones.Lock()

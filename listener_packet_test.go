@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -249,9 +250,11 @@ func TestPacketListenerIdleTimeout(t *testing.T) {
 	l := newUDPListener(t, WithIdleTimeout(80*time.Millisecond))
 	a := dialUDP(t, l)
 	send(t, l, a, "x")
+	// Before Accept, where the idle time starts, so that a slow host
+	// cannot make it look early.
+	start := time.Now()
 	c := acceptWithin(t, l)
 	_, _ = c.Read(make([]byte, 1))
-	start := time.Now()
 	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("Read() error = %v, want EOF after the idle timeout", err)
 	}
@@ -488,20 +491,35 @@ func TestPacketListenerFilterMayUseListener(t *testing.T) {
 // Close from the accept filter and Close from another goroutine may run at
 // the same time without either waiting for the other forever.
 func TestPacketListenerConcurrentCloseFromFilter(t *testing.T) {
-	for range 100 {
+	for range 20 {
 		var self atomic.Pointer[PacketListener]
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
 		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+			once.Do(func() { close(entered) })
+			<-release
 			_ = self.Load().Close()
 			return true
 		}))
 		self.Store(l)
 		a := dialUDP(t, l)
+		// Resend until the filter runs, in case a datagram is lost.
+		for sent := false; !sent; {
+			_, _ = a.Write([]byte("x"))
+			select {
+			case <-entered:
+				sent = true
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 		closed := make(chan struct{})
 		go func() {
 			_ = l.Close()
 			close(closed)
 		}()
-		_, _ = a.Write([]byte("x"))
+		runtime.Gosched()
+		close(release)
 		select {
 		case <-closed:
 		case <-time.After(2 * time.Second):

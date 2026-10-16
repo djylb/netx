@@ -24,3 +24,17 @@ func natlookAddr(af uint8, addr *[16]byte, port int) (*net.TCPAddr, error) {
 	}
 	return &net.TCPAddr{IP: ip, Port: port}, nil
 }
+
+// checkOpen returns the error of a closed connection, whose addresses, by
+// which pf is asked, it still reports.
+func checkOpen(conn net.Conn) error {
+	sc, ok := conn.(syscall.Conn)
+	if !ok {
+		return nil
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return raw.Control(func(uintptr) {})
+}

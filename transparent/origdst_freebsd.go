@@ -58,10 +58,13 @@ func pfIoctl(s uintptr, ioc int, b []byte) error {
 // TCP connection.
 //
 // On Linux it reads SO_ORIGINAL_DST or IP6T_SO_ORIGINAL_DST (REDIRECT/DNAT),
-// and on FreeBSD it queries pf with DIOCNATLOOK. If that lookup fails, both
-// fall back to conn's local address, which is the target for TPROXY or
-// IP_BINDANY sockets. A direct, non-redirected connection therefore yields its
-// own local address rather than an error. On macOS it queries pf with
+// and on FreeBSD it queries pf with DIOCNATLOOK. When that lookup finds no
+// redirect, as for a connection that conntrack or pf has no translation for
+// or a host without them, both fall back to conn's local address, which is
+// the target for TPROXY or IP_BINDANY sockets. A direct, non-redirected
+// connection therefore yields its own local address rather than an error.
+// Other lookup failures, such as for a closed connection or, on FreeBSD,
+// without permission to read /dev/pf, are returned. On macOS it queries pf with
 // DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
 // platforms it returns ErrOriginalDestinationUnsupported. Wrappers such as
 // netx.TimeoutConn are looked through with netx.RawConnOf, so the lookup, and
@@ -80,6 +83,9 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if err == nil {
 		return dst, nil
 	}
+	if !errors.Is(err, errNotRedirected) {
+		return nil, fmt.Errorf("transparent: original destination: %w", err)
+	}
 	localDst, localErr := destinationFromLocalAddr(conn.LocalAddr())
 	if localErr == nil {
 		return localDst, nil
@@ -88,11 +94,18 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 }
 
 func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
+	if err := checkOpen(conn); err != nil {
+		return nil, err
+	}
 	f, err := os.Open("/dev/pf")
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.ENODEV) {
+			// No pf, so nothing redirected the connection.
+			return nil, fmt.Errorf("%w: open /dev/pf: %w", errNotRedirected, err)
+		}
 		return nil, fmt.Errorf("failed to open /dev/pf: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fd := f.Fd()
 	b := make([]byte, sizeofPfiocNatlook)
@@ -149,6 +162,9 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 		}
 	}
 
+	if errors.Is(err, syscall.ENOENT) {
+		return nil, fmt.Errorf("%w: no pf state: %w", errNotRedirected, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ioctl failed: %w", err)
 	}

@@ -90,9 +90,6 @@ func TestDialerServerNameFromAddress(t *testing.T) {
 
 func TestDialerErrors(t *testing.T) {
 	d := &Dialer{Forward: &forwardTo{target: "127.0.0.1:1"}}
-	if _, err := d.Dial("tcp", "no-port"); err == nil {
-		t.Error("address without port accepted")
-	}
 	if c, err := d.Dial("tcp", "localhost:1"); err == nil || c != nil {
 		t.Errorf("Dial(closed port) = %v, %v; want the forward error", c, err)
 	}

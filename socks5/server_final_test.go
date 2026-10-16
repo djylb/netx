@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -166,6 +167,63 @@ func TestServeDoesNotReportConnectionsEndedByClose(t *testing.T) {
 	_, _ = ctl.Read(make([]byte, 1))
 	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, _ = c.Read(make([]byte, 1))
+	time.Sleep(100 * time.Millisecond) // let the serving goroutines report
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reported) != 0 {
+		t.Fatalf("OnError got %v for connections that Close ended", reported)
+	}
+}
+
+// Connections that Close ends inside a hook or a dial are not reported
+// either, whatever error the hook returns for its cancelled context.
+func TestServeDoesNotReportHooksEndedByClose(t *testing.T) {
+	var mu sync.Mutex
+	var reported []error
+	entered := make(chan struct{}, 2)
+	s := &socks5.Server{
+		Allow: func(ctx context.Context, req *socks5.Request) error {
+			if req.Dst.Port != 1 {
+				return nil
+			}
+			entered <- struct{}{}
+			<-ctx.Done()
+			return fmt.Errorf("allow: %v", ctx.Err()) // not wrapped
+		},
+		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		OnError: func(_ net.Conn, err error) {
+			mu.Lock()
+			reported = append(reported, err)
+			mu.Unlock()
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = s.Serve(ln); close(done) }()
+	for _, port := range []string{"1", "2"} {
+		go func() {
+			c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).Dial("tcp", "192.0.2.1:"+port)
+			if err == nil {
+				_ = c.Close()
+			}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the hooks were not called")
+		}
+	}
+	_ = s.Close()
+	<-done
 	time.Sleep(100 * time.Millisecond) // let the serving goroutines report
 	mu.Lock()
 	defer mu.Unlock()

@@ -38,6 +38,7 @@ type PacketListener struct {
 	other     map[string]*packetConn // peers that are not *net.UDPAddr
 	wg        sync.WaitGroup
 	filtering atomic.Bool // the read loop is in the accept filter
+	closing   atomic.Bool // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {
@@ -63,7 +64,8 @@ func WithAcceptFilter(filter func(peer net.Addr) bool) PacketListenerOption {
 // WithPacketQueue sets how many datagrams a connection holds until they are
 // read, 128 by default. A datagram larger than 2 KiB takes the room of several
 // in proportion to its size, so a connection holds at most n × 2 KiB of
-// queued datagrams, or a single larger one.
+// queued datagrams, or a single larger one. Each connection also takes a
+// pointer-sized slot per datagram up front, when its first datagram arrives.
 func WithPacketQueue(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.queue = n
@@ -80,7 +82,8 @@ func WithAcceptBacklog(n int) PacketListenerOption {
 
 // WithIdleTimeout closes a connection that has neither received nor sent a
 // datagram for d since Accept returned it. Its pending and later Reads return
-// io.EOF. Connections waiting for Accept are kept with their datagrams.
+// io.EOF. Connections waiting for Accept are kept with their datagrams. A
+// non-positive d, the default, keeps idle connections.
 func WithIdleTimeout(d time.Duration) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.idle = d
@@ -159,6 +162,7 @@ func (l *PacketListener) Close() error {
 		// Nothing here waits for the read loop, which may itself be calling
 		// Close from the accept filter. newConn refuses peers once done is
 		// closed, so the connections collected below are all there will be.
+		l.closing.Store(true)
 		close(l.done)
 		l.closeErr = l.pc.Close()
 		l.mu.Lock()
@@ -276,6 +280,9 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
 	c.enqueue(p)
 }
 
+// testHookBeforeFilter, set by tests, runs before the accept filter.
+var testHookBeforeFilter func(*PacketListener)
+
 // newConn starts a connection for a new peer, keyed by ap or else by key,
 // unless the accept filter rejects it, the backlog is full or the listener
 // is closed. Only the read loop starts connections.
@@ -292,10 +299,17 @@ func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *
 		}
 		addr = net.UDPAddrFromAddrPort(ap)
 	}
-	// The filter runs without the lock, so it may use the listener.
+	// The filter runs without the lock, so it may use the listener. Close
+	// sets closing before it looks at filtering, and filtering is set here
+	// before closing is looked at, both atomically, so either Close sees
+	// the filter running and does not wait for it, or the filter does not
+	// run: Close cannot wait for a filter that waits for the caller of Close.
 	if l.opts.filter != nil {
+		if testHookBeforeFilter != nil {
+			testHookBeforeFilter(l)
+		}
 		l.filtering.Store(true)
-		ok := l.opts.filter(addr)
+		ok := !l.closing.Load() && l.opts.filter(addr)
 		l.filtering.Store(false)
 		if !ok {
 			return nil
@@ -447,6 +461,11 @@ func (c *packetConn) enqueue(p []byte) {
 		putPacketBuf(bp)
 	case c.queue <- bp:
 		c.touch()
+		if isClosedChan(c.closed) {
+			// shutdown drained the queue before the send; drain it again,
+			// or the datagram keeps its buffer while the connection is kept.
+			c.drain()
+		}
 	default:
 		c.queued.Add(-cost)
 		putPacketBuf(bp) // queue full: drop like a socket buffer would
@@ -525,15 +544,20 @@ func (c *packetConn) shutdown(err error) {
 		close(c.closed)
 		c.readDeadline.stop()
 		c.writeDeadline.stop()
-		for {
-			select {
-			case p := <-c.queue:
-				putPacketBuf(p)
-			default:
-				return
-			}
-		}
+		c.drain()
 	})
+}
+
+// drain releases the queued datagrams of a connection that is shut down.
+func (c *packetConn) drain() {
+	for {
+		select {
+		case p := <-c.queue:
+			putPacketBuf(p)
+		default:
+			return
+		}
+	}
 }
 
 func (c *packetConn) LocalAddr() net.Addr  { return c.l.pc.LocalAddr() }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -225,5 +227,74 @@ func TestOriginalDestinationUnwrapsConn(t *testing.T) {
 	}
 	if dst.String() != ln.Addr().String() {
 		t.Fatalf("OriginalDestination = %v, want %v", dst, ln.Addr())
+	}
+}
+
+// A closed connection is an error, not the local address it still reports.
+func TestOriginalDestinationOfClosedConn(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	_, server := dialAccepted(t, ln)
+	_ = server.Close()
+	if dst, err := OriginalDestination(server); err == nil {
+		t.Fatalf("OriginalDestination(closed) = %v, want an error", dst)
+	}
+}
+
+// TestOriginalDestinationOfRedirectedConn redirects a documentation address
+// to a listener with iptables and reads it back. It changes the host's
+// firewall, so it runs only as root with NETX_TEST_IPTABLES=1, as in CI.
+func TestOriginalDestinationOfRedirectedConn(t *testing.T) {
+	if os.Getenv("NETX_TEST_IPTABLES") != "1" || os.Geteuid() != 0 {
+		t.Skip("needs root and NETX_TEST_IPTABLES=1")
+	}
+	for _, tt := range []struct {
+		tool, network, listen, target string
+	}{
+		{"iptables", "tcp4", "127.0.0.1:0", "192.0.2.1:18080"},
+		{"ip6tables", "tcp6", "[::1]:0", "[2001:db8::1]:18080"},
+	} {
+		t.Run(tt.network, func(t *testing.T) {
+			ln, err := net.Listen(tt.network, tt.listen)
+			if err != nil {
+				t.Skipf("listen: %v", err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			host, port, _ := net.SplitHostPort(tt.target)
+			_, lnPort, _ := net.SplitHostPort(ln.Addr().String())
+			rule := []string{"OUTPUT", "-t", "nat", "-p", "tcp", "-d", host, "--dport", port, "-j", "REDIRECT", "--to-ports", lnPort}
+			if out, err := exec.Command(tt.tool, append([]string{"-A"}, rule...)...).CombinedOutput(); err != nil {
+				t.Fatalf("%s: %v: %s", tt.tool, err, out)
+			}
+			t.Cleanup(func() { _ = exec.Command(tt.tool, append([]string{"-D"}, rule...)...).Run() })
+			accepted := make(chan net.Conn, 1)
+			go func() {
+				c, _ := ln.Accept()
+				accepted <- c
+			}()
+			client, err := net.DialTimeout(tt.network, tt.target, 5*time.Second)
+			if err != nil {
+				if tt.network == "tcp6" {
+					t.Skipf("dial %s: %v", tt.target, err) // no IPv6 route
+				}
+				t.Fatalf("dial %s: %v", tt.target, err)
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			server := <-accepted
+			if server == nil {
+				t.Fatal("Accept failed")
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			dst, err := OriginalDestination(server)
+			if err != nil {
+				t.Fatalf("OriginalDestination error = %v", err)
+			}
+			if want, _ := net.ResolveTCPAddr("tcp", tt.target); !dst.IP.Equal(want.IP) || dst.Port != want.Port {
+				t.Fatalf("OriginalDestination = %v, want %v", dst, tt.target)
+			}
+		})
 	}
 }

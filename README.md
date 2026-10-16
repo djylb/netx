@@ -503,7 +503,10 @@ func isLocal(ip net.IP) bool {
 | macOS, iOS     | plain listener (pf `rdr` needs no socket option)                 | pf `DIOCNATLOOK` (needs root)                                      |
 | Others         | `ErrListenUnsupported`                                           | `ErrOriginalDestinationUnsupported`                                |
 
-Both errors match `errors.ErrUnsupported`. For a plain listener use `net.Listen`.
+"Else the local address" applies when the lookup finds no redirect for the
+connection; other failures, such as a closed connection or no permission to
+read `/dev/pf`, are returned as errors. Both unsupported errors match
+`errors.ErrUnsupported`. For a plain listener use `net.Listen`.
 `OriginalDestination` looks through wrappers such as `netx.TimeoutConn` with
 `netx.RawConnOf`, so it can be called on a wrapped connection.
 

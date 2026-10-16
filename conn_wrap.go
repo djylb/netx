@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -169,7 +170,8 @@ func (w *wrappedConn) RawConn() net.Conn {
 }
 
 func rawConnOf(v any) net.Conn {
-	return rawConnOfDepth(v, 0)
+	var seen [8]any
+	return rawConnOfDepth(v, 0, seen[:0])
 }
 
 // maxUnwrapDepth bounds RawConn/NetConn chains so cyclic wrappers cannot loop forever.
@@ -198,8 +200,65 @@ func isNilPointer(v any) bool {
 	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
-func rawConnOfDepth(v any, depth int) net.Conn {
+// layersOf returns what a wrapper of this package wraps, one layer down and
+// in the order its RawConn looks at it, so that unwrapping goes through it
+// without calling RawConn, which would start over. Only these types match,
+// not types that embed them and may have a RawConn of their own.
+func layersOf(v any) (first, second any, ok bool) {
+	switch c := v.(type) {
+	case *PrefixConn:
+		if c != nil {
+			return c.Conn, nil, true
+		}
+	case *AddrOverrideConn:
+		if c != nil {
+			return c.Conn, nil, true
+		}
+	case *TimeoutConn:
+		if c != nil {
+			return c.Conn, nil, true
+		}
+	case *FramedConn:
+		if c != nil {
+			return c.Conn, nil, true
+		}
+	case *TeeConn:
+		if c != nil {
+			return c.conn(), nil, true
+		}
+	case *observedReadWriteCloser:
+		if c != nil {
+			return c.rwc, nil, true
+		}
+	case *wrappedConn:
+		if c != nil {
+			return c.parent, c.rwc, true
+		}
+	default:
+		return nil, nil, false
+	}
+	return nil, nil, true // a nil wrapper
+}
+
+// rawConnOfDepth unwraps v. depth counts the RawConn and NetConn calls of
+// other packages' wrappers, which may return a new wrapper each time, and
+// seen holds this package's wrappers on the way, whose fields a caller may
+// have pointed back at them; either way a cycle stops.
+func rawConnOfDepth(v any, depth int, seen []any) net.Conn {
 	if v == nil {
+		return nil
+	}
+	if first, second, ok := layersOf(v); ok {
+		if slices.Contains(seen, v) {
+			c, _ := v.(net.Conn)
+			return c
+		}
+		seen = append(seen, v)
+		for _, inner := range [...]any{first, second} {
+			if raw := rawConnOfDepth(inner, depth, seen); raw != nil {
+				return raw
+			}
+		}
 		return nil
 	}
 	// Unwrapping only borrows connections; their owner remains responsible for closing them.
@@ -214,7 +273,7 @@ func rawConnOfDepth(v any, depth int) net.Conn {
 		if depth >= maxUnwrapDepth {
 			return raw
 		}
-		if unwrapped := rawConnOfDepth(raw, depth+1); unwrapped != nil {
+		if unwrapped := rawConnOfDepth(raw, depth+1, seen); unwrapped != nil {
 			return unwrapped
 		}
 		return raw

@@ -6,7 +6,7 @@
 // (CertCache).
 //
 // It is separate from the netx root package because importing crypto/tls
-// adds about 800 KB to a binary even when no handshake runs.
+// adds a large amount of code to a binary even when no handshake runs.
 package tlsconn
 
 import (

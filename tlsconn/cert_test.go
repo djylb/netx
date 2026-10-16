@@ -170,35 +170,66 @@ func writeCert(t *testing.T, dir string, cert tls.Certificate) (certFile, keyFil
 	return certFile, keyFile
 }
 
+// fakeClock is a clock for CertCache that moves only when told to.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (f *fakeClock) now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.t
+}
+
+func (f *fakeClock) advance(d time.Duration) {
+	f.mu.Lock()
+	f.t = f.t.Add(d)
+	f.mu.Unlock()
+}
+
 func TestCertCacheFiles(t *testing.T) {
 	first, _ := NewSelfSigned(SelfSignedOptions{})
 	certFile, keyFile := writeCert(t, t.TempDir(), first)
-	const reload = 500 * time.Millisecond // so the cache hit below comes first on a busy host
-	c := &CertCache{ReloadInterval: reload}
+	const reload = time.Minute
+	clock := &fakeClock{t: time.Now()}
+	c := &CertCache{ReloadInterval: reload, now: clock.now}
 
 	got, err := c.LoadFiles(certFile, keyFile)
 	if err != nil || Fingerprint(got.Certificate[0]) != Fingerprint(first.Certificate[0]) {
 		t.Fatalf("LoadFiles() = %v", err)
 	}
+	// A renewed certificate is not read before ReloadInterval.
+	second, _ := NewSelfSigned(SelfSignedOptions{})
+	writeCert(t, filepath.Dir(certFile), second)
+	clock.advance(reload - time.Second)
 	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
 		t.Fatal("second LoadFiles did not use the cache")
 	}
 
-	// A renewed certificate is picked up after ReloadInterval.
-	second, _ := NewSelfSigned(SelfSignedOptions{})
-	writeCert(t, filepath.Dir(certFile), second)
-	time.Sleep(reload + 50*time.Millisecond)
+	// It is picked up after ReloadInterval.
+	clock.advance(time.Second)
 	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(second.Certificate[0]) {
 		t.Fatal("renewed certificate not reloaded")
 	}
 
-	// A failed reload keeps the previous certificate.
+	// A failed reload keeps the previous certificate, and the next reload
+	// is due only after another ReloadInterval.
 	if err := os.WriteFile(certFile, []byte("broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(60 * time.Millisecond)
+	clock.advance(reload)
 	if kept, err := c.LoadFiles(certFile, keyFile); err != nil || kept != got {
 		t.Fatalf("after a failed reload LoadFiles() = %v, %v; want the previous certificate", kept, err)
+	}
+	third, _ := NewSelfSigned(SelfSignedOptions{})
+	writeCert(t, filepath.Dir(certFile), third)
+	if kept, _ := c.LoadFiles(certFile, keyFile); kept != got {
+		t.Fatal("reloaded again right after a failed reload")
+	}
+	clock.advance(reload)
+	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(third.Certificate[0]) {
+		t.Fatal("certificate not reloaded after a failed reload")
 	}
 
 	// A failed first load is not cached.
@@ -208,6 +239,66 @@ func TestCertCacheFiles(t *testing.T) {
 	if c.Len() != 1 {
 		t.Fatalf("Len() = %d, want 1", c.Len())
 	}
+}
+
+// Without ReloadInterval the files of an expired certificate are read again,
+// at most once a minute.
+func TestCertCacheReloadsExpiredFiles(t *testing.T) {
+	first, _ := NewSelfSigned(SelfSignedOptions{ValidFor: time.Hour})
+	certFile, keyFile := writeCert(t, t.TempDir(), first)
+	clock := &fakeClock{t: time.Now()}
+	c := &CertCache{now: clock.now}
+	got, err := c.LoadFiles(certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := NewSelfSigned(SelfSignedOptions{})
+	writeCert(t, filepath.Dir(certFile), second)
+	clock.advance(30 * time.Minute)
+	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
+		t.Fatal("valid certificate reloaded")
+	}
+	// Past NotAfter, ValidFor from when it was made.
+	clock.advance(time.Hour + time.Second)
+	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(second.Certificate[0]) {
+		t.Fatal("expired certificate not reloaded")
+	}
+}
+
+// MaxEntries counts the loaded certificates, also across failed loads,
+// Clear and the idle sweep.
+func TestCertCacheCountsLoadedEntries(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	c := &CertCache{MaxEntries: 2, IdleTimeout: time.Hour, now: clock.now}
+	pems := make([][2][]byte, 4)
+	for i := range pems {
+		cert, _ := NewSelfSigned(SelfSignedOptions{})
+		pems[i][0], pems[i][1], _ = EncodePEM(cert)
+	}
+	check := func(want int) {
+		t.Helper()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.loaded != want || len(c.entries) != want {
+			t.Fatalf("loaded = %d, entries = %d, want %d", c.loaded, len(c.entries), want)
+		}
+	}
+	for i := range pems {
+		if _, err := c.LoadPEM(pems[i][0], pems[i][1]); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.LoadPEM([]byte("bad"), []byte("bad"))
+	}
+	check(2)
+	c.Clear()
+	check(0)
+	_, _ = c.LoadPEM(pems[0][0], pems[0][1])
+	clock.advance(2 * time.Hour)
+	_, _ = c.LoadPEM(pems[1][0], pems[1][1]) // the sweep drops the first
+	check(1)
+	_, _ = c.LoadPEM(pems[2][0], pems[2][1])
+	_, _ = c.LoadPEM(pems[3][0], pems[3][1])
+	check(2)
 }
 
 func TestCertCachePEM(t *testing.T) {

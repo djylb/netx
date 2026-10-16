@@ -19,7 +19,6 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
-	"github.com/djylb/netx/tlsconn"
 )
 
 // serveOnce accepts one connection on a loopback listener and runs handle.
@@ -298,7 +297,8 @@ func TestSOCKS5Failures(t *testing.T) {
 }
 
 func TestDialContextEndsStalledHandshake(t *testing.T) {
-	for _, scheme := range []string{"http", "socks5"} {
+	// The TLS schemes stall in the TLS handshake.
+	for _, scheme := range []string{"http", "socks5", "https", "socks5+tls"} {
 		addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
 		d := mustDialer(t, scheme+"://"+addr)
 
@@ -553,8 +553,8 @@ func TestFromURLSOCKSVariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	d = dialer.(*socks5.Dialer)
-	td, ok := d.Forward.(*tlsconn.Dialer)
-	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.Config.ServerName != "proxy" || td.Forward != forward {
+	td, ok := d.Forward.(*tlsDialer)
+	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.config.ServerName != "proxy" || td.forward != forward {
 		t.Errorf("socks5h+tls = %#v, forward %#v", d, d.Forward)
 	}
 	if d := mustDialer(t, "socks4a+tls://proxy").(*socks5.Dialer); !d.SOCKS4 || d.Resolver != nil {
@@ -587,7 +587,7 @@ func TestSOCKSOverTLS(t *testing.T) {
 			t.Fatalf("%s with system roots error = %v, want a certificate error", scheme, err)
 		}
 
-		d.(*socks5.Dialer).Forward.(*tlsconn.Dialer).Config.RootCAs = roots
+		d.(*socks5.Dialer).Forward.(*tlsDialer).config.RootCAs = roots
 		conn, err := d.DialContext(context.Background(), "tcp", target)
 		if err != nil {
 			t.Fatalf("%s DialContext() error = %v", scheme, err)

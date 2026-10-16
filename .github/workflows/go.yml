@@ -33,6 +33,15 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: false
       - run: go test -race -count=1 ./...
+      - name: transparent proxy tests as root
+        # Root lets them set IP_TRANSPARENT and redirect connections with
+        # iptables; the test binary is built first so the Go cache stays the
+        # runner's.
+        if: runner.os == 'Linux'
+        run: |
+          go test -race -c -o "$RUNNER_TEMP/transparent.test" ./transparent
+          sudo ip -6 route add 2001:db8::/32 dev lo || true
+          cd transparent && sudo NETX_TEST_IPTABLES=1 "$RUNNER_TEMP/transparent.test" -test.count=1 -test.v
 
   cross-vet:
     runs-on: ubuntu-latest

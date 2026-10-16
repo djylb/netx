@@ -33,8 +33,14 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 	}
 	server = <-accepted
 	if server == nil {
+		_ = client.Close()
 		t.Fatal("Accept() failed")
 	}
+	// Also when a test fails before closing them.
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
 	return client, server
 }
 
@@ -522,7 +528,11 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 		}()
 		waitUntil(t, func() bool { return len(sink.sizes()) > 0 })
 		_ = src.Close()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Relay() did not return after its source was closed")
+		}
 		if got := sink.sizes(); len(got) != 1 || got[0] != size {
 			t.Fatalf("datagrams relayed = %v, want [%d]", got, size)
 		}

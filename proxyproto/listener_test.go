@@ -600,3 +600,71 @@ func TestListenerOptionalHeaderTimeoutWithoutDeadlines(t *testing.T) {
 		t.Fatalf("Header() error = %v, want ErrNoHeader and no timeout", err)
 	}
 }
+
+// A Required connection that ends before sending anything ends its WriteTo
+// at EOF, which io.Copy and relays report as a nil error.
+func TestConnWriteToEmptyRequiredConnection(t *testing.T) {
+	l := newTestListener(t)
+	server, client := acceptOne(t, l, nil)
+	_ = client.Close()
+	var sink strings.Builder
+	if n, err := io.Copy(&sink, server); n != 0 || err != nil {
+		t.Fatalf("io.Copy() = %d, %v, want 0, nil", n, err)
+	}
+	if _, err := server.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() error = %v, want io.EOF", err)
+	}
+}
+
+// Copying a stream into a TCP connection allocates no copy buffer, also
+// where a TCP connection cannot splice and its ReadFrom would allocate one.
+func TestConnWriteToTCPPoolsBuffer(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector makes sync.Pool drop buffers")
+	}
+	l := newTestListener(t)
+	l.Policy = func(net.Addr) Policy { return Optional }
+	sinkLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sinkLn.Close() }()
+	go func() {
+		for {
+			c, err := sinkLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				_, _ = io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	payload := []byte("no header here")
+	copyOnce := func() {
+		server, client := acceptOne(t, l, payload)
+		_ = client.(*net.TCPConn).CloseWrite()
+		dst, err := net.Dial("tcp", sinkLn.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = dst.Close() }()
+		if n, err := server.(*Conn).WriteTo(dst); err != nil || n != int64(len(payload)) {
+			t.Fatalf("WriteTo() = %d, %v", n, err)
+		}
+		_ = server.Close()
+		_ = client.Close()
+	}
+	copyOnce() // fill the pool
+	const runs = 20
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		copyOnce()
+	}
+	runtime.ReadMemStats(&after)
+	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy > 16<<10 {
+		t.Fatalf("WriteTo allocated %d bytes per connection, want no copy buffer", perCopy)
+	}
+}

@@ -56,7 +56,7 @@ type FramedConn struct {
 	br       *bufio.Reader // set by WithReadBuffer
 	rerr     error
 	rpend    error  // error that cut a stream Read short, for the next Read
-	rpendAt  uint64 // rdeadlines when rpend was kept
+	rpendAt  uint64 // rdeadlines before the read that left rpend
 	werr     error
 	remain   int // payload bytes of the current frame not yet read
 	rhdrN    int // bytes of rhdr read so far
@@ -186,7 +186,7 @@ func (fc *FramedConn) ReadFrame() ([]byte, error) {
 	}
 	frame := make([]byte, n)
 	if m, err := io.ReadFull(fc.reader(), frame); err != nil {
-		if m == 0 && !errors.Is(err, io.EOF) {
+		if m == 0 && !streamEnded(err) {
 			// No payload byte was lost: the next call reads the frame.
 			fc.remain = n
 			return nil, err
@@ -204,7 +204,7 @@ func (fc *FramedConn) readHeaderLocked() (int, error) {
 	n, err := io.ReadFull(fc.reader(), fc.rhdr[fc.rhdrN:])
 	fc.rhdrN += n
 	if err != nil {
-		if fc.rhdrN > 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		if fc.rhdrN > 0 && streamEnded(err) {
 			return 0, fc.failReadLocked(err)
 		}
 		return 0, err
@@ -219,20 +219,30 @@ func (fc *FramedConn) readHeaderLocked() (int, error) {
 // retried; only the end of the stream inside the frame loses the frame
 // boundaries.
 func (fc *FramedConn) readPayloadLocked(p []byte) (int, error) {
+	// Taken before the read, so that a deadline set while it runs drops a
+	// timeout it returns.
+	deadlines := fc.rdeadlines.Load()
 	n, err := io.ReadFull(fc.reader(), p[:min(len(p), fc.remain)])
 	fc.remain -= n
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if streamEnded(err) {
 		err = fc.failReadLocked(io.EOF)
 	}
 	if n > 0 && err != nil {
 		// Return the bytes alone, as a connection does, so that callers
 		// that retry after a timeout do not lose them.
 		if fc.rerr == nil {
-			fc.rpend, fc.rpendAt = err, fc.rdeadlines.Load()
+			fc.rpend, fc.rpendAt = err, deadlines
 		}
 		err = nil
 	}
 	return n, err
+}
+
+// streamEnded reports whether err ends the stream, as io.EOF, or the
+// io.ErrUnexpectedEOF of io.ReadFull or of a TLS connection cut inside a
+// record.
+func streamEnded(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // takePendingLocked returns and clears the error left by a stream Read. A
@@ -259,7 +269,7 @@ func (fc *FramedConn) readDatagramLocked(p []byte) (int, error) {
 	}
 	k := min(len(p), n)
 	if m, err := io.ReadFull(fc.reader(), p[:k]); err != nil {
-		if m == 0 && !errors.Is(err, io.EOF) {
+		if m == 0 && !streamEnded(err) {
 			// No payload byte was lost: the next call reads the frame.
 			fc.remain = n
 			return 0, err
@@ -278,7 +288,7 @@ func (fc *FramedConn) readDatagramLocked(p []byte) (int, error) {
 			discarded, err = io.CopyN(io.Discard, fc.Conn, int64(rest))
 		}
 		if err != nil {
-			if k == 0 && discarded == 0 && !errors.Is(err, io.EOF) {
+			if k == 0 && discarded == 0 && !streamEnded(err) {
 				// No payload byte was lost: the next call reads the frame.
 				fc.remain = n
 				return 0, err

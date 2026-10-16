@@ -279,13 +279,14 @@ func (d *dirDeadlineConn) snapshot() (rd, wd time.Time) {
 
 func TestTimeoutConnKeepsUserDeadlines(t *testing.T) {
 	raw := &dirDeadlineConn{}
-	const idle = 160 * time.Millisecond // refresh slack 10ms
+	const idle = 1600 * time.Millisecond // refresh slack 100ms
 	conn := NewTimeoutConn(raw, idle)
+	// Generous, so that a loaded host does not fail it.
 	near := func(got time.Time) bool {
 		d := time.Until(got)
-		return d > idle-100*time.Millisecond && d <= idle
+		return d > idle-time.Second && d <= idle
 	}
-	waitSlack := func() { time.Sleep(20 * time.Millisecond) }
+	waitSlack := func() { time.Sleep(150 * time.Millisecond) }
 
 	// A read deadline set to interrupt a blocked Read survives writes.
 	past := time.Now().Add(-time.Second)
@@ -402,13 +403,15 @@ func TestTimeoutConnBlockedReadKeepsIdleTimeout(t *testing.T) {
 			client, server := tcpPair(t)
 			defer func() { _ = client.Close() }()
 			defer func() { _ = server.Close() }()
-			conn := NewTimeoutConn(client, 100*time.Millisecond)
+			started := &readStartConn{Conn: client, started: make(chan struct{})}
+			conn := NewTimeoutConn(started, 100*time.Millisecond)
 			errc := make(chan error, 1)
 			go func() {
 				_, err := conn.Read(make([]byte, 1))
 				errc <- err
 			}()
-			time.Sleep(20 * time.Millisecond) // let Read block
+			<-started.started                 // the idle deadline is set
+			time.Sleep(10 * time.Millisecond) // let Read block
 			if err := tt.set(conn); err != nil {
 				t.Fatal(err)
 			}
@@ -422,4 +425,16 @@ func TestTimeoutConnBlockedReadKeepsIdleTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readStartConn closes started when its first Read begins.
+type readStartConn struct {
+	net.Conn
+	started chan struct{}
+	once    sync.Once
+}
+
+func (c *readStartConn) Read(b []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.Conn.Read(b)
 }

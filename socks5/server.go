@@ -180,9 +180,10 @@ type Server struct {
 	// OnError, if set, receives the errors that end connections accepted by
 	// Serve, with the client connection, and those that drop UDP datagrams,
 	// with the association's control connection. It is called from serving
-	// goroutines and must be safe for concurrent use. The connections that
-	// Close ends are not reported. The package does not log; route errors to
-	// a logger such as log/slog here.
+	// goroutines and must be safe for concurrent use. Errors that come once
+	// Close is called, which ends the connections and associations, are not
+	// reported, whatever they are. The package does not log; route errors
+	// to a logger such as log/slog here.
 	OnError func(c net.Conn, err error)
 	// Tracked by pointer, as in net/http, since the dynamic types of a
 	// net.Listener or a net.Conn need not be comparable.
@@ -255,7 +256,7 @@ func (s *Server) Serve(l net.Listener) error {
 		}
 		delay = 0
 		go func() {
-			if err := s.ServeConn(c); err != nil && !s.endedByClose(err) {
+			if err := s.ServeConn(c); err != nil {
 				s.onError(c, err)
 			}
 		}()
@@ -576,14 +577,12 @@ func (s *Server) trackConn(c *net.Conn, add bool) bool {
 	return true
 }
 
-// endedByClose reports whether err ended a connection because Close closed
-// it, which is not reported.
-func (s *Server) endedByClose(err error) bool {
-	return s.isClosed() && (errors.Is(err, ErrServerClosed) || netx.IsClosed(err))
-}
-
+// onError passes err to OnError unless Close was called: Close ends the
+// connections and associations it serves and cancels the context of their
+// hooks and dials, so whatever error they then end with, such as a hook's
+// own error for its cancelled context, comes from Close.
 func (s *Server) onError(c net.Conn, err error) {
-	if s.OnError != nil {
+	if s.OnError != nil && !s.isClosed() {
 		s.OnError(c, err)
 	}
 }

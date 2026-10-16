@@ -58,3 +58,24 @@ func handshake(ctx context.Context, c net.Conn, fn func() (net.Conn, error)) (ne
 	}
 	return out, nil
 }
+
+// tlsDialer dials with forward and runs a TLS client handshake bounded by
+// ctx alone, as the rest of a proxy dial is.
+type tlsDialer struct {
+	config  *tls.Config
+	forward ContextDialer
+}
+
+func (d *tlsDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := forwardOf(d.forward).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return handshake(ctx, c, func() (net.Conn, error) {
+		tc := tls.Client(c, d.config)
+		if err := tc.HandshakeContext(ctx); err != nil {
+			return nil, err
+		}
+		return tc, nil
+	})
+}

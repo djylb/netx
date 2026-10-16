@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,7 +21,8 @@ type Policy uint8
 
 const (
 	// Required rejects connections that do not start with a header: their
-	// first read returns ErrNoHeader. It is the zero value.
+	// first read returns ErrNoHeader, or io.EOF for one that ends before
+	// sending anything. It is the zero value.
 	Required Policy = iota
 	// Optional uses a header when the connection starts with one and
 	// otherwise passes the stream through unchanged, including when it
@@ -474,6 +476,10 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 		return 0, err
 	}
 	if c.err != nil {
+		if errors.Is(c.err, io.EOF) {
+			// A connection that ended before sending anything.
+			return 0, nil
+		}
 		return 0, c.err
 	}
 	if c.datagram {
@@ -507,12 +513,15 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	switch w.(type) {
-	case io.ReaderFrom, *net.UnixConn:
-		// A *net.TCPConn splices into these: a *net.TCPConn with its
-		// ReadFrom, a *net.UnixConn, whose ReadFrom reads datagrams, with
-		// the WriteTo of the *net.TCPConn.
+	if splices(w, c.Conn) {
 		n, err := io.Copy(w, c.Conn)
+		return total + n, err
+	}
+	switch rf := w.(type) {
+	case *net.TCPConn, *net.UnixConn:
+		// Their ReadFrom would copy through a buffer it allocates.
+	case io.ReaderFrom:
+		n, err := rf.ReadFrom(c.Conn)
 		return total + n, err
 	}
 	// Without ReadFrom, io.Copy would allocate a buffer for every call.
@@ -520,6 +529,38 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 	defer streamPool.Put(bp)
 	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.Conn}, *bp)
 	return total + n, err
+}
+
+// spliceOS reports whether *net.TCPConn moves data with splice(2).
+const spliceOS = runtime.GOOS == "linux" || runtime.GOOS == "android"
+
+// splices reports whether io.Copy(dst, src) moves the data with splice: from
+// a TCP or Unix stream connection into a TCP connection, or from a TCP
+// connection into a Unix stream connection.
+func splices(dst io.Writer, src net.Conn) bool {
+	if !spliceOS {
+		return false
+	}
+	switch d := dst.(type) {
+	case *net.TCPConn:
+		switch s := src.(type) {
+		case *net.TCPConn:
+			return true
+		case *net.UnixConn:
+			return isStreamUnix(s)
+		}
+	case *net.UnixConn:
+		_, ok := src.(*net.TCPConn)
+		return ok && isStreamUnix(d)
+	}
+	return false
+}
+
+// isStreamUnix reports whether c is a "unix" stream socket, the only kind of
+// Unix connection that splice is used for.
+func isStreamUnix(c *net.UnixConn) bool {
+	addr := c.LocalAddr()
+	return addr != nil && addr.Network() == "unix"
 }
 
 // readerOnly hides every method but Read, so that io.CopyBuffer uses the

@@ -29,7 +29,6 @@ import (
 	"strings"
 
 	"github.com/djylb/netx/socks5"
-	"github.com/djylb/netx/tlsconn"
 )
 
 // ContextDialer dials connections. *net.Dialer implements it.
@@ -48,8 +47,8 @@ type ContextDialer interface {
 //     port is 1080, and user information becomes the SOCKS5 username and
 //     password or the SOCKS4 user ID.
 //   - socks5+tls, socks5h+tls, socks4+tls and socks4a+tls reach the SOCKS
-//     proxy over TLS, verified against the proxy's host name, through a
-//     tlsconn.Dialer as the socks5.Dialer's Forward.
+//     proxy over TLS, verified against the proxy's host name, through the
+//     socks5.Dialer's Forward.
 //
 // Schemes are case-insensitive. forward dials the proxy; nil means a zero
 // net.Dialer.
@@ -91,7 +90,7 @@ func FromURL(u *url.URL, forward ContextDialer) (ContextDialer, error) {
 			d.Resolver = net.DefaultResolver
 		}
 		if overTLS {
-			d.Forward = &tlsconn.Dialer{Config: &tls.Config{ServerName: host}, Forward: forward}
+			d.Forward = &tlsDialer{config: &tls.Config{ServerName: host}, forward: forward}
 		}
 		if u.User != nil {
 			d.Username = u.User.Username()

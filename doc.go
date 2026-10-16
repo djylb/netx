@@ -20,7 +20,7 @@
 //     platform errnos, including Winsock codes on Windows, before English
 //     error text.
 //
-// Helpers that take a timeout use DefaultTimeout for a non-positive value.
+// NewTimeoutConn uses DefaultTimeout for a non-positive idle timeout.
 //
 // Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
 // handshakes and handles certificates, proxyproto builds, parses and serves

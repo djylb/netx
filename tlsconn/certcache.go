@@ -35,7 +35,9 @@ type CertCache struct {
 	mu        sync.Mutex
 	entries   map[string]*list.Element
 	lru       list.List // of *certEntry, most recently used first
+	loaded    int       // entries with a certificate, which MaxEntries bounds
 	lastSweep time.Time
+	now       func() time.Time // time.Now when nil; set by tests
 }
 
 type certEntry struct {
@@ -70,6 +72,10 @@ func (c *CertCache) LoadFiles(certFile, keyFile string) (*tls.Certificate, error
 // LoadPEM returns the certificate in certPEM and keyPEM, as tls.X509KeyPair
 // parses them, from the cache when the same data was loaded before. The
 // returned certificate is shared and must not be modified.
+//
+// Entries are keyed by the data, so renewed or edited PEM data gets a new
+// entry while the old one, private key included, stays until MaxEntries or
+// IdleTimeout drops it: set one of them when the data changes over time.
 func (c *CertCache) LoadPEM(certPEM, keyPEM []byte) (*tls.Certificate, error) {
 	h := sha256.New()
 	var n [8]byte
@@ -96,10 +102,11 @@ func (c *CertCache) Clear() {
 	defer c.mu.Unlock()
 	c.entries = nil
 	c.lru.Init()
+	c.loaded = 0
 }
 
 func (c *CertCache) get(key string, files bool, load func() (*tls.Certificate, error)) (*tls.Certificate, error) {
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	c.sweepLocked(now)
 	if el, ok := c.entries[key]; ok {
@@ -161,7 +168,11 @@ func (c *CertCache) get(key string, files bool, load func() (*tls.Certificate, e
 		cert = nil
 	} else {
 		e.cert, e.loadedAt = cert, now
-		c.evictLocked()
+		// Unless Clear or the idle sweep dropped it while it loaded.
+		if el, ok := c.entries[key]; ok && el.Value == e {
+			c.loaded++
+			c.evictLocked()
+		}
 	}
 	close(e.ready)
 	c.mu.Unlock()
@@ -185,17 +196,10 @@ func (c *CertCache) evictLocked() {
 	if c.MaxEntries <= 0 {
 		return
 	}
-	loaded := 0
-	for el := c.lru.Front(); el != nil; el = el.Next() {
-		if el.Value.(*certEntry).cert != nil {
-			loaded++
-		}
-	}
-	for el := c.lru.Back(); el != nil && loaded > c.MaxEntries; {
+	for el := c.lru.Back(); el != nil && c.loaded > c.MaxEntries; {
 		prev := el.Prev()
 		if el.Value.(*certEntry).cert != nil {
 			c.removeLocked(el)
-			loaded--
 		}
 		el = prev
 	}
@@ -221,4 +225,14 @@ func (c *CertCache) sweepLocked(now time.Time) {
 func (c *CertCache) removeLocked(el *list.Element) {
 	e := c.lru.Remove(el).(*certEntry)
 	delete(c.entries, e.key)
+	if e.cert != nil {
+		c.loaded--
+	}
+}
+
+func (c *CertCache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
