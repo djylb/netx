@@ -100,6 +100,15 @@ func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+// WriteTo copies the wrapped connection to w, through its own WriteTo when it
+// has one, so a *net.TCPConn can still splice.
+func (c *AddrOverrideConn) WriteTo(w io.Writer) (int64, error) {
+	if c == nil || c.Conn == nil {
+		return 0, net.ErrClosed
+	}
+	return io.Copy(w, c.Conn)
+}
+
 func (c *AddrOverrideConn) innerReader() io.Reader {
 	if c == nil {
 		return nil

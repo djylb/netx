@@ -167,8 +167,19 @@ func (s *Server) sharedRelay() (*udpRelay, error) {
 	if s.shared == nil {
 		s.shared = s.newUDPRelay(s.PacketConn)
 	}
+	if s.shared.stopped() {
+		return nil, errUDPRelayStopped
+	}
 	return s.shared, nil
 }
+
+// errUDPRelayStopped refuses a UDP association whose socket has stopped,
+// such as a PacketConn closed by its owner.
+var errUDPRelayStopped = errors.New("socks5: UDP ASSOCIATE: the UDP socket is closed")
+
+// errUDPIdleBeforeStart ends an association whose idle timeout passed before
+// it was set up.
+var errUDPIdleBeforeStart = errors.New("socks5: UDP ASSOCIATE: idle timeout before the association started")
 
 // expects reports whether an association waits for datagrams from peer's IP.
 func (r *udpRelay) expects(peer net.Addr) bool {
@@ -182,6 +193,7 @@ func (r *udpRelay) acceptLoop() {
 	for {
 		c, err := r.l.Accept()
 		if err != nil {
+			r.stop()
 			return
 		}
 		if a := r.match(peerAddrPort(c.RemoteAddr())); a != nil {
@@ -196,7 +208,9 @@ func (r *udpRelay) acceptLoop() {
 // announced it, else the only one pending for its IP address that announced
 // no port, else the only one pending for its IP address, whose client may be
 // behind a NAT that changed the announced port, or the one that takes any
-// source.
+// source. An association whose client announced the control connection's own
+// address and a port takes that source alone: no NAT rewrote it, so another
+// port of the same IP address is someone else.
 func (r *udpRelay) match(src netip.AddrPort) *association {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -221,12 +235,37 @@ func (r *udpRelay) match(src netip.AddrPort) *association {
 		r.removeLocked(unannounced)
 		return unannounced
 	}
-	if len(list) == 1 {
+	if len(list) == 1 && !list[0].exact {
 		a := list[0]
 		r.removeLocked(a)
 		return a
 	}
 	return nil
+}
+
+// stop marks r closed once its socket has stopped, so that no association is
+// added to it, and ends the associations waiting for their first datagram,
+// which could never get one.
+func (r *udpRelay) stop() {
+	r.mu.Lock()
+	r.closed = true
+	var waiting []*association
+	for _, list := range r.pending {
+		waiting = append(waiting, list...)
+	}
+	if r.anyPeer != nil {
+		waiting = append(waiting, r.anyPeer)
+	}
+	r.mu.Unlock()
+	for _, a := range waiting {
+		a.close()
+	}
+}
+
+func (r *udpRelay) stopped() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
 }
 
 // add makes a pending, unless the relay is closed or a has already ended:
@@ -299,6 +338,7 @@ type association struct {
 	ownsRelay bool
 	out       PacketConn
 	announced netip.AddrPort // the client's announced source, if specific
+	exact     bool           // announced is the control connection's address: only it matches
 	key       netip.Addr     // the client IP address it is pending under, if known
 
 	mu      sync.Mutex
@@ -309,7 +349,7 @@ type association struct {
 }
 
 func (s *Server) associate(ctx context.Context, req *Request) error {
-	key, announced := clientSource(req)
+	key, announced, exact := clientSource(req)
 	if !key.IsValid() && s.PacketConn != nil {
 		_ = s.reply(req, ReplyGeneralFailure, Addr{})
 		return errNoClientIP
@@ -327,14 +367,22 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 		_ = s.reply(req, ReplyFor(err), Addr{})
 		return err
 	}
-	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, done: make(chan struct{})}
+	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, exact: exact, done: make(chan struct{})}
 	a.mu.Lock()
 	a.pending = time.AfterFunc(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
 	a.mu.Unlock()
 	if !relay.add(a) {
+		// The reason, before a.close closes a relay of its own.
+		err := errUDPIdleBeforeStart
+		switch {
+		case ctx.Err() != nil:
+			err = ErrServerClosed
+		case relay.stopped():
+			err = errUDPRelayStopped
+		}
 		a.close()
 		_ = s.reply(req, ReplyGeneralFailure, Addr{})
-		return ErrServerClosed
+		return err
 	}
 	defer a.close()
 
@@ -367,9 +415,10 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 var errNoClientIP = errors.New("socks5: UDP ASSOCIATE: client IP address neither known from the control connection nor announced")
 
 // clientSource returns the IP address that may send an association's
-// datagrams, invalid when unknown, and the exact source the client announced,
-// if specific.
-func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort) {
+// datagrams, invalid when unknown, the exact source the client announced, if
+// specific, and whether that source is the only one to accept: the client
+// announced the control connection's own IP address.
+func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort, exact bool) {
 	client := peerAddrPort(req.Conn.RemoteAddr()).Addr()
 	ip := req.Dst.IP.Unmap().WithZone("")
 	switch {
@@ -381,19 +430,20 @@ func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort) {
 		// RFC 1928 says, or a name when they do not know their address.
 		if req.Dst.Port != 0 {
 			announced = netip.AddrPortFrom(client, req.Dst.Port)
+			exact = ip == client
 		}
-		return client, announced
+		return client, announced, exact
 	case ip.IsValid() && !ip.IsUnspecified():
 		// A control connection without an IP address, such as a tunneled
 		// stream, can only rely on the announcement.
 		if req.Dst.Port != 0 {
 			announced = netip.AddrPortFrom(ip, req.Dst.Port)
 		}
-		return ip, announced
+		return ip, announced, false
 	}
 	// Neither is known: only a socket of the association's own can take the
 	// first source that sends.
-	return netip.Addr{}, netip.AddrPort{}
+	return netip.Addr{}, netip.AddrPort{}, false
 }
 
 // relayFor returns the relay serving req: the shared one, or a new one that
@@ -414,7 +464,7 @@ func (s *Server) dialPacket(ctx context.Context, req *Request) (PacketConn, erro
 	if s.DialPacket != nil {
 		return s.DialPacket(ctx, req)
 	}
-	c, err := net.ListenUDP("udp", nil)
+	c, err := netx.ListenEphemeralUDP()
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"testing"
@@ -473,12 +474,15 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 			}
 		}
 		copyFrom(srcs[runs]) // warm up the pool
+		// A collection empties the pool, and a busy host collects more often.
+		gc := debug.SetGCPercent(-1)
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		for _, src := range srcs[:runs] {
 			copyFrom(src)
 		}
 		runtime.ReadMemStats(&after)
+		debug.SetGCPercent(gc)
 		// The race detector drops a quarter of the pool's Puts, so allow some.
 		if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
 			t.Fatalf("%s: relayCopy() allocates %d bytes per copy, want the pooled buffer reused", tt.name, perCopy)

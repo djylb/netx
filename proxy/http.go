@@ -30,8 +30,8 @@ type HTTPDialer struct {
 	Forward ContextDialer
 }
 
-// Dial is DialContext with a background context, matching the Dialer
-// interface of golang.org/x/net/proxy.
+// Dial is DialContext with a background context, for code that expects a
+// dialer without a context.
 func (d *HTTPDialer) Dial(network, address string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, address)
 }
@@ -73,7 +73,13 @@ func (d *HTTPDialer) DialContext(ctx context.Context, network, address string) (
 func (d *HTTPDialer) request(address string) ([]byte, error) {
 	b := make([]byte, 0, 128)
 	b = append(b, "CONNECT "+address+" HTTP/1.1\r\n"...)
-	if _, ok := d.Header["Host"]; !ok {
+	// Header names are case-insensitive, and a Host key without values
+	// sends none.
+	hasHost := false
+	for key, values := range d.Header {
+		hasHost = hasHost || strings.EqualFold(key, "Host") && len(values) > 0
+	}
+	if !hasHost {
 		b = append(b, "Host: "+address+"\r\n"...)
 	}
 	for key, values := range d.Header {

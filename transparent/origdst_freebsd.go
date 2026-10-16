@@ -72,8 +72,9 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
 	}
-	if raw := netx.RawConnOf(conn); raw != nil {
-		conn = raw
+	// A nil pointer, such as a nil *net.TCPConn, unwraps to nil.
+	if conn = netx.RawConnOf(conn); conn == nil {
+		return nil, net.ErrClosed
 	}
 	dst, err := redirectedDestinationFromPF(conn)
 	if err == nil {
@@ -83,13 +84,13 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if localErr == nil {
 		return localDst, nil
 	}
-	return nil, fmt.Errorf("failed to get transparent address: pf=%v local=%v", err, localErr)
+	return nil, fmt.Errorf("failed to get transparent address: pf=%w local=%w", err, localErr)
 }
 
 func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 	f, err := os.Open("/dev/pf")
 	if err != nil {
-		return nil, fmt.Errorf("failed to open /dev/pf: %v", err)
+		return nil, fmt.Errorf("failed to open /dev/pf: %w", err)
 	}
 	defer f.Close()
 
@@ -149,7 +150,7 @@ func redirectedDestinationFromPF(conn net.Conn) (*net.TCPAddr, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("ioctl failed: %v", err)
+		return nil, fmt.Errorf("ioctl failed: %w", err)
 	}
 
 	return natlookAddr(nl.Af, &nl.Rdaddr, nl.redirectPort())

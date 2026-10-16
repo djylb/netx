@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,8 +18,34 @@ func tcp(ip string, port int) *net.TCPAddr { return &net.TCPAddr{IP: net.ParseIP
 
 func udp(ip string, port int) *net.UDPAddr { return &net.UDPAddr{IP: net.ParseIP(ip), Port: port} }
 
+// field is one decoded TLV, for comparisons.
+type field struct {
+	t TLVType
+	v string
+}
+
+func mkTLVs(t *testing.T, fs ...field) TLVs {
+	t.Helper()
+	var f TLVs
+	for _, x := range fs {
+		var err error
+		if f, err = f.Append(x.t, []byte(x.v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f
+}
+
+func fieldsOf(f TLVs) []field {
+	var fs []field
+	for t, v := range f.All() {
+		fs = append(fs, field{t, string(v)})
+	}
+	return fs
+}
+
 func TestHeaderRoundTrip(t *testing.T) {
-	tlvs := []TLV{{Type: TLVAuthority, Value: []byte("example.com")}, {Type: TLVUniqueID, Value: []byte{1, 2, 3}}, {Type: TLVNoop}}
+	tlvs := mkTLVs(t, field{TLVAuthority, "example.com"}, field{TLVUniqueID, "\x01\x02\x03"}, field{TLVNoop, ""})
 	tests := []struct {
 		name     string
 		h        Header
@@ -31,7 +58,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 		{"v2 tcp6", Header{Version: V2, Source: tcp("2001:db8::1", 1), Destination: tcp("2001:db8::2", 2)}, "[2001:db8::1]:1", "[2001:db8::2]:2"},
 		{"v2 udp", Header{Version: V2, Source: udp("192.0.2.1", 53), Destination: udp("198.51.100.1", 5353)}, "192.0.2.1:53", "198.51.100.1:5353"},
 		{"v2 unix", Header{Version: V2, Source: &net.UnixAddr{Name: "/run/client.sock", Net: "unix"}, Destination: &net.UnixAddr{Name: "/run/server.sock", Net: "unix"}}, "/run/client.sock", "/run/server.sock"},
-		{"v2 local", Header{Version: V2, Local: true, TLVs: tlvs[:1]}, "", ""},
+		{"v2 local", Header{Version: V2, Local: true, TLVs: mkTLVs(t, field{TLVAuthority, "example.com"})}, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,19 +80,13 @@ func TestHeaderRoundTrip(t *testing.T) {
 			if addrString(got.Source) != tt.src || addrString(got.Destination) != tt.dst {
 				t.Fatalf("Parse() addresses = %v -> %v, want %s -> %s", got.Source, got.Destination, tt.src, tt.dst)
 			}
-			// NOOP padding is dropped.
-			var want []TLV
-			for _, tlv := range tt.h.TLVs {
-				if tlv.Type != TLVNoop {
-					want = append(want, tlv)
-				}
+			// NOOP padding is dropped, from the parsed bytes too.
+			if got, want := fieldsOf(got.TLVs), fieldsOf(tt.h.TLVs); !slices.Equal(got, want) {
+				t.Fatalf("Parse() TLVs = %v, want %v", got, want)
 			}
-			if len(got.TLVs) != len(want) {
-				t.Fatalf("Parse() TLVs = %v, want %v", got.TLVs, want)
-			}
-			for i, tlv := range got.TLVs {
-				if tlv.Type != want[i].Type || !bytes.Equal(tlv.Value, want[i].Value) {
-					t.Fatalf("TLV %d = %v, want %v", i, tlv, want[i])
+			for typ := range got.TLVs.All() {
+				if typ == TLVNoop {
+					t.Fatal("Parse() kept NOOP padding")
 				}
 			}
 		})
@@ -80,7 +101,7 @@ func addrString(a net.Addr) string {
 }
 
 func TestHeaderTLVAndErrors(t *testing.T) {
-	h := &Header{TLVs: []TLV{{Type: TLVALPN, Value: []byte("h2")}, {Type: TLVALPN, Value: []byte("http/1.1")}}}
+	h := &Header{TLVs: mkTLVs(t, field{TLVALPN, "h2"}, field{TLVALPN, "http/1.1"})}
 	if v, ok := h.TLV(TLVALPN); !ok || string(v) != "h2" {
 		t.Fatalf("TLV(ALPN) = %q, %v", v, ok)
 	}
@@ -90,10 +111,13 @@ func TestHeaderTLVAndErrors(t *testing.T) {
 	if _, err := (&Header{Version: V1, TLVs: h.TLVs}).AppendBinary(nil); err == nil {
 		t.Fatal("version 1 with TLVs encoded")
 	}
-	if _, err := (&Header{Version: V2, TLVs: []TLV{{Value: make([]byte, 0x10000)}}}).AppendBinary(nil); err == nil {
-		t.Fatal("oversized TLV encoded")
+	if f, err := TLVs(nil).Append(TLVUniqueID, make([]byte, 0x10000)); err == nil || len(f) != 0 {
+		t.Fatalf("Append() of an oversized value = %d bytes, %v; want an error", len(f), err)
 	}
-	big := []TLV{{Value: make([]byte, 0xfff0)}, {Value: make([]byte, 0xfff0)}}
+	if _, err := (&Header{Version: V2, TLVs: TLVs{byte(TLVALPN), 0, 5, 'h'}}).AppendBinary(nil); err == nil {
+		t.Fatal("TLVs cut short encoded")
+	}
+	big := mkTLVs(t, field{TLVUniqueID, string(make([]byte, 0xfff0))}, field{TLVUniqueID, string(make([]byte, 0xfff0))})
 	if got, err := (&Header{Version: V2, TLVs: big}).AppendBinary([]byte("x")); err == nil || string(got) != "x" {
 		t.Fatalf("oversized header = %d bytes, %v; want an error and b unchanged", len(got), err)
 	}
@@ -162,7 +186,7 @@ func TestParseLenient(t *testing.T) {
 		{"v1 lf only", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
 		{"v1 spacing case padding", []byte("PROXY  tcp4   1.1.1.1  2.2.2.2  01  00002 \r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
 		{"v1 family", []byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"), "[::1]:1", "2.2.2.2:2", false, false, 0},
-		{"v1 zone", []byte("PROXY TCP6 fe80::1%eth0 ::1 1 2\r\n"), "[fe80::1%eth0]:1", "[::1]:2", false, false, 0},
+		{"v1 zone", []byte("PROXY TCP6 fe80::1%eth0 ::1 1 2\r\n"), "[fe80::1]:1", "[::1]:2", false, false, 0},
 		{"v1 udp4", []byte("PROXY UDP4 1.1.1.1 2.2.2.2 1 2\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, true, 0},
 		{"v1 udp6", []byte("PROXY UDP6 ::1 ::2 1 2\r\n"), "[::1]:1", "[::2]:2", false, true, 0},
 		{"v1 extra fields", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2 x y\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
@@ -184,9 +208,9 @@ func TestParseLenient(t *testing.T) {
 			t.Errorf("%s: Parse() = %d, %v; want %d bytes", tt.name, n, err, len(tt.in))
 			continue
 		}
-		if h.Local != tt.local || addrString(h.Source) != tt.src || addrString(h.Destination) != tt.dst || len(h.TLVs) != tt.tlvs {
+		if h.Local != tt.local || addrString(h.Source) != tt.src || addrString(h.Destination) != tt.dst || len(fieldsOf(h.TLVs)) != tt.tlvs {
 			t.Errorf("%s: Parse() = local %v, %v -> %v, %d TLVs; want local %v, %s -> %s, %d TLVs",
-				tt.name, h.Local, h.Source, h.Destination, len(h.TLVs), tt.local, tt.src, tt.dst, tt.tlvs)
+				tt.name, h.Local, h.Source, h.Destination, len(fieldsOf(h.TLVs)), tt.local, tt.src, tt.dst, tt.tlvs)
 		}
 		if _, isUDP := h.Source.(*net.UDPAddr); tt.src != "" && isUDP != tt.udp {
 			t.Errorf("%s: Source is %T", tt.name, h.Source)
@@ -236,10 +260,10 @@ func TestRead(t *testing.T) {
 	}
 
 	// A version 2 header larger than the reader's buffer.
-	big := &Header{Version: V2, Source: tcp("192.0.2.1", 1), Destination: tcp("192.0.2.2", 2), TLVs: []TLV{{Type: TLVUniqueID, Value: bytes.Repeat([]byte("u"), 1000)}}}
+	big := &Header{Version: V2, Source: tcp("192.0.2.1", 1), Destination: tcp("192.0.2.2", 2), TLVs: mkTLVs(t, field{TLVUniqueID, strings.Repeat("u", 1000)})}
 	wire, _ := big.AppendBinary(nil)
 	r = bufio.NewReaderSize(bytes.NewReader(append(wire, "x"...)), 64)
-	if h, err := Read(r); err != nil || len(h.TLVs) != 1 || len(h.TLVs[0].Value) != 1000 {
+	if h, err := Read(r); err != nil || len(fieldsOf(h.TLVs)) != 1 || len(fieldsOf(h.TLVs)[0].v) != 1000 {
 		t.Fatalf("Read(big) = %v, %v", h, err)
 	}
 	if rest, _ := io.ReadAll(r); string(rest) != "x" {
@@ -269,7 +293,9 @@ func tlvHeader(size int, fill func(payload []byte)) []byte {
 	return b
 }
 
-func TestParseTLVsBounded(t *testing.T) {
+// TestParseTLVsWithoutAmplification parses headers full of TLVs: every field
+// is kept, and the parsed header takes no more memory than the header did.
+func TestParseTLVsWithoutAmplification(t *testing.T) {
 	const size = 65535 / 3 * 3
 	emptyTLVs := func(typ TLVType) func([]byte) {
 		return func(p []byte) {
@@ -285,7 +311,7 @@ func TestParseTLVsBounded(t *testing.T) {
 		value []byte
 	}{
 		{"noop padding", tlvHeader(size, emptyTLVs(TLVNoop)), 0, nil},
-		{"empty tlvs", tlvHeader(size, emptyTLVs(TLVUniqueID)), maxTLVs, []byte{}},
+		{"empty tlvs", tlvHeader(size, emptyTLVs(TLVUniqueID)), size / 3, []byte{}},
 		{"padding then tlv", tlvHeader(size, func(p []byte) {
 			emptyTLVs(TLVNoop)(p)
 			copy(p[len(p)-6:], []byte{byte(TLVALPN), 0, 3, 'h', '2', 'c'})
@@ -301,15 +327,16 @@ func TestParseTLVsBounded(t *testing.T) {
 			if err != nil || n != len(tt.b) {
 				t.Fatalf("Parse() = %d, %v", n, err)
 			}
-			if len(h.TLVs) != tt.tlvs || cap(h.TLVs) != tt.tlvs {
-				t.Fatalf("Parse() kept %d TLVs (cap %d), want %d", len(h.TLVs), cap(h.TLVs), tt.tlvs)
+			fs := fieldsOf(h.TLVs)
+			if len(fs) != tt.tlvs || cap(h.TLVs) != len(h.TLVs) {
+				t.Fatalf("Parse() kept %d TLVs in %d bytes (cap %d), want %d", len(fs), len(h.TLVs), cap(h.TLVs), tt.tlvs)
 			}
-			if tt.tlvs > 0 && !bytes.Equal(h.TLVs[0].Value, tt.value) {
-				t.Fatalf("TLV value = %q, want %q", h.TLVs[0].Value, tt.value)
+			if tt.tlvs > 0 && fs[0].v != string(tt.value) {
+				t.Fatalf("TLV value = %q, want %q", fs[0].v, tt.value)
 			}
-			// The parsed header retains little beyond its TLV values.
+			// The parsed header retains no more than the TLV bytes it keeps.
 			allocs := allocatedBytes(func() { _, _, _ = Parse(tt.b) })
-			if limit := uint64(len(tt.value) + 4096); allocs > limit {
+			if limit := uint64(len(h.TLVs) + 4096); allocs > limit {
 				t.Fatalf("Parse() of %d bytes allocates %d bytes, want at most %d", len(tt.b), allocs, limit)
 			}
 		})
@@ -397,5 +424,37 @@ func BenchmarkReadV1(b *testing.B) {
 		if _, err := Read(br); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// A zone in a version 1 address, which names an interface of the sender, is
+// dropped, so that its bytes do not reach the address's String.
+func TestParseV1DropsZone(t *testing.T) {
+	h, _, err := Parse([]byte("PROXY TCP6 fe80::1%\x1b[31m ::1 1 2\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Source.String(); got != "[fe80::1]:1" {
+		t.Fatalf("Source = %q, want the address without its zone", got)
+	}
+}
+
+// A Linux abstract socket name, which Go spells "@name", travels as a
+// sun_path that starts with a NUL.
+func TestHeaderAbstractUnixAddr(t *testing.T) {
+	h := Header{Version: V2, Source: &net.UnixAddr{Name: "@client", Net: "unix"}, Destination: &net.UnixAddr{Name: "/run/server.sock", Net: "unix"}}
+	wire, err := h.AppendBinary(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire[v2HeadLen] != 0 {
+		t.Fatalf("abstract name encoded starting with %q, want a NUL", wire[v2HeadLen])
+	}
+	got, _, err := Parse(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addrString(got.Source) != "@client" || addrString(got.Destination) != "/run/server.sock" {
+		t.Fatalf("Parse() = %v -> %v", got.Source, got.Destination)
 	}
 }

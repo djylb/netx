@@ -137,11 +137,19 @@ func socks4aMarker(v4 [4]byte) bool {
 
 // readNULString reads a NUL-terminated string of at most limit bytes before
 // the terminator. It reads one byte at a time so that nothing after the
-// terminator is consumed.
+// terminator is consumed, through ReadByte when r has it, such as a
+// *bufio.Reader that a server reads the connection with.
 func readNULString(r io.Reader, limit int) (string, error) {
 	buf := make([]byte, limit+1)
+	br, _ := r.(io.ByteReader)
 	for i := range buf {
-		if _, err := io.ReadFull(r, buf[i:i+1]); err != nil {
+		var err error
+		if br != nil {
+			buf[i], err = br.ReadByte()
+		} else {
+			_, err = io.ReadFull(r, buf[i:i+1])
+		}
+		if err != nil {
 			return "", unexpectedEOF(err)
 		}
 		if buf[i] == 0 {

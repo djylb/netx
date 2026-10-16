@@ -19,7 +19,7 @@ type ContextDialer interface {
 type Dialer struct {
 	// Config is the TLS configuration; nil means the zero configuration.
 	// Without a ServerName, the host of the dialed address is used, as
-	// tls.Dialer does.
+	// tls.Dialer does, or the whole address when it has no port.
 	Config *tls.Config
 	// Timeout bounds the handshake as in Client; DefaultTimeout if not
 	// positive.
@@ -40,7 +40,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if cfg == nil || cfg.ServerName == "" {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
-			return nil, err
+			host = address // no port, as for a Forward dialer of Unix sockets
 		}
 		if cfg == nil {
 			cfg = &tls.Config{}

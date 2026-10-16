@@ -883,11 +883,25 @@ func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 		t.Fatalf("ReadFrame() = %q, %v, want %q", frame, err, "ok")
 	}
 
-	// A stream Read returns what has arrived and keeps its place in the frame.
-	go func() { _, _ = server.Write([]byte{0, 10, 'x', 'y', 'z'}) }()
+	// A stream Read returns what has arrived and keeps its place in the
+	// frame. The deadline ends the Read once its bytes have all arrived, as
+	// a net.Pipe Write returns only when the reader has taken them.
 	buf := make([]byte, 64)
-	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if n, err := fc.Read(buf); err != nil || string(buf[:n]) != "xyz" {
+	interrupted := func(write []byte, read func() (int, error)) (int, error) {
+		t.Helper()
+		type result struct {
+			n   int
+			err error
+		}
+		wrote, done := make(chan struct{}), make(chan result, 1)
+		go func() { _, _ = server.Write(write); close(wrote) }()
+		go func() { n, err := read(); done <- result{n, err} }()
+		<-wrote
+		_ = fc.SetReadDeadline(time.Now())
+		r := <-done
+		return r.n, r.err
+	}
+	if n, err := interrupted([]byte{0, 10, 'x', 'y', 'z'}, func() (int, error) { return fc.Read(buf) }); err != nil || string(buf[:n]) != "xyz" {
 		t.Fatalf("Read() = %q, %v, want %q", buf[:n], err, "xyz")
 	}
 	if _, err := fc.Read(buf); !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
@@ -908,9 +922,10 @@ func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 	}
 
 	// A ReadFrame interrupted inside a payload loses the frame boundaries.
-	go func() { _, _ = server.Write([]byte{0, 5, 'a'}) }()
-	_ = fc.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	_, err := fc.ReadFrame()
+	_, err := interrupted([]byte{0, 5, 'a'}, func() (int, error) {
+		frame, err := fc.ReadFrame()
+		return len(frame), err
+	})
 	assertFrameDesync(t, err)
 	_ = fc.SetReadDeadline(time.Time{})
 	if _, err := fc.Read(buf); !errors.Is(err, ErrFrameDesync) {

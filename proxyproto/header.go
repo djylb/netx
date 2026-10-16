@@ -4,8 +4,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"net"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -66,10 +68,65 @@ func (t TLVType) String() string {
 	}
 }
 
-// TLV is a version 2 type-length-value field.
-type TLV struct {
-	Type  TLVType
-	Value []byte
+// TLVs holds version 2 type-length-value fields in their wire encoding: a
+// type byte, a 2-byte big-endian length and the value, for each in header
+// order. Build them with Append; a parsed header keeps a copy of its fields
+// without NOOP padding and ends them at the first truncated one, so it takes
+// no more memory than the header did however many fields it has.
+type TLVs []byte
+
+// Append appends a field of type t and value v. It fails for a value longer
+// than 65535 bytes, leaving the fields unchanged.
+func (f TLVs) Append(t TLVType, v []byte) (TLVs, error) {
+	if len(v) > 0xffff {
+		return f, fmt.Errorf("proxyproto: TLV 0x%02x value of %d bytes", t, len(v))
+	}
+	out := append(f, byte(t))
+	out = binary.BigEndian.AppendUint16(out, uint16(len(v)))
+	return append(out, v...), nil
+}
+
+// All returns the fields in order, without NOOP padding, until the first
+// truncated one. The values share f's memory.
+func (f TLVs) All() iter.Seq2[TLVType, []byte] {
+	return func(yield func(TLVType, []byte) bool) {
+		for rest := f; len(rest) >= 3; {
+			n := int(binary.BigEndian.Uint16(rest[1:3]))
+			if len(rest) < 3+n {
+				return
+			}
+			t, v := TLVType(rest[0]), rest[3:3+n:3+n]
+			rest = rest[3+n:]
+			if t != TLVNoop && !yield(t, v) {
+				return
+			}
+		}
+	}
+}
+
+// Get returns the value of the first field of type t.
+func (f TLVs) Get(t TLVType) ([]byte, bool) {
+	for typ, v := range f.All() {
+		if typ == t {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// wellFormed reports whether f is a sequence of whole fields.
+func (f TLVs) wellFormed() bool {
+	for rest := f; len(rest) > 0; {
+		if len(rest) < 3 {
+			return false
+		}
+		n := 3 + int(binary.BigEndian.Uint16(rest[1:3]))
+		if len(rest) < n {
+			return false
+		}
+		rest = rest[n:]
+	}
+	return true
 }
 
 // Header is a PROXY protocol header.
@@ -87,19 +144,13 @@ type Header struct {
 	// which case the connection's own addresses apply.
 	Source      net.Addr
 	Destination net.Addr
-	// TLVs holds the version 2 type-length-value fields in header order.
-	// Parsing omits NOOP padding and fields past the 64th.
-	TLVs []TLV
+	// TLVs holds the version 2 type-length-value fields.
+	TLVs TLVs
 }
 
 // TLV returns the value of the first field of type t.
 func (h *Header) TLV(t TLVType) ([]byte, bool) {
-	for _, tlv := range h.TLVs {
-		if tlv.Type == t {
-			return tlv.Value, true
-		}
-	}
-	return nil, false
+	return h.TLVs.Get(t)
 }
 
 // UDPAddrs returns Source and Destination with *net.TCPAddr converted to
@@ -123,8 +174,9 @@ func udpAddr(a net.Addr) net.Addr {
 // for version 2, both *net.UnixAddr; other pairs and Local are encoded as
 // "PROXY UNKNOWN" (version 1) or a LOCAL command (version 2). Version 1 cannot
 // carry UDP or TLVs: UDP pairs use the TCP4 and TCP6 tokens, and TLVs are an
-// error. Version 2 also fails when a TLV value or the header exceeds 65535
-// bytes. The address rules otherwise match V1Header and V2Header.
+// error. Version 2 also fails when TLVs is not a sequence of whole fields or
+// the address and TLV block exceeds 65535 bytes. The address rules otherwise
+// match V1Header and V2Header.
 func (h *Header) AppendBinary(b []byte) ([]byte, error) {
 	switch h.Version {
 	case V1:
@@ -180,14 +232,10 @@ func appendV2(b []byte, h *Header) ([]byte, error) {
 			b = appendUnixPath(b, dst.Name)
 		}
 	}
-	for _, tlv := range h.TLVs {
-		if len(tlv.Value) > 0xffff {
-			return b[:start], fmt.Errorf("proxyproto: TLV 0x%02x value of %d bytes", tlv.Type, len(tlv.Value))
-		}
-		b = append(b, byte(tlv.Type))
-		b = binary.BigEndian.AppendUint16(b, uint16(len(tlv.Value)))
-		b = append(b, tlv.Value...)
+	if !h.TLVs.wellFormed() {
+		return b[:start], fmt.Errorf("proxyproto: TLVs cut short")
 	}
+	b = append(b, h.TLVs...)
 	n := len(b) - start - v2HeadLen
 	if n > 0xffff {
 		return b[:start], fmt.Errorf("proxyproto: header of %d bytes", v2HeadLen+n)
@@ -212,8 +260,15 @@ func unixPair(src, dst net.Addr) (*net.UnixAddr, *net.UnixAddr, bool) {
 	return s, d, true
 }
 
+// appendUnixPath appends name as a sun_path field, with a Linux abstract
+// name, which Go spells "@name", starting with a NUL. A lone "@" has no name
+// to tell it from an empty field, so it is sent as the path "@".
 func appendUnixPath(b []byte, name string) []byte {
+	start := len(b)
 	b = append(b, name...)
+	if len(name) > 1 && strings.HasPrefix(name, "@") {
+		b[start] = 0
+	}
 	var zero [unixPathLen]byte
 	return append(b, zero[len(name):]...)
 }

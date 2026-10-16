@@ -12,8 +12,9 @@
 //   - Relay copies between two connections in both directions, optionally
 //     passing half-closes on.
 //   - Listeners: ChanListener accepts connections that the program delivers or
-//     dials in memory, NewSingleConnListener serves one connection, and
-//     PacketListener splits a UDP socket into one connection per peer.
+//     dials in memory, NewSingleConnListener serves one connection,
+//     PacketListener splits a UDP socket into one connection per peer, and
+//     ListenEphemeralUDP opens a UDP socket on a free port.
 //   - Error classification: IsTimeout, IsClosed, IsConnReset, IsConnRefused
 //     and the other Is* helpers, NetErrorKind and DescribeNetError. They match
 //     platform errnos, including Winsock codes on Windows, before English
@@ -22,13 +23,13 @@
 // Helpers that take a timeout use DefaultTimeout for a non-positive value.
 //
 // Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
-// handshakes and handles certificates, proxyproto builds, parses and serves PROXY protocol headers,
-// transparent accepts transparently redirected TCP connections and UDP
+// handshakes and handles certificates, proxyproto builds, parses and serves
+// PROXY protocol headers, transparent accepts transparently redirected TCP connections and UDP
 // datagrams, socks5 implements SOCKS5 and SOCKS4 with a client dialer and a
 // configurable server, and proxy dials through HTTP CONNECT, SOCKS5 and SOCKS4
 // proxies, also over TLS.
 //
 // Every package depends only on the standard library, and only tlsconn and
-// proxy import crypto/tls, which adds about 800 KB to a binary even when it is
-// not used.
+// proxy import crypto/tls, which adds a large amount of code to a binary even
+// when it is not used.
 package netx

@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,18 +98,27 @@ func TestServerNoAuthAuthenticatorDecides(t *testing.T) {
 // TestServerUDPIgnoresForeignAnnouncement checks that a client cannot claim
 // the datagrams of another IP address by announcing it.
 func TestServerUDPIgnoresForeignAnnouncement(t *testing.T) {
+	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
+		t.Skip("the simulated network does not keep the client addresses this test routes by")
+	}
 	victimUDP, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
 	if err != nil {
 		t.Skip("no IPv6 loopback:", err)
 	}
 	defer func() { _ = victimUDP.Close() }()
-	pc, err := net.ListenPacket("udp", ":0")
+	pc, err := net.ListenPacket("udp6", "[::1]:0") // the victim sends from ::1
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", ":0")
+	// A listener per family rather than one dual-stack one, whose port
+	// another socket may hold on 127.0.0.1 on some systems.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	ln6, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skip("no IPv6 loopback:", err)
 	}
 	handlers := make(chan string, 1)
 	s := &socks5.Server{
@@ -120,20 +129,15 @@ func TestServerUDPIgnoresForeignAnnouncement(t *testing.T) {
 		},
 	}
 	go func() { _ = s.Serve(ln) }()
+	go func() { _ = s.Serve(ln6) }()
 	t.Cleanup(func() { _ = s.Close() })
-	port := ln.Addr().(*net.TCPAddr).Port
-	probe, err := net.Dial("tcp", net.JoinHostPort("::1", strconv.Itoa(port)))
-	if err != nil {
-		t.Skip("listener is not dual-stack:", err)
-	}
-	_ = probe.Close()
 
-	victim, _ := associate(t, net.JoinHostPort("::1", strconv.Itoa(port)), socks5.Addr{})
-	attacker, _ := associate(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), socks5.AddrFromNetAddr(victimUDP.LocalAddr()))
+	victim, _ := associate(t, ln6.Addr().String(), socks5.Addr{})
+	attacker, _ := associate(t, ln.Addr().String(), socks5.AddrFromNetAddr(victimUDP.LocalAddr()))
 	defer func() { _ = attacker.Close() }()
 
 	packet, _ := socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 9}, []byte("victim"))
-	relay := &net.UDPAddr{IP: net.IPv6loopback, Port: pc.LocalAddr().(*net.UDPAddr).Port}
+	relay := pc.LocalAddr().(*net.UDPAddr)
 	if _, err := victimUDP.WriteToUDP(packet, relay); err != nil {
 		t.Fatal(err)
 	}
@@ -171,10 +175,7 @@ func TestServerCloseEndsOutlivingAssociation(t *testing.T) {
 	_ = ctl.Close()
 	_ = s.Close()
 	<-done
-	time.Sleep(50 * time.Millisecond)
-	if got, _ := exchange(t, client, relay, echo, "after"); got != "" {
-		t.Fatalf("reply %q after Close", got)
-	}
+	eventuallyNoReply(t, client, relay, echo, "after")
 }
 
 // noAddrConn has no remote address, like some multiplexed streams.

@@ -157,6 +157,9 @@ func parseV1Addr(ip, port string) (netip.AddrPort, bool) {
 	if err != nil {
 		return netip.AddrPort{}, false
 	}
+	// A zone names an interface of the sender, which means nothing here, and
+	// would carry its bytes unchecked into the address's String.
+	addr = addr.WithZone("")
 	p, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
 		return netip.AddrPort{}, false
@@ -167,8 +170,8 @@ func parseV1Addr(ip, port string) (netip.AddrPort, bool) {
 // parseV2 ignores the version nibble and, so that the connection's own
 // addresses apply, treats commands other than PROXY as LOCAL and leaves the
 // addresses unset for unknown families and transports and for an address
-// block too short for its family. TLVs end at the first truncated one; NOOP
-// padding is dropped and TLVs past maxTLVs are ignored.
+// block too short for its family. TLVs end at the first truncated one, and
+// NOOP padding is dropped.
 func parseV2(b []byte) (*Header, int, int, error) {
 	if len(b) < v2HeadLen {
 		return nil, 0, v2HeadLen, io.ErrUnexpectedEOF
@@ -194,42 +197,21 @@ func parseV2(b []byte) (*Header, int, int, error) {
 	return h, n, 0, nil
 }
 
-// maxTLVs is the number of version 2 TLVs a parsed header keeps; later ones
-// are ignored, so that a header of many tiny TLVs cannot make the parsed
-// Header much larger than the bytes it came from.
-const maxTLVs = 64
-
-// parseTLVs returns the TLVs in b, up to maxTLVs and without NOOP padding,
-// with their values copied into one allocation. They end at the first
-// truncated one.
-func parseTLVs(b []byte) []TLV {
-	count, size := 0, 0
-	for rest := b; len(rest) >= 3 && count < maxTLVs; {
-		n := int(binary.BigEndian.Uint16(rest[1:3]))
-		if len(rest) < 3+n {
-			break
-		}
-		if TLVType(rest[0]) != TLVNoop {
-			count++
-			size += n
-		}
-		rest = rest[3+n:]
+// parseTLVs returns a copy of the fields in b without NOOP padding, up to
+// the first truncated one, in one allocation.
+func parseTLVs(b []byte) TLVs {
+	size := 0
+	for _, v := range TLVs(b).All() {
+		size += 3 + len(v)
 	}
-	if count == 0 {
+	if size == 0 {
 		return nil
 	}
-	tlvs := make([]TLV, 0, count)
-	values := make([]byte, 0, size)
-	for len(tlvs) < count {
-		n := int(binary.BigEndian.Uint16(b[1:3]))
-		if t := TLVType(b[0]); t != TLVNoop {
-			start := len(values)
-			values = append(values, b[3:3+n]...)
-			tlvs = append(tlvs, TLV{Type: t, Value: values[start:len(values):len(values)]})
-		}
-		b = b[3+n:]
+	f := make(TLVs, 0, size)
+	for t, v := range TLVs(b).All() {
+		f, _ = f.Append(t, v) // a parsed value fits
 	}
-	return tlvs
+	return f
 }
 
 func v2Addrs(af, proto byte, b []byte) (src, dst net.Addr) {
@@ -258,7 +240,15 @@ func v2Addrs(af, proto byte, b []byte) (src, dst net.Addr) {
 	return nil, nil
 }
 
+// unixPath returns the address in a sun_path field: a path up to its NUL, or
+// a Linux abstract name, which starts with a NUL, as "@name" as Go spells it.
 func unixPath(b []byte) string {
+	if len(b) > 0 && b[0] == 0 {
+		if name := bytes.TrimRight(b[1:], "\x00"); len(name) > 0 {
+			return "@" + string(name)
+		}
+		return ""
+	}
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
 	}

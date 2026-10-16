@@ -29,8 +29,12 @@ func listen(ctx context.Context, address string) (net.Listener, error) {
 	return lc.Listen(ctx, "tcp", address)
 }
 
+// enableBindAnySocket sets IP_BINDANY and IPV6_BINDANY where the socket's
+// family has them. It fails when neither could be set, rather than leaving a
+// socket that cannot take redirected connections.
 func enableBindAnySocket(fd int) error {
-	var firstErr error
+	var firstErr, skipped error
+	set := false
 	for _, opt := range []struct {
 		level int
 		name  int
@@ -38,11 +42,19 @@ func enableBindAnySocket(fd int) error {
 		{level: syscall.IPPROTO_IP, name: ipBindAny},
 		{level: syscall.IPPROTO_IPV6, name: ipv6BindAny},
 	} {
-		if err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableBindAnySockopt(err) {
-			if firstErr == nil {
-				firstErr = err
+		switch err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); {
+		case err == nil:
+			set = true
+		case isIgnorableBindAnySockopt(err):
+			if skipped == nil {
+				skipped = err
 			}
+		case firstErr == nil:
+			firstErr = err
 		}
+	}
+	if firstErr == nil && !set {
+		return skipped
 	}
 	return firstErr
 }

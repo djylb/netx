@@ -133,13 +133,26 @@ type sockopt struct {
 }
 
 // setOptions enables boolean socket options, skipping those the socket's
-// family does not have, and returns the first other failure.
+// family does not have, and returns the first other failure. It fails when
+// none could be set, as in a sandbox without them, rather than leaving the
+// socket without what the caller needs.
 func setOptions(fd int, opts []sockopt) error {
-	var firstErr error
+	var firstErr, skipped error
+	set := false
 	for _, opt := range opts {
-		if err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); err != nil && !isIgnorableSockopt(err) && firstErr == nil {
+		switch err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); {
+		case err == nil:
+			set = true
+		case isIgnorableSockopt(err):
+			if skipped == nil {
+				skipped = err
+			}
+		case firstErr == nil:
 			firstErr = err
 		}
+	}
+	if firstErr == nil && !set {
+		return skipped
 	}
 	return firstErr
 }

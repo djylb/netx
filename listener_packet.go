@@ -20,7 +20,9 @@ import (
 // Each Read of a connection returns one datagram, truncated to the buffer like
 // a UDP socket. Datagrams that arrive while a connection's queue is full, or
 // while too many connections wait for Accept, are dropped. After a connection
-// is closed, the next datagram from its peer starts a new one.
+// is closed, the next datagram from its peer starts a new one. A connection
+// lasts until it is closed, so a server facing untrusted or spoofed peers
+// should set WithIdleTimeout or read deadlines.
 type PacketListener struct {
 	pc   net.PacketConn
 	udp  *net.UDPConn // pc, when it is one: alloc-free reads and writes
@@ -87,7 +89,7 @@ func WithIdleTimeout(d time.Duration) PacketListenerOption {
 
 // WithMaxDatagram sets the largest datagram that is delivered in full, 65535
 // bytes by default; longer ones are truncated. The packet connection is still
-// read with a buffer of at least 64 KiB, since Windows drops a datagram that
+// read with a buffer of at least 65535 bytes, since Windows drops a datagram that
 // does not fit, and reports neither its sender nor its data.
 func WithMaxDatagram(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {

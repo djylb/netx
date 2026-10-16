@@ -38,17 +38,31 @@ func WithParentClose() WrapOption {
 }
 
 // RawConnOf returns v's underlying net.Conn when it is available.
-// It follows RawConn() and NetConn() chains to the innermost connection.
+// It follows RawConn() and NetConn() chains to the innermost connection, and
+// returns nil for a nil connection, also a nil pointer such as a nil
+// *net.TCPConn, and for a value that is not a connection.
 func RawConnOf(v any) net.Conn {
 	return rawConnOf(v)
 }
 
 // WrapConn exposes rwc as a net.Conn using parent for addresses and deadlines.
+// A nil parent is rwc itself when it is a net.Conn, so that its own wrappers
+// keep their addresses and deadlines, and otherwise the connection beneath it.
 // Closing the returned connection closes rwc. Use WithParentClose to also close parent.
 func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.Conn {
 	cfg := newWrapOptions(opts)
 	if parent == nil {
-		parent = rawConnOf(rwc)
+		if c, ok := rwc.(net.Conn); ok {
+			parent = c
+		} else {
+			// Borrowed: closing the result closes rwc, and parent only with
+			// WithParentClose.
+			//noinspection GoResourceLeak
+			parent = rawConnOf(rwc)
+		}
+	}
+	if isNilPointer(parent) {
+		parent = nil
 	}
 	return &wrappedConn{rwc: rwc, parent: parent, closeParent: cfg.closeParent}
 }
@@ -169,12 +183,19 @@ func nextConn(v any) (net.Conn, bool) {
 		return getter.RawConn(), true
 	case interface{ NetConn() net.Conn }:
 		// *tls.Conn.NetConn does not accept a nil receiver.
-		if rv := reflect.ValueOf(getter); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		if isNilPointer(getter) {
 			return nil, true
 		}
 		return getter.NetConn(), true
 	}
 	return nil, false
+}
+
+// isNilPointer reports whether v is a nil pointer in a non-nil interface,
+// such as a nil *net.TCPConn passed as a net.Conn.
+func isNilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 func rawConnOfDepth(v any, depth int) net.Conn {
@@ -184,7 +205,7 @@ func rawConnOfDepth(v any, depth int) net.Conn {
 	// Unwrapping only borrows connections; their owner remains responsible for closing them.
 	//noinspection GoResourceLeak
 	if raw, ok := nextConn(v); ok {
-		if raw == nil {
+		if raw == nil || isNilPointer(raw) {
 			return nil
 		}
 		if conn, ok := v.(net.Conn); ok && sameNetConn(raw, conn) {
@@ -198,7 +219,7 @@ func rawConnOfDepth(v any, depth int) net.Conn {
 		}
 		return raw
 	}
-	if conn, ok := v.(net.Conn); ok {
+	if conn, ok := v.(net.Conn); ok && !isNilPointer(conn) {
 		return conn
 	}
 	return nil

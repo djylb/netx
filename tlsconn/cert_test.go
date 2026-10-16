@@ -173,7 +173,8 @@ func writeCert(t *testing.T, dir string, cert tls.Certificate) (certFile, keyFil
 func TestCertCacheFiles(t *testing.T) {
 	first, _ := NewSelfSigned(SelfSignedOptions{})
 	certFile, keyFile := writeCert(t, t.TempDir(), first)
-	c := &CertCache{ReloadInterval: 50 * time.Millisecond}
+	const reload = 500 * time.Millisecond // so the cache hit below comes first on a busy host
+	c := &CertCache{ReloadInterval: reload}
 
 	got, err := c.LoadFiles(certFile, keyFile)
 	if err != nil || Fingerprint(got.Certificate[0]) != Fingerprint(first.Certificate[0]) {
@@ -186,7 +187,7 @@ func TestCertCacheFiles(t *testing.T) {
 	// A renewed certificate is picked up after ReloadInterval.
 	second, _ := NewSelfSigned(SelfSignedOptions{})
 	writeCert(t, filepath.Dir(certFile), second)
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(reload + 50*time.Millisecond)
 	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(second.Certificate[0]) {
 		t.Fatal("renewed certificate not reloaded")
 	}
@@ -342,7 +343,7 @@ func TestCertCacheDoesNotKeepPEMInput(t *testing.T) {
 		buf := new([1 << 20]byte)
 		n := copy(buf[:], certPEM)
 		m := copy(buf[n:], keyPEM)
-		runtime.SetFinalizer(buf, func(*[1 << 20]byte) { close(released) })
+		runtime.AddCleanup(buf, func(done chan struct{}) { close(done) }, released)
 		if _, err := c.LoadPEM(buf[:n:n], buf[n:n+m:n+m]); err != nil {
 			t.Fatal(err)
 		}

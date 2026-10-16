@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"sync"
 	"time"
@@ -38,14 +39,14 @@ type CertCache struct {
 }
 
 type certEntry struct {
-	key       string
-	load      func() (*tls.Certificate, error) // reloads files; nil for PEM data
-	files     bool
-	ready     chan struct{} // closed when the first load ends
-	cert      *tls.Certificate
-	err       error // of the first load
 	loadedAt  time.Time
 	lastUsed  time.Time
+	err       error                            // of the first load
+	load      func() (*tls.Certificate, error) // reloads files; nil for PEM data
+	ready     chan struct{}                    // closed when the first load ends
+	cert      *tls.Certificate
+	key       string
+	files     bool
 	reloading bool
 }
 
@@ -57,6 +58,11 @@ func (c *CertCache) LoadFiles(certFile, keyFile string) (*tls.Certificate, error
 	key := "file\x00" + certFile + "\x00" + keyFile
 	return c.get(key, true, func() (*tls.Certificate, error) {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err == nil && cert.Leaf == nil {
+			// Left unset under GODEBUG x509keypairleaf=0; the expiry check
+			// of a reload needs it.
+			cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		}
 		return &cert, err
 	})
 }
@@ -137,8 +143,9 @@ func (c *CertCache) get(key string, files bool, load func() (*tls.Certificate, e
 	if c.entries == nil {
 		c.entries = make(map[string]*list.Element)
 	}
+	// Evicted only once the load succeeds, so that a load that fails, such
+	// as one for an unknown name, does not push out certificates that work.
 	c.entries[key] = c.lru.PushFront(e)
-	c.evictLocked()
 	c.mu.Unlock()
 
 	cert, err := load()
@@ -154,6 +161,7 @@ func (c *CertCache) get(key string, files bool, load func() (*tls.Certificate, e
 		cert = nil
 	} else {
 		e.cert, e.loadedAt = cert, now
+		c.evictLocked()
 	}
 	close(e.ready)
 	c.mu.Unlock()
@@ -170,10 +178,26 @@ func (c *CertCache) reloadDue(e *certEntry, now time.Time) bool {
 	return leaf != nil && now.After(leaf.NotAfter) && age >= expiredRetry
 }
 
-// evictLocked drops the least recently used entries beyond MaxEntries.
+// evictLocked drops the least recently used loaded entries beyond
+// MaxEntries. Entries still loading do not count and are not dropped, so that
+// loads that fail, such as for unknown names, push out no certificate.
 func (c *CertCache) evictLocked() {
-	for c.MaxEntries > 0 && len(c.entries) > c.MaxEntries {
-		c.removeLocked(c.lru.Back())
+	if c.MaxEntries <= 0 {
+		return
+	}
+	loaded := 0
+	for el := c.lru.Front(); el != nil; el = el.Next() {
+		if el.Value.(*certEntry).cert != nil {
+			loaded++
+		}
+	}
+	for el := c.lru.Back(); el != nil && loaded > c.MaxEntries; {
+		prev := el.Prev()
+		if el.Value.(*certEntry).cert != nil {
+			c.removeLocked(el)
+			loaded--
+		}
+		el = prev
 	}
 }
 

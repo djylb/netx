@@ -103,8 +103,6 @@ func (c *loopReadConn) SetDeadline(time.Time) error      { return nil }
 func (c *loopReadConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *loopReadConn) SetWriteDeadline(time.Time) error { return nil }
 
-var netErrorKindSink string
-
 func BenchmarkNetErrorKind(b *testing.B) {
 	for _, tc := range []struct {
 		name string
@@ -118,7 +116,7 @@ func BenchmarkNetErrorKind(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				netErrorKindSink = NetErrorKind(tc.err)
+				NetErrorKind(tc.err) // b.Loop keeps the call
 			}
 		})
 	}

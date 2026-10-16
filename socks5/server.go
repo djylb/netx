@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"crypto/tls"
 	"errors"
 	"io"
 	"maps"
@@ -40,6 +39,9 @@ type Request struct {
 	User string
 	// Conn is the client's control connection.
 	Conn net.Conn
+	// early holds bytes a SOCKS4 client sent right after its request, which
+	// the read of the request buffered; the relay passes them on first.
+	early []byte
 }
 
 // Authenticator authenticates clients with one method.
@@ -102,6 +104,10 @@ func Credentials(accounts map[string]string) func(user, password string) bool {
 // Every field is optional: the zero Server accepts clients without
 // authentication, serves CONNECT with a direct dial, and refuses BIND and UDP
 // ASSOCIATE. UDP ASSOCIATE is served once PacketConn or ListenUDP is set.
+//
+// The server sets no limit on the connections or UDP associations of a
+// client, each of which holds a few sockets and buffers; bound them in the
+// listener passed to Serve or in Allow.
 type Server struct {
 	// PacketConn is the UDP socket shared by all UDP associations, which the
 	// clients are told to send to. Datagrams are routed to an association by
@@ -111,7 +117,9 @@ type Server struct {
 	// else to the only one pending for that IP address. An announced port
 	// counts at the control connection's IP address whatever address comes
 	// with it, since clients behind a NAT announce their private address and
-	// clients that do not know theirs announce 0.0.0.0 or a name. A source
+	// clients that do not know theirs announce 0.0.0.0 or a name; a client
+	// that announces the control connection's own address and a port gets
+	// datagrams from that source alone, as no NAT rewrote it. A source
 	// that matches none of these, such as one of several associations that
 	// announced no port, is ambiguous while they wait for their first
 	// datagram, and its datagrams are dropped. A request whose control
@@ -145,7 +153,9 @@ type Server struct {
 	// a client that shuts down its writing side still gets the reply. As
 	// with TCP itself, a half-closed connection then lasts until the other
 	// side finishes or closes too; to bound how long an idle one may last,
-	// relay through netx.NewTimeoutConn on both ends.
+	// relay through netx.NewTimeoutConn on both ends. client reads
+	// req.Conn, after any bytes a SOCKS4 client sent right after its
+	// request.
 	Relay func(ctx context.Context, req *Request, client, target net.Conn) error
 	// ListenUDP, used when PacketConn is nil, opens a UDP socket for one
 	// association, which the association owns. Datagrams are taken as on
@@ -158,7 +168,9 @@ type Server struct {
 	// with the control connection's local IP when it is unspecified.
 	UDPAddr func(req *Request, socket net.Addr) Addr
 	// DialPacket opens the outbound side of a UDP association; nil uses a new
-	// UDP socket through NewPacketConn.
+	// UDP socket from netx.ListenEphemeralUDP through NewPacketConn. That
+	// socket reaches IPv4 and IPv6 targets where the system has dual-stack
+	// sockets; on OpenBSD, which has none, it is IPv4 only.
 	DialPacket func(ctx context.Context, req *Request) (PacketConn, error)
 	// AllowPacket, if set, drops the client datagrams to destinations it
 	// rejects. Like Allow, it sees IP addresses as IP and other names
@@ -168,8 +180,9 @@ type Server struct {
 	// OnError, if set, receives the errors that end connections accepted by
 	// Serve, with the client connection, and those that drop UDP datagrams,
 	// with the association's control connection. It is called from serving
-	// goroutines and must be safe for concurrent use. The package does not
-	// log; route errors to a logger such as log/slog here.
+	// goroutines and must be safe for concurrent use. The connections that
+	// Close ends are not reported. The package does not log; route errors to
+	// a logger such as log/slog here.
 	OnError func(c net.Conn, err error)
 	// Tracked by pointer, as in net/http, since the dynamic types of a
 	// net.Listener or a net.Conn need not be comparable.
@@ -242,7 +255,7 @@ func (s *Server) Serve(l net.Listener) error {
 		}
 		delay = 0
 		go func() {
-			if err := s.ServeConn(c); err != nil {
+			if err := s.ServeConn(c); err != nil && !s.endedByClose(err) {
 				s.onError(c, err)
 			}
 		}()
@@ -458,10 +471,14 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 	// half-closed, would outlive Close.
 	stop := context.AfterFunc(ctx, func() { _ = target.Close() })
 	defer stop()
-	if s.Relay != nil {
-		return s.Relay(ctx, req, req.Conn, target)
+	client := req.Conn
+	if len(req.early) > 0 {
+		client = netx.NewPrefixConn(client, req.early)
 	}
-	_, _, err = netx.Relay(req.Conn, target, netx.WithHalfClose())
+	if s.Relay != nil {
+		return s.Relay(ctx, req, client, target)
+	}
+	_, _, err = netx.Relay(client, target, netx.WithHalfClose())
 	return err
 }
 
@@ -559,6 +576,12 @@ func (s *Server) trackConn(c *net.Conn, add bool) bool {
 	return true
 }
 
+// endedByClose reports whether err ended a connection because Close closed
+// it, which is not reported.
+func (s *Server) endedByClose(err error) bool {
+	return s.isClosed() && (errors.Is(err, ErrServerClosed) || netx.IsClosed(err))
+}
+
 func (s *Server) onError(c net.Conn, err error) {
 	if s.OnError != nil {
 		s.OnError(c, err)
@@ -572,8 +595,14 @@ func (s *Server) onError(c net.Conn, err error) {
 // connection that c's Close closes anyway is closed, never one that c merely
 // borrows, such as the parent of a netx.WrapConn.
 func closeBeneathTLS(c net.Conn) {
-	if tc, ok := c.(*tls.Conn); ok {
-		_ = tc.NetConn().Close()
+	// Matched by its methods, so that the package does not link crypto/tls.
+	if tc, ok := c.(interface {
+		NetConn() net.Conn
+		HandshakeContext(context.Context) error
+	}); ok {
+		if raw := tc.NetConn(); raw != nil {
+			_ = raw.Close()
+		}
 	}
 }
 

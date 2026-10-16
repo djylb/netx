@@ -1,6 +1,7 @@
 package socks5
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -14,7 +15,16 @@ var errSOCKS4Auth = errors.New("socks5: SOCKS4 request while authentication is r
 // handshake4 reads a SOCKS4 or SOCKS4a request whose version byte was read
 // and runs the NoAuth authenticator, since SOCKS4 has no authentication.
 func (s *Server) handshake4(ctx context.Context, c net.Conn, first []byte) (*Request, error) {
-	cmd, dst, _, err := ReadRequest4(io.MultiReader(bytes.NewReader(first), c))
+	// Buffered, so that the user ID and name are not read one byte per
+	// read of the connection. Bytes the client sent after the request are
+	// replayed before the rest of the connection.
+	br := bufio.NewReaderSize(io.MultiReader(bytes.NewReader(first), c), 512)
+	cmd, dst, _, err := ReadRequest4(br)
+	var early []byte
+	if n := br.Buffered(); n > 0 && err == nil {
+		buffered, _ := br.Peek(n)
+		early = bytes.Clone(buffered)
+	}
 	if err != nil {
 		if errors.Is(err, ErrMalformed) {
 			_ = WriteReply4(c, Reply4Rejected, Addr{})
@@ -35,5 +45,5 @@ func (s *Server) handshake4(ctx context.Context, c net.Conn, first []byte) (*Req
 		_ = WriteReply4(c, Reply4Rejected, Addr{})
 		return nil, fmt.Errorf("socks5: unsupported SOCKS4 %v", cmd)
 	}
-	return &Request{Version: 4, Command: CmdConnect, Dst: dst, User: user, Conn: c}, nil
+	return &Request{Version: 4, Command: CmdConnect, Dst: dst, User: user, Conn: c, early: early}, nil
 }

@@ -42,8 +42,8 @@ type Dialer struct {
 	Forward ContextDialer
 }
 
-// Dial is DialContext with a background context, matching the Dialer
-// interface of golang.org/x/net/proxy.
+// Dial is DialContext with a background context, for code that expects a
+// dialer without a context.
 func (d *Dialer) Dial(network, address string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, address)
 }

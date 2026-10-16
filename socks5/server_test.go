@@ -192,12 +192,16 @@ func handshake(t *testing.T, addr string) net.Conn {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	// Bounded, so that a dial that reached another socket fails the test
+	// rather than hanging it.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if err := socks5.WriteMethods(c, socks5.MethodNoAuth); err != nil {
 		t.Fatal(err)
 	}
 	if m, err := socks5.ReadMethod(c); err != nil || m != socks5.MethodNoAuth {
 		t.Fatalf("ReadMethod() = %v, %v", m, err)
 	}
+	_ = c.SetDeadline(time.Time{})
 	return c
 }
 
@@ -298,6 +302,7 @@ func udpEcho(t *testing.T) *net.UDPAddr {
 func associate(t *testing.T, addr string, announced socks5.Addr) (net.Conn, *net.UDPAddr) {
 	t.Helper()
 	c := handshake(t, addr)
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if err := socks5.WriteRequest(c, socks5.CmdUDPAssociate, announced); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +310,7 @@ func associate(t *testing.T, addr string, announced socks5.Addr) (net.Conn, *net
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE reply error = %v", err)
 	}
+	_ = c.SetDeadline(time.Time{})
 	return c, net.UDPAddrFromAddrPort(netip.AddrPortFrom(bound.IP, bound.Port))
 }
 
@@ -327,6 +333,22 @@ func exchange(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UD
 		t.Fatalf("reply datagram error = %v", err)
 	}
 	return string(data), src
+}
+
+// eventuallyNoReply sends payload until the relay stops replying, as an
+// association ends shortly after the event that ends it, and fails if it
+// still replies after a few seconds.
+func eventuallyNoReply(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UDPAddr, payload string) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		got, _ := exchange(t, client, relay, dst, payload)
+		if got == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reply %q, want the association ended", got)
+		}
+	}
 }
 
 func newUDPClient(t *testing.T) *net.UDPConn {
@@ -377,10 +399,7 @@ func TestServerUDPSharedSocket(t *testing.T) {
 
 	// Closing the control connection ends the association.
 	_ = ctl.Close()
-	time.Sleep(50 * time.Millisecond)
-	if got, _ := exchange(t, client, relay, echo, "after close"); got != "" {
-		t.Fatalf("reply %q after the control connection closed", got)
-	}
+	eventuallyNoReply(t, client, relay, echo, "after close")
 }
 
 // closeNotifyPacketConn reports when it is closed.
@@ -478,11 +497,11 @@ func TestServerUDPCustomEgress(t *testing.T) {
 	})
 	_, relay := associate(t, addr, socks5.Addr{})
 	client := newUDPClient(t)
-	send := func(dst socks5.Addr, payload string) (string, socks5.Addr) {
+	send := func(dst socks5.Addr, payload string, wait time.Duration) (string, socks5.Addr) {
 		packet, _ := socks5.AppendDatagram(nil, dst, []byte(payload))
 		_, _ = client.WriteToUDP(packet, relay)
 		buf := make([]byte, 2048)
-		_ = client.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_ = client.SetReadDeadline(time.Now().Add(wait))
 		n, _, err := client.ReadFromUDP(buf)
 		if err != nil {
 			return "", socks5.Addr{}
@@ -490,12 +509,19 @@ func TestServerUDPCustomEgress(t *testing.T) {
 		src, data, _ := socks5.ParseDatagram(buf[:n])
 		return string(data), src
 	}
-	// Domain names reach the custom egress unresolved.
-	got, src := send(socks5.Addr{Name: "dns.example", Port: 53}, "q")
+	// Domain names reach the custom egress unresolved. A loopback datagram
+	// can be lost on a busy host, so it is sent again until answered.
+	var got string
+	var src socks5.Addr
+	for range 5 {
+		if got, src = send(socks5.Addr{Name: "dns.example", Port: 53}, "q", time.Second); got != "" {
+			break
+		}
+	}
 	if got != "dns.example:53|q" || src.String() != "tunnel.example:7" {
 		t.Fatalf("reply = %q from %v", got, src)
 	}
-	if got, _ := send(socks5.Addr{Name: "blocked.example", Port: 53}, "q"); got != "" {
+	if got, _ := send(socks5.Addr{Name: "blocked.example", Port: 53}, "q", 300*time.Millisecond); got != "" {
 		t.Fatalf("blocked destination got reply %q", got)
 	}
 }
@@ -627,16 +653,17 @@ func TestServerLenientNegotiation(t *testing.T) {
 func TestServerUDPOutlivesControl(t *testing.T) {
 	echo := udpEcho(t)
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
-	addr := serve(t, &socks5.Server{PacketConn: pc, UDPOutlivesControl: true, UDPIdleTimeout: 300 * time.Millisecond})
+	const idle = time.Second
+	addr := serve(t, &socks5.Server{PacketConn: pc, UDPOutlivesControl: true, UDPIdleTimeout: idle})
 	ctl, relay := associate(t, addr, socks5.Addr{})
 	client := newUDPClient(t)
 	_ = ctl.(*net.TCPConn).CloseWrite()
 	_ = ctl.Close()
-	time.Sleep(50 * time.Millisecond)
 	if got, _ := exchange(t, client, relay, echo, "still here"); got != "echo:still here" {
 		t.Fatalf("reply after the control connection closed = %q", got)
 	}
-	time.Sleep(500 * time.Millisecond) // past the idle timeout
+	// Traffic would keep the association, so probe once past the timeout.
+	time.Sleep(2 * idle)
 	if got, _ := exchange(t, client, relay, echo, "gone"); got != "" {
 		t.Fatalf("reply %q after the idle timeout", got)
 	}

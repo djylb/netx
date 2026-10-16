@@ -64,7 +64,7 @@ func NewSelfSigned(opts SelfSignedOptions) (tls.Certificate, error) {
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: hosts[0]},
 		NotBefore:             notBefore,
-		NotAfter:              notBefore.Add(time.Hour + validFor),
+		NotAfter:              notBefore.Add(time.Hour).Add(validFor), // saturates rather than wraps
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

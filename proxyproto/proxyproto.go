@@ -1,7 +1,7 @@
-// Package proxyproto builds and parses PROXY protocol v1 and v2 headers, as
-// specified by HAProxy, which carry the original client and destination
-// addresses of a proxied connection to the backend, and provides a Listener
-// that reports those addresses for the connections it accepts. The Listener
+// Package proxyproto builds and parses PROXY protocol v1 and v2 headers,
+// which carry the original client and destination addresses of a proxied
+// connection to the backend, and provides a Listener that reports those
+// addresses for the connections it accepts. The Listener
 // serves streams and UDP flows whose first datagram carries the header.
 //
 // Parsing is lenient towards non-standard senders wherever that cannot change
@@ -10,8 +10,9 @@
 // that differ from the token, and padded ports; version 2 headers may carry
 // any version nibble. Unknown commands, protocols and families, short address
 // blocks and truncated TLVs make the connection's own addresses, or the whole
-// TLVs, apply instead of failing. Parsed headers drop NOOP padding and keep at
-// most 64 TLVs. The package depends only on the standard library.
+// TLVs, apply instead of failing. Parsed headers drop NOOP padding and keep
+// every other TLV in no more memory than the header took. The package depends
+// only on the standard library.
 package proxyproto
 
 import (
@@ -35,8 +36,8 @@ const (
 //
 // Both addresses must be *net.TCPAddr or both *net.UDPAddr. v1 has no UDP
 // token, so UDP pairs are emitted with the TCP4/TCP6 tokens; use v2 to signal
-// UDP. As in HAProxy, an IPv4 and an IPv6 address
-// are sent as TCP6 with the IPv4 side in its IPv4-mapped form (::ffff:a.b.c.d).
+// UDP. An IPv4 and an IPv6 address are sent as TCP6 with the IPv4 side in its
+// IPv4-mapped form (::ffff:a.b.c.d).
 // Anything else yields "PROXY UNKNOWN\r\n".
 func V1Header(clientAddr, targetAddr net.Addr) []byte {
 	return appendV1(make([]byte, 0, maxV1Len), clientAddr, targetAddr)
@@ -179,7 +180,7 @@ func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (
 	if !validTCPPort(srcPort) || !validTCPPort(dstPort) {
 		return proxyAddrMeta{}, false
 	}
-	// As in HAProxy, the header is IPv4 only when both sides are IPv4.
+	// The header is IPv4 only when both sides are IPv4.
 	// Otherwise both IPs are sent as 16 bytes, and To16 turns an IPv4 side
 	// into its IPv4-mapped form ::ffff:a.b.c.d.
 	src4, dst4 := srcIP.To4(), dstIP.To4()

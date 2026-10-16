@@ -113,31 +113,28 @@ var streamPool = sync.Pool{New: func() any {
 // timeout or the end of the stream, while the bytes received are only the
 // start of a signature has no header, and those bytes are passed through.
 type Conn struct {
+	readDeadline time.Time // set by the caller
+	expires      time.Time // end of the header timeout, from the first header read
 	net.Conn
-	policy   Policy
-	timeout  time.Duration
-	datagram bool
-
-	// hsem serializes header reads; header and err are set before done.
-	hsem      chan struct{}
-	done      atomic.Bool
-	hbuf      []byte // stream bytes received while the header is incomplete
-	header    *Header
 	err       error
 	timeoutAt error // the header timeout, returned once before err
-
+	// hsem serializes header reads; header and err are set before done.
+	hsem        chan struct{}
+	header      *Header
+	deadlineSet chan struct{} // closed when readDeadline changes
+	hbuf        []byte        // stream bytes received while the header is incomplete
+	pending     []byte
+	timeout     time.Duration
 	// Bytes read with the header that belong to the stream, or the first
 	// datagram's payload.
-	pendingMu sync.Mutex
-	pending   []byte
-	drained   atomic.Bool
-
-	mu           sync.Mutex
-	readDeadline time.Time     // set by the caller
-	deadlineSet  chan struct{} // closed when readDeadline changes
-	expires      time.Time     // end of the header timeout, from the first header read
-	reading      bool          // a header read is in progress
-	callerBound  bool          // and it honors readDeadline
+	pendingMu   sync.Mutex
+	mu          sync.Mutex
+	done        atomic.Bool
+	drained     atomic.Bool
+	policy      Policy
+	datagram    bool
+	reading     bool // a header read is in progress
+	callerBound bool // and it honors readDeadline
 }
 
 // Header returns the connection's PROXY protocol header, reading it first if
@@ -281,7 +278,7 @@ func (c *Conn) readHeader(callerBound bool) error {
 	if c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline)) != nil {
 		// Without deadline support, closing the connection is the only way
 		// to end a header read that outlasts the header timeout.
-		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.Conn.Close() })
+		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.Conn.Close() }) //nolint:staticcheck // QF1008: closes the wrapped Conn
 	}
 	c.mu.Unlock()
 
@@ -531,7 +528,9 @@ type readerOnly struct{ io.Reader }
 
 // RemoteAddr returns the source address from the header, or the peer address
 // when the header has none. A stream reports a UDP address as a
-// *net.TCPAddr, so that it has the address type of its listener.
+// *net.TCPAddr, so that it has the address type of its listener; a header
+// of AF_UNIX addresses gives a *net.UnixAddr, so check the type rather than
+// assert *net.TCPAddr when peers may send them.
 func (c *Conn) RemoteAddr() net.Addr {
 	if c.init(false) == nil && c.header != nil && c.header.Source != nil {
 		return c.streamAddr(c.header.Source)

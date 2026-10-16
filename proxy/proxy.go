@@ -102,6 +102,10 @@ func FromURL(u *url.URL, forward ContextDialer) (ContextDialer, error) {
 	return nil, fmt.Errorf("proxy: unsupported scheme %q", u.Scheme)
 }
 
+// errInvalidALLPROXY reports an ALL_PROXY that is not a URL, without
+// quoting it.
+var errInvalidALLPROXY = errors.New("proxy: ALL_PROXY is not a valid proxy URL")
+
 // FromEnvironment returns a dialer for the proxy URL in ALL_PROXY (or
 // all_proxy) that dials directly through forward, or a zero net.Dialer if
 // forward is nil, for the targets matched by NO_PROXY (or no_proxy). It
@@ -127,7 +131,9 @@ func FromEnvironment(forward ContextDialer) (ContextDialer, error) {
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("proxy: parse ALL_PROXY: %w", err)
+		// The parse error quotes the URL, or parts of it, which may hold the
+		// password.
+		return nil, errInvalidALLPROXY
 	}
 	proxied, err := FromURL(u, forward)
 	if err != nil {
@@ -155,8 +161,8 @@ type bypassDialer struct {
 	bypass  NoProxy
 }
 
-// Dial is DialContext with a background context, matching the Dialer
-// interface of golang.org/x/net/proxy.
+// Dial is DialContext with a background context, for code that expects a
+// dialer without a context.
 func (d *bypassDialer) Dial(network, address string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, address)
 }

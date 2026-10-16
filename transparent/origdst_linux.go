@@ -34,8 +34,9 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
 	}
-	if raw := netx.RawConnOf(conn); raw != nil {
-		conn = raw
+	// A nil pointer, such as a nil *net.TCPConn, unwraps to nil.
+	if conn = netx.RawConnOf(conn); conn == nil {
+		return nil, net.ErrClosed
 	}
 	dst, err := redirectedDestinationFromConn(conn)
 	if err == nil {
@@ -45,7 +46,7 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if localErr == nil {
 		return localDst, nil
 	}
-	return nil, fmt.Errorf("failed to get transparent address: redirect=%v local=%v", err, localErr)
+	return nil, fmt.Errorf("failed to get transparent address: redirect=%w local=%w", err, localErr)
 }
 
 func redirectedDestinationFromConn(conn net.Conn) (*net.TCPAddr, error) {
@@ -137,18 +138,25 @@ func scopeZone(ip netip.Addr, scope uint32) string {
 		return ""
 	}
 	zones.Lock()
-	defer zones.Unlock()
 	if now := time.Now(); zones.names == nil || now.After(zones.expires) {
 		zones.names, zones.expires = make(map[uint32]string), now.Add(time.Minute)
 	}
 	name, ok := zones.names[scope]
-	if !ok {
-		name = strconv.FormatUint(uint64(scope), 10)
-		if ifi, err := net.InterfaceByIndex(int(scope)); err == nil {
-			name = ifi.Name
-		}
+	zones.Unlock()
+	if ok {
+		return name
+	}
+	// Looked up without the lock, as it lists every interface: other
+	// readers keep going meanwhile, and concurrent misses look up alike.
+	name = strconv.FormatUint(uint64(scope), 10)
+	if ifi, err := net.InterfaceByIndex(int(scope)); err == nil {
+		name = ifi.Name
+	}
+	zones.Lock()
+	if zones.names != nil {
 		zones.names[scope] = name
 	}
+	zones.Unlock()
 	return name
 }
 

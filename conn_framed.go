@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,10 +35,10 @@ var ErrFrameDesync = errors.New("framed: stream desynchronized by a partial fram
 // By default Read is stream-oriented: it returns the current frame, or as
 // much of it as fits in p, and a longer frame continues in the next Reads
 // without being buffered. Empty frames are skipped, as they carry no stream
-// bytes. Use WithDatagramReads,
-// ReadFrame or a buffer of at least MaxFramePayload bytes when message
-// boundaries matter, and WithReadBuffer to serve small frames or small
-// buffers from one read of the connection.
+// bytes, and an error inside a frame splits it between two Reads. Use
+// WithDatagramReads or ReadFrame when message boundaries matter, and
+// WithReadBuffer to serve small frames or small buffers from one read of the
+// connection.
 //
 // An error that loses no frame bytes is returned unchanged and may be
 // retried: one between frames or inside a frame header, such as an expired
@@ -54,7 +55,8 @@ type FramedConn struct {
 	net.Conn
 	br       *bufio.Reader // set by WithReadBuffer
 	rerr     error
-	rpend    error // error that cut a stream Read short, for the next Read
+	rpend    error  // error that cut a stream Read short, for the next Read
+	rpendAt  uint64 // rdeadlines when rpend was kept
 	werr     error
 	remain   int // payload bytes of the current frame not yet read
 	rhdrN    int // bytes of rhdr read so far
@@ -65,6 +67,9 @@ type FramedConn struct {
 	rhdr     [2]byte
 	whdr     [2]byte // header of a vectored write, guarded by wmu
 	datagram bool
+	// rdeadlines counts the read deadlines set, without rmu, which a
+	// blocked Read holds.
+	rdeadlines atomic.Uint64
 }
 
 type framedOptions struct {
@@ -223,17 +228,22 @@ func (fc *FramedConn) readPayloadLocked(p []byte) (int, error) {
 		// Return the bytes alone, as a connection does, so that callers
 		// that retry after a timeout do not lose them.
 		if fc.rerr == nil {
-			fc.rpend = err
+			fc.rpend, fc.rpendAt = err, fc.rdeadlines.Load()
 		}
 		err = nil
 	}
 	return n, err
 }
 
-// takePendingLocked returns and clears the error left by a stream Read.
+// takePendingLocked returns and clears the error left by a stream Read. A
+// timeout is dropped once the read deadline was set again, as the next read
+// of the connection then reports whether the new one has passed.
 func (fc *FramedConn) takePendingLocked() error {
 	err := fc.rpend
 	fc.rpend = nil
+	if err != nil && fc.rpendAt != fc.rdeadlines.Load() && IsTimeout(err) {
+		return nil
+	}
 	return err
 }
 
@@ -324,6 +334,9 @@ func (fc *FramedConn) SetDeadline(t time.Time) error {
 	if fc == nil || fc.Conn == nil {
 		return net.ErrClosed
 	}
+	// Counted once set, so that a Read that times out at the old deadline
+	// before it does not keep that timeout.
+	defer fc.rdeadlines.Add(1)
 	return fc.Conn.SetDeadline(t)
 }
 
@@ -331,6 +344,7 @@ func (fc *FramedConn) SetReadDeadline(t time.Time) error {
 	if fc == nil || fc.Conn == nil {
 		return net.ErrClosed
 	}
+	defer fc.rdeadlines.Add(1) // as in SetDeadline
 	return fc.Conn.SetReadDeadline(t)
 }
 

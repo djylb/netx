@@ -12,6 +12,7 @@ package tlsconn
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"time"
 )
@@ -31,10 +32,17 @@ func Client(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Dur
 	return handshake(ctx, raw, cfg, timeout, tls.Client)
 }
 
-// Server is Client for the server side of the handshake.
+// Server is Client for the server side of the handshake, whose cfg must not
+// be nil.
 func Server(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration) (*tls.Conn, error) {
+	if cfg == nil && raw != nil {
+		_ = raw.Close()
+		return nil, errNoServerConfig
+	}
 	return handshake(ctx, raw, cfg, timeout, tls.Server)
 }
+
+var errNoServerConfig = errors.New("tlsconn: Server needs a TLS config")
 
 func handshake(ctx context.Context, raw net.Conn, cfg *tls.Config, timeout time.Duration, newConn func(net.Conn, *tls.Config) *tls.Conn) (*tls.Conn, error) {
 	if raw == nil {

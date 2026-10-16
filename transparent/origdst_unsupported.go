@@ -2,7 +2,11 @@
 
 package transparent
 
-import "net"
+import (
+	"net"
+
+	"github.com/djylb/netx"
+)
 
 // OriginalDestination returns the pre-redirect destination of an accepted
 // TCP connection.
@@ -19,7 +23,7 @@ import "net"
 // address that a wrapper reports, such as the destination of a PROXY header,
 // which conn.LocalAddr returns. A nil conn returns net.ErrClosed.
 func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
-	if conn == nil {
+	if netx.RawConnOf(conn) == nil {
 		return nil, net.ErrClosed
 	}
 	return nil, ErrOriginalDestinationUnsupported

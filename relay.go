@@ -56,12 +56,14 @@ func WithHalfClose() RelayOption {
 // stopped the relay, or nil if it stopped at EOF. Errors caused by Relay
 // closing the connections are not reported.
 //
-// On Linux, a direction between a *net.TCPConn and another *net.TCPConn or a
-// *net.UnixConn, also beneath PrefixConns, is left to the kernel with splice. Otherwise a direction is copied with the reading end's
-// WriteTo or else the writing end's ReadFrom, as io.Copy would, so a datagram
-// connection can keep each datagram whole; the WriteTo and ReadFrom of
-// *net.TCPConn and *net.UnixConn are skipped, also beneath a PrefixConn, and
-// the data goes through a pooled 32 KiB buffer instead of one they allocate.
+// On Linux and Android, a direction between a *net.TCPConn and another
+// *net.TCPConn or a *net.UnixConn, also beneath PrefixConns and
+// AddrOverrideConns, is left to the kernel with splice. Otherwise a direction
+// is copied with the reading end's WriteTo or else the writing end's
+// ReadFrom, as io.Copy would, so a datagram connection can keep each datagram
+// whole; the WriteTo and ReadFrom of *net.TCPConn are skipped, also beneath
+// those wrappers, and the data goes through a pooled 32 KiB buffer instead of
+// one they allocate.
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
 // PacketListener connection or a FramedConn with WithDatagramReads, also
 // beneath the wrappers of this package, gets a 64 KiB buffer instead and has
@@ -211,7 +213,9 @@ func datagramReader(r io.Reader) bool {
 	if isDatagramConn(r) {
 		return true
 	}
-	// Wrappers of other packages may expose the connection beneath them.
+	// Wrappers of other packages may expose the connection beneath them,
+	// which is only looked at here, not owned.
+	//noinspection GoResourceLeak
 	return isDatagramConn(rawConnOf(r))
 }
 
@@ -236,27 +240,46 @@ func isStdConn(c any) bool {
 	return false
 }
 
-// unwrapPrefixWriter returns the connection beneath any PrefixConns around w,
-// whose writes go straight to it.
+// unwrapPrefixWriter returns the connection beneath any PrefixConns and
+// AddrOverrideConns around w, whose writes go straight to it.
 func unwrapPrefixWriter(w io.Writer) io.Writer {
-	for {
-		pc, ok := w.(*PrefixConn)
-		if !ok || pc == nil || pc.Conn == nil {
-			return w
+	for range maxUnwrapDepth {
+		next := passThrough(w)
+		if next == nil {
+			break
 		}
-		w = pc.Conn
+		w = next
 	}
+	return w
 }
 
-// unwrapPrefix returns the connection beneath any PrefixConns around r.
+// unwrapPrefix returns the connection beneath any PrefixConns and
+// AddrOverrideConns around r, whose WriteTo copies it after the prefix.
 func unwrapPrefix(r io.Reader) io.Reader {
-	for {
-		pc, ok := r.(*PrefixConn)
-		if !ok || pc == nil || pc.Conn == nil {
-			return r
+	for range maxUnwrapDepth {
+		next := passThrough(r)
+		if next == nil {
+			break
 		}
-		r = pc.Conn
+		r = next
 	}
+	return r
+}
+
+// passThrough returns the connection that v passes its data to unchanged, or
+// nil: that of a PrefixConn, after its prefix, or of an AddrOverrideConn.
+func passThrough(v any) net.Conn {
+	switch c := v.(type) {
+	case *PrefixConn:
+		if c != nil {
+			return c.Conn
+		}
+	case *AddrOverrideConn:
+		if c != nil {
+			return c.Conn
+		}
+	}
+	return nil
 }
 
 // spliceOS reports whether *net.TCPConn moves data with splice(2).

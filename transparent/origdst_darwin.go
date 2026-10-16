@@ -57,12 +57,13 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 	if conn == nil {
 		return nil, net.ErrClosed
 	}
-	if raw := netx.RawConnOf(conn); raw != nil {
-		conn = raw
+	// A nil pointer, such as a nil *net.TCPConn, unwraps to nil.
+	if conn = netx.RawConnOf(conn); conn == nil {
+		return nil, net.ErrClosed
 	}
 	fd, err := syscall.Open("/dev/pf", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open /dev/pf: %v", err)
+		return nil, fmt.Errorf("failed to open /dev/pf: %w", err)
 	}
 	defer func() {
 		// Closing the lookup descriptor must not replace the lookup result.
@@ -118,7 +119,7 @@ func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
 
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), diocNatLook, uintptr(unsafe.Pointer(&nl)))
 	if errno != 0 {
-		return nil, fmt.Errorf("failed to get redirected address: %v", errno)
+		return nil, fmt.Errorf("failed to get redirected address: %w", errno)
 	}
 
 	return natlookAddr(nl.af, &nl.rdaddr, nl.redirectPort())

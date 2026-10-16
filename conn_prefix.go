@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // PrefixConn is a net.Conn whose reads return a prefix before the data of the
@@ -45,6 +46,55 @@ func (c *PrefixConn) Read(b []byte) (int, error) {
 		c.mu.Unlock()
 	}
 	return c.Conn.Read(b)
+}
+
+func (c *PrefixConn) Write(b []byte) (int, error) {
+	if c == nil || c.Conn == nil {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *PrefixConn) Close() error {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	return c.Conn.Close()
+}
+
+func (c *PrefixConn) LocalAddr() net.Addr {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	return c.Conn.LocalAddr()
+}
+
+func (c *PrefixConn) RemoteAddr() net.Addr {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	return c.Conn.RemoteAddr()
+}
+
+func (c *PrefixConn) SetDeadline(t time.Time) error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *PrefixConn) SetReadDeadline(t time.Time) error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *PrefixConn) SetWriteDeadline(t time.Time) error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	return c.Conn.SetWriteDeadline(t)
 }
 
 // WriteTo writes the rest of the prefix to w and then copies the wrapped
