@@ -40,9 +40,7 @@ func (c *countedCloseConn) Calls() int {
 
 func TestWrapConnCloseAvoidsDoubleClosingObservedConn(t *testing.T) {
 	base := &countedCloseConn{}
-	wrapped := ObserveConn(base, TrafficObserver{
-		OnRead: func(int64) error { return nil },
-	})
+	wrapped := ObserveConn(base, func(int64) error { return nil }, nil)
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -71,7 +69,7 @@ func TestWrapConnClosesWrappedOnlyByDefault(t *testing.T) {
 func TestWrapConnWithParentCloseClosesWrappedAndParent(t *testing.T) {
 	rwc := &countedCloseConn{}
 	parent := &countedCloseConn{}
-	wrapped := WrapConn(rwc, parent, WithParentClose())
+	wrapped := WrapConn(rwc, parent, WithWrapParentClose())
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -86,7 +84,7 @@ func TestWrapConnWithParentCloseClosesWrappedAndParent(t *testing.T) {
 
 func TestWrapConnWithParentCloseAvoidsDoubleClosingRawWrapper(t *testing.T) {
 	base := &countedCloseConn{}
-	wrapped := WrapConn(&rawClosingRWC{raw: base}, base, WithParentClose())
+	wrapped := WrapConn(&rawClosingRWC{raw: base}, base, WithWrapParentClose())
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -121,7 +119,7 @@ func (r *rawClosingRWC) Close() error {
 	return r.raw.Close()
 }
 
-func (r *rawClosingRWC) RawConn() net.Conn {
+func (r *rawClosingRWC) NetConn() net.Conn {
 	if r == nil {
 		return nil
 	}
@@ -132,18 +130,18 @@ type rawProviderOnly struct {
 	raw net.Conn
 }
 
-func (r rawProviderOnly) RawConn() net.Conn {
+func (r rawProviderOnly) NetConn() net.Conn {
 	return r.raw
 }
 
-func TestRawConnOfRecursivelyUnwrapsProviders(t *testing.T) {
+func TestInnermostConnRecursivelyUnwrapsProviders(t *testing.T) {
 	base := &countedCloseConn{}
 	provider := rawProviderOnly{
 		raw: NewTimeoutConn(base, time.Second),
 	}
 
-	if got := RawConnOf(provider); got != base {
-		t.Fatalf("RawConnOf() = %v, want base conn", got)
+	if got := InnermostConn(provider); got != base {
+		t.Fatalf("InnermostConn() = %v, want base conn", got)
 	}
 }
 
@@ -193,27 +191,27 @@ func newPipeCloseCounter(t *testing.T) *pipeCloseCounter {
 	return &pipeCloseCounter{Conn: client}
 }
 
-func TestRawConnOfUnwrapsNetConn(t *testing.T) {
+func TestInnermostConnUnwrapsNetConn(t *testing.T) {
 	base := newPipeCloseCounter(t)
 	tlsConn := tls.Client(base, &tls.Config{InsecureSkipVerify: true})
 
-	if got := RawConnOf(tlsConn); got != base {
-		t.Fatalf("RawConnOf(*tls.Conn) = %T, want base conn", got)
+	if got := InnermostConn(tlsConn); got != base {
+		t.Fatalf("InnermostConn(*tls.Conn) = %T, want base conn", got)
 	}
-	if got := RawConnOf(NewTimeoutConn(tlsConn, time.Second)); got != base {
-		t.Fatalf("RawConnOf(TimeoutConn(*tls.Conn)) = %T, want base conn", got)
+	if got := InnermostConn(NewTimeoutConn(tlsConn, time.Second)); got != base {
+		t.Fatalf("InnermostConn(TimeoutConn(*tls.Conn)) = %T, want base conn", got)
 	}
-	if got := RawConnOf((*tls.Conn)(nil)); got != nil {
-		t.Fatalf("RawConnOf(nil *tls.Conn) = %v, want nil", got)
+	if got := InnermostConn((*tls.Conn)(nil)); got != nil {
+		t.Fatalf("InnermostConn(nil *tls.Conn) = %v, want nil", got)
 	}
-	if got := NewTimeoutConn((*tls.Conn)(nil), time.Second).RawConn(); got != nil {
-		t.Fatalf("TimeoutConn(nil *tls.Conn).RawConn() = %v, want nil", got)
+	if got := InnermostConn(NewTimeoutConn((*tls.Conn)(nil), time.Second)); got != nil {
+		t.Fatalf("InnermostConn(TimeoutConn(nil *tls.Conn)) = %v, want nil", got)
 	}
 }
 
 func TestWrapConnWithParentCloseAvoidsDoubleClosingTLSParent(t *testing.T) {
 	base := newPipeCloseCounter(t)
-	wrapped := WrapConn(tls.Client(base, &tls.Config{InsecureSkipVerify: true}), base, WithParentClose())
+	wrapped := WrapConn(tls.Client(base, &tls.Config{InsecureSkipVerify: true}), base, WithWrapParentClose())
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -226,7 +224,7 @@ func TestWrapConnWithParentCloseAvoidsDoubleClosingTLSParent(t *testing.T) {
 func TestWrapConnWithParentCloseAvoidsDoubleClosingParentBelowTLS(t *testing.T) {
 	base := &countedCloseConn{}
 	parent := NewTimeoutConn(base, time.Second)
-	wrapped := WrapConn(tls.Client(parent, &tls.Config{InsecureSkipVerify: true}), parent, WithParentClose())
+	wrapped := WrapConn(tls.Client(parent, &tls.Config{InsecureSkipVerify: true}), parent, WithWrapParentClose())
 
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -239,7 +237,7 @@ func TestWrapConnWithParentCloseAvoidsDoubleClosingParentBelowTLS(t *testing.T) 
 func TestWrapConnWithParentCloseIgnoresParentClosedThroughRWC(t *testing.T) {
 	t.Run("sibling wrapper", func(t *testing.T) {
 		base := &countedCloseConn{}
-		wrapped := WrapConn(NewTimeoutConn(base, time.Second), NewAddrOverrideConn(base, nil, nil), WithParentClose())
+		wrapped := WrapConn(NewTimeoutConn(base, time.Second), NewAddrOverrideConn(base, nil, nil), WithWrapParentClose())
 
 		if err := wrapped.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -253,7 +251,7 @@ func TestWrapConnWithParentCloseIgnoresParentClosedThroughRWC(t *testing.T) {
 	t.Run("tls parent", func(t *testing.T) {
 		base := &countedCloseConn{}
 		tlsConn := tls.Client(base, &tls.Config{InsecureSkipVerify: true})
-		wrapped := WrapConn(NewTimeoutConn(tlsConn, time.Second), tlsConn, WithParentClose())
+		wrapped := WrapConn(NewTimeoutConn(tlsConn, time.Second), tlsConn, WithWrapParentClose())
 
 		if err := wrapped.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -270,18 +268,18 @@ type cyclicRawConn struct {
 	next net.Conn
 }
 
-func (c *cyclicRawConn) RawConn() net.Conn { return c.next }
+func (c *cyclicRawConn) NetConn() net.Conn { return c.next }
 
-func TestRawConnOfStopsOnCyclicProviders(t *testing.T) {
+func TestInnermostConnStopsOnCyclicProviders(t *testing.T) {
 	a := &cyclicRawConn{}
 	b := &cyclicRawConn{next: a}
 	a.next = b
 
-	if got := RawConnOf(a); got == nil {
-		t.Fatal("RawConnOf(cycle) = nil, want a conn from the cycle")
+	if got := InnermostConn(a); got == nil {
+		t.Fatal("InnermostConn(cycle) = nil, want a conn from the cycle")
 	}
 	parent := &countedCloseConn{}
-	if err := WrapConn(a, parent, WithParentClose()).Close(); err != nil {
+	if err := WrapConn(a, parent, WithWrapParentClose()).Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 	if calls := parent.Calls(); calls != 1 {
@@ -296,17 +294,17 @@ type selfConn struct {
 	tag any
 }
 
-func (c selfConn) RawConn() net.Conn { return selfConn{Conn: c.Conn, tag: c.tag} }
+func (c selfConn) NetConn() net.Conn { return selfConn{Conn: c.Conn, tag: c.tag} }
 
-func TestRawConnOfHandlesUncomparableValues(t *testing.T) {
+func TestInnermostConnHandlesUncomparableValues(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 	c := selfConn{Conn: a, tag: []byte("not comparable")}
-	if got := RawConnOf(c); got == nil {
-		t.Fatal("RawConnOf() = nil")
+	if got := InnermostConn(c); got == nil {
+		t.Fatal("InnermostConn() = nil")
 	}
-	w := WrapConn(c, c, WithParentClose())
+	w := WrapConn(c, c, WithWrapParentClose())
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}

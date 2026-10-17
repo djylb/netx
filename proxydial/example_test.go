@@ -1,4 +1,4 @@
-package proxy_test
+package proxydial_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/djylb/netx/proxy"
+	"github.com/djylb/netx/proxydial"
 )
 
 func ExampleFromURL() {
@@ -16,7 +16,7 @@ func ExampleFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	d, err := proxy.FromURL(u, &net.Dialer{Timeout: 10 * time.Second})
+	d, err := proxydial.FromURL(u, &net.Dialer{Timeout: 10 * time.Second}, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func ExampleFromURL() {
 }
 
 func ExampleParseNoProxy() {
-	np := proxy.ParseNoProxy("localhost, .corp.example, 10.0.0.0/8, internal:8080")
+	np := proxydial.ParseNoProxy("localhost, .corp.example, 10.0.0.0/8, internal:8080")
 	for _, target := range []string{"localhost:5432", "db.corp.example:5432", "corp.example:443", "10.1.2.3:22", "internal:80", "example.com:443"} {
 		fmt.Println(target, np.Match(target))
 	}

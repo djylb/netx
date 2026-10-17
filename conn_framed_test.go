@@ -111,20 +111,30 @@ func frameBytes(payload string) []byte {
 	return append(binary.BigEndian.AppendUint16(nil, uint16(len(payload))), payload...)
 }
 
-func TestFramedConnWriteRejectsOversizedPayload(t *testing.T) {
+// A datagram FramedConn rejects a payload too large for one frame, and a
+// stream one sends it as several frames that its reader joins up again.
+func TestFramedConnWriteOversizedPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte("a"), 2*MaxFramePayload+123)
 	raw := &byteBufferConn{}
-	fc := NewFramedConn(raw)
-	payload := bytes.Repeat([]byte("a"), MaxFramePayload+123)
-
-	n, err := fc.Write(payload)
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("Write() error = %v, want %v", err, ErrFrameTooLarge)
+	fc := NewFramedConn(raw, WithFramedDatagrams())
+	if n, err := fc.Write(payload); !errors.Is(err, ErrFrameTooLarge) || n != 0 || raw.Len() != 0 {
+		t.Fatalf("datagram Write() = %d, %v, wire %d; want ErrFrameTooLarge", n, err, raw.Len())
 	}
-	if n != 0 {
-		t.Fatalf("Write() n = %d, want 0", n)
+	if err := NewFramedConn(raw).WriteFrame(payload); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("WriteFrame() error = %v, want ErrFrameTooLarge", err)
 	}
-	if raw.Len() != 0 {
-		t.Fatalf("wire len = %d, want 0", raw.Len())
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	go func() {
+		n, err := NewFramedConn(a).Write(payload)
+		if n != len(payload) || err != nil {
+			t.Errorf("stream Write() = %d, %v", n, err)
+		}
+		_ = a.Close()
+	}()
+	got, err := io.ReadAll(NewFramedConn(b))
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("read back %d bytes, %v; want the %d bytes written", len(got), err, len(payload))
 	}
 }
 
@@ -233,8 +243,8 @@ func TestFramedConnHelpersHandleNilUnderlyingConn(t *testing.T) {
 	if _, err := nilConn.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("nil Write() error = %v, want %v", err, net.ErrClosed)
 	}
-	if err := nilConn.Close(); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("nil Close() error = %v, want %v", err, net.ErrClosed)
+	if err := nilConn.Close(); err != nil {
+		t.Fatalf("nil Close() error = %v, want nil, as for the other wrappers", err)
 	}
 	if err := nilConn.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("nil SetDeadline() error = %v, want %v", err, net.ErrClosed)
@@ -259,8 +269,8 @@ func TestFramedConnHelpersHandleNilUnderlyingConn(t *testing.T) {
 	if _, err := malformed.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("malformed Write() error = %v, want %v", err, net.ErrClosed)
 	}
-	if err := malformed.Close(); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("malformed Close() error = %v, want %v", err, net.ErrClosed)
+	if err := malformed.Close(); err != nil {
+		t.Fatalf("malformed Close() error = %v, want nil", err)
 	}
 	if err := malformed.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("malformed SetDeadline() error = %v, want %v", err, net.ErrClosed)
@@ -281,7 +291,7 @@ func TestFramedConnHelpersHandleNilUnderlyingConn(t *testing.T) {
 
 func TestFramedConnDatagramReadsDiscardFrameTail(t *testing.T) {
 	raw := &byteBufferConn{}
-	fc := NewFramedConn(raw, WithDatagramReads())
+	fc := NewFramedConn(raw, WithFramedDatagrams())
 	for _, frame := range []string{"abcdef", "gh", "", "ijk", "lmnop"} {
 		if err := fc.WriteFrame([]byte(frame)); err != nil {
 			t.Fatalf("WriteFrame(%q) error = %v", frame, err)
@@ -378,8 +388,8 @@ func TestFramedConnDesyncKeepsNonTimeoutCause(t *testing.T) {
 		if !errors.As(err, &opErr) || opErr != cause {
 			t.Fatalf("errors.As(%v, *net.OpError) = %v, want the cause", err, opErr)
 		}
-		if kind := NetErrorKind(err); kind != "rst" {
-			t.Fatalf("NetErrorKind(%v) = %q, want rst", err, kind)
+		if kind := NetErrorKind(err); kind != KindConnReset {
+			t.Fatalf("NetErrorKind(%v) = %q, want conn_reset", err, kind)
 		}
 	}
 
@@ -416,7 +426,7 @@ func TestFramedConnBoundaryReadErrorsStayRetryable(t *testing.T) {
 	for _, datagram := range []bool{false, true} {
 		var opts []FramedOption
 		if datagram {
-			opts = append(opts, WithDatagramReads())
+			opts = append(opts, WithFramedDatagrams())
 		}
 		raw := &framedScriptConn{steps: []framedReadStep{
 			{err: framedTimeoutError()},
@@ -594,7 +604,7 @@ func TestFramedConnConcurrentReadWrite(t *testing.T) {
 	defer func() { _ = left.Close() }()
 	defer func() { _ = right.Close() }()
 	a := NewFramedConn(left)
-	b := NewFramedConn(right, WithDatagramReads())
+	b := NewFramedConn(right, WithFramedDatagrams())
 
 	const frames = 200
 	var wg sync.WaitGroup
@@ -643,9 +653,9 @@ func TestFramedConnReadBuffer(t *testing.T) {
 		wire = append(wire, frameBytes(s)...)
 	}
 	for _, datagram := range []bool{false, true} {
-		opts := []FramedOption{WithReadBuffer(64)}
+		opts := []FramedOption{WithFramedReadBuffer(64)}
 		if datagram {
-			opts = append(opts, WithDatagramReads())
+			opts = append(opts, WithFramedDatagrams())
 		}
 		src := &countingReadConn{Conn: &teeTestConn{readBuf: bytes.NewBuffer(append([]byte(nil), wire...))}}
 		fc := NewFramedConn(src, opts...)
@@ -704,7 +714,7 @@ func TestFramedConnStreamReadSkipsEmptyFrames(t *testing.T) {
 	wire = append(wire, frameBytes("")...)
 	for _, readBuffer := range []int{0, 64} {
 		newConn := func() *FramedConn {
-			return NewFramedConn(&teeTestConn{readBuf: bytes.NewBuffer(append([]byte(nil), wire...))}, WithReadBuffer(readBuffer))
+			return NewFramedConn(&teeTestConn{readBuf: bytes.NewBuffer(append([]byte(nil), wire...))}, WithFramedReadBuffer(readBuffer))
 		}
 		fc := newConn()
 		buf := make([]byte, 16)
@@ -736,7 +746,7 @@ func (m framedReadMode) String() string {
 
 func (m framedReadMode) conn(raw net.Conn) *FramedConn {
 	if m == datagramReads {
-		return NewFramedConn(raw, WithDatagramReads())
+		return NewFramedConn(raw, WithFramedDatagrams())
 	}
 	return NewFramedConn(raw)
 }
@@ -941,7 +951,7 @@ func TestFramedConnDatagramDiscardErrorIsRetryable(t *testing.T) {
 		{err: framedTimeoutError()},
 		{data: []byte("hello")},
 		{data: frameBytes("abc")},
-	}}, WithDatagramReads())
+	}}, WithFramedDatagrams())
 	if _, err := fc.Read(nil); !IsTimeout(err) || errors.Is(err, ErrFrameDesync) {
 		t.Fatalf("Read(nil) error = %v, want the plain timeout", err)
 	}

@@ -1,6 +1,7 @@
 package socks5_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -49,7 +50,7 @@ func TestServerOverTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	tlsLn := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}})
-	s := &socks5.Server{SOCKS4: true, PacketConn: udp}
+	s := &socks5.Server{SOCKS4: true, UDPSocket: udp}
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(tlsLn) }()
 	t.Cleanup(func() {
@@ -107,8 +108,8 @@ func TestServerOverTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, payload, err := socks5.ParseDatagram(buf[:n]); err != nil || string(payload) != "dgram" {
-		t.Fatalf("UDP reply = %q, %v", payload, err)
+	if _, h, err := socks5.DecodeDatagram(buf[:n]); err != nil || string(buf[h:n]) != "dgram" {
+		t.Fatalf("UDP reply = %q, %v", buf[:n], err)
 	}
 }
 
@@ -141,9 +142,9 @@ func TestServerOverTLSHandshakeTimeout(t *testing.T) {
 	tlsLn := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}})
 	s := &socks5.Server{
 		HandshakeTimeout: 200 * time.Millisecond,
-		Auth: []socks5.Authenticator{socks5.UserPassAuth{Check: func(string, string) bool {
+		Auth: []socks5.Authenticator{socks5.UserPassAuth{Check: func(context.Context, net.Conn, string, string) (bool, error) {
 			time.Sleep(300 * time.Millisecond) // past the handshake timeout
-			return true
+			return true, nil
 		}}},
 	}
 	done := make(chan error, 1)

@@ -180,7 +180,7 @@ func TestPacketListenerReopensClosedPeer(t *testing.T) {
 func TestPacketListenerFilterAndBacklog(t *testing.T) {
 	var mu sync.Mutex
 	allowed := map[string]bool{}
-	l, pc := newCountingUDPListener(t, WithAcceptBacklog(1), WithAcceptFilter(func(peer net.Addr) bool {
+	l, pc := newCountingUDPListener(t, WithPacketAcceptBacklog(1), WithPacketAcceptFilter(func(peer net.Addr, _ []byte) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return allowed[peer.String()]
@@ -247,7 +247,7 @@ func TestPacketListenerQueueDropsOverflow(t *testing.T) {
 }
 
 func TestPacketListenerIdleTimeout(t *testing.T) {
-	l := newUDPListener(t, WithIdleTimeout(80*time.Millisecond))
+	l := newUDPListener(t, WithPacketIdleTimeout(80*time.Millisecond))
 	a := dialUDP(t, l)
 	send(t, l, a, "x")
 	// Before Accept, where the idle time starts, so that a slow host
@@ -338,7 +338,7 @@ func TestPacketConnCloseStopsDeadlineTimers(t *testing.T) {
 // the accept filter runs or a connection is allocated.
 func TestPacketListenerFullBacklogDropsEarly(t *testing.T) {
 	var filtered atomic.Int32
-	l := newUDPListener(t, WithAcceptBacklog(1), WithAcceptFilter(func(net.Addr) bool {
+	l := newUDPListener(t, WithPacketAcceptBacklog(1), WithPacketAcceptFilter(func(net.Addr, []byte) bool {
 		filtered.Add(1)
 		return true
 	}))
@@ -435,7 +435,7 @@ func TestPacketListenerFilterMayUseListener(t *testing.T) {
 	t.Run("close listener", func(t *testing.T) {
 		var self atomic.Pointer[PacketListener]
 		closed := make(chan error, 1)
-		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+		l := newUDPListener(t, WithPacketAcceptFilter(func(net.Addr, []byte) bool {
 			closed <- self.Load().Close()
 			return true
 		}))
@@ -469,7 +469,7 @@ func TestPacketListenerFilterMayUseListener(t *testing.T) {
 	})
 	t.Run("close connection", func(t *testing.T) {
 		var first atomic.Pointer[net.Conn]
-		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+		l := newUDPListener(t, WithPacketAcceptFilter(func(net.Addr, []byte) bool {
 			if c := first.Load(); c != nil {
 				_ = (*c).Close()
 			}
@@ -496,7 +496,7 @@ func TestPacketListenerConcurrentCloseFromFilter(t *testing.T) {
 		entered := make(chan struct{})
 		release := make(chan struct{})
 		var once sync.Once
-		l := newUDPListener(t, WithAcceptFilter(func(net.Addr) bool {
+		l := newUDPListener(t, WithPacketAcceptFilter(func(net.Addr, []byte) bool {
 			once.Do(func() { close(entered) })
 			<-release
 			_ = self.Load().Close()
@@ -589,7 +589,7 @@ func TestPacketListenerGenericPacketConn(t *testing.T) {
 }
 
 func TestPacketListenerMaxDatagram(t *testing.T) {
-	l := newUDPListener(t, WithMaxDatagram(4))
+	l := newUDPListener(t, WithPacketMaxDatagram(4))
 	a := dialUDP(t, l)
 	send(t, l, a, "truncated")
 	c := acceptWithin(t, l)
@@ -674,7 +674,7 @@ func TestPacketListenerClearsExpiredReadDeadline(t *testing.T) {
 func TestPacketListenerIdleTimeoutSparesBacklog(t *testing.T) {
 	// Long enough that the Read below comes before the sweep on a busy host.
 	const idle = 300 * time.Millisecond
-	l := newUDPListener(t, WithIdleTimeout(idle))
+	l := newUDPListener(t, WithPacketIdleTimeout(idle))
 	a := dialUDP(t, l)
 	send(t, l, a, "x")
 	// Several sweeps run while the connection waits for Accept.

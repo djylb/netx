@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +50,32 @@ func isClosed(t *errText) bool {
 	return strings.Contains(t.text(), "use of closed network connection")
 }
 
+// IsCanceled reports whether err comes from a canceled context or
+// operation: context.Canceled, which a canceled dial or lookup of package
+// net matches, or the "operation was canceled" text that some wrappers pass
+// on without the error value.
+func IsCanceled(err error) bool {
+	return err != nil && isCanceled(&errText{err: err})
+}
+
+func isCanceled(t *errText) bool {
+	return errors.Is(t.err, context.Canceled) || strings.Contains(t.text(), "operation was canceled")
+}
+
+// IsDNSError reports whether err is a failed name lookup: a *net.DNSError in
+// the chain.
+func IsDNSError(err error) bool {
+	_, ok := errors.AsType[*net.DNSError](err)
+	return ok
+}
+
+// IsDNSNotFound reports whether err is a lookup of a name or record that does
+// not exist, as opposed to a failure to ask, such as a timeout.
+func IsDNSNotFound(err error) bool {
+	de, ok := errors.AsType[*net.DNSError](err)
+	return ok && de.IsNotFound
+}
+
 // IsConnReset reports whether err looks like a connection reset.
 func IsConnReset(err error) bool {
 	return err != nil && isConnReset(&errText{err: err})
@@ -95,8 +122,9 @@ func isConnRefused(t *errText) bool {
 		"activelyrefusedit")
 }
 
-// IsHostUnreachable reports whether err looks like an unreachable host.
-// DNS lookup failures are not included; check for *net.DNSError separately.
+// IsHostUnreachable reports whether err looks like an unreachable host. A
+// failed lookup is KindDNS for NetErrorKind, whatever its cause; IsDNSError
+// tells it apart.
 func IsHostUnreachable(err error) bool {
 	return err != nil && isHostUnreachable(&errText{err: err})
 }
@@ -135,97 +163,211 @@ func isPermissionDenied(t *errText) bool {
 		"forbiddenbyitsaccesspermissions")
 }
 
-// NetErrorKind returns a stable string category for common network errors:
-// "none", "rst", "aborted", "broken_pipe", "refused", "host_unreachable",
-// "network_unreachable", "permission_denied", "timeout", "unexpected_eof",
-// "eof", "closed" or "other".
-func NetErrorKind(err error) string {
+// IsAddrInUse reports whether err looks like an address already in use,
+// as when a listener's port is taken.
+func IsAddrInUse(err error) bool {
+	return err != nil && isAddrInUse(&errText{err: err})
+}
+
+func isAddrInUse(t *errText) bool {
+	return errorIsAny(t.err, addrInUseErrnos) || t.has(
+		"addressalreadyinuse",
+		"onlyoneusageofeachsocketaddress")
+}
+
+// IsAddrNotAvailable reports whether err looks like an address that is not
+// available on this host, as when binding to an address of another host.
+func IsAddrNotAvailable(err error) bool {
+	return err != nil && isAddrNotAvailable(&errText{err: err})
+}
+
+func isAddrNotAvailable(t *errText) bool {
+	return errorIsAny(t.err, addrNotAvailErrnos) || t.has(
+		"cannotassignrequestedaddress",
+		"requestedaddressisnotvalidinitscontext")
+}
+
+// IsMessageTooLarge reports whether err looks like a datagram too large to
+// send or receive whole.
+func IsMessageTooLarge(err error) bool {
+	return err != nil && isMessageTooLarge(&errText{err: err})
+}
+
+func isMessageTooLarge(t *errText) bool {
+	return errorIsAny(t.err, msgSizeErrnos) || t.has(
+		"messagetoolong",
+		"messagesentonadatagramsocketwaslarger")
+}
+
+// ErrorKind is a stable category of a network error, for metrics and logs;
+// see NetErrorKind.
+type ErrorKind string
+
+// The kinds that NetErrorKind returns, named after the classifier that
+// matches each.
+const (
+	KindNone               ErrorKind = "none"
+	KindCanceled           ErrorKind = "canceled"
+	KindDNS                ErrorKind = "dns"
+	KindConnReset          ErrorKind = "conn_reset"
+	KindConnAborted        ErrorKind = "conn_aborted"
+	KindBrokenPipe         ErrorKind = "broken_pipe"
+	KindConnRefused        ErrorKind = "conn_refused"
+	KindHostUnreachable    ErrorKind = "host_unreachable"
+	KindNetworkUnreachable ErrorKind = "network_unreachable"
+	KindPermissionDenied   ErrorKind = "permission_denied"
+	KindAddrInUse          ErrorKind = "addr_in_use"
+	KindAddrNotAvailable   ErrorKind = "addr_not_available"
+	KindMessageTooLarge    ErrorKind = "message_too_large"
+	KindTimeout            ErrorKind = "timeout"
+	KindUnexpectedEOF      ErrorKind = "unexpected_eof"
+	KindEOF                ErrorKind = "eof"
+	KindClosed             ErrorKind = "closed"
+	KindOther              ErrorKind = "other"
+)
+
+// NetErrorKind returns the category of err: KindNone for nil, the kind of
+// the first classifier that matches it, in the order of the constants, or
+// KindOther.
+func NetErrorKind(err error) ErrorKind {
 	if err == nil {
-		return "none"
+		return KindNone
 	}
 	return netErrorKind(&errText{err: err})
 }
 
 // netErrorKind is NetErrorKind for a non-nil error. The classifiers share t,
 // so the error is formatted and normalized at most once.
-func netErrorKind(t *errText) string {
+func netErrorKind(t *errText) ErrorKind {
 	switch {
+	// Before the others, whose text fallbacks would match the cause that a
+	// lookup or a canceled operation carries.
+	case isCanceled(t):
+		return KindCanceled
+	case IsDNSError(t.err):
+		return KindDNS
 	case isConnReset(t):
-		return "rst"
+		return KindConnReset
 	case isConnAborted(t):
-		return "aborted"
+		return KindConnAborted
 	case isBrokenPipe(t):
-		return "broken_pipe"
+		return KindBrokenPipe
 	case isConnRefused(t):
-		return "refused"
+		return KindConnRefused
 	case isHostUnreachable(t):
-		return "host_unreachable"
+		return KindHostUnreachable
 	case isNetworkUnreachable(t):
-		return "network_unreachable"
+		return KindNetworkUnreachable
 	case isPermissionDenied(t):
-		return "permission_denied"
+		return KindPermissionDenied
+	case isAddrInUse(t):
+		return KindAddrInUse
+	case isAddrNotAvailable(t):
+		return KindAddrNotAvailable
+	case isMessageTooLarge(t):
+		return KindMessageTooLarge
 	case isTimeout(t):
-		return "timeout"
+		return KindTimeout
 	case errors.Is(t.err, io.ErrUnexpectedEOF):
-		return "unexpected_eof"
+		return KindUnexpectedEOF
 	case errors.Is(t.err, io.EOF):
-		return "eof"
+		return KindEOF
 	case isClosed(t):
-		return "closed"
+		return KindClosed
 	default:
-		return "other"
+		return KindOther
 	}
 }
 
-// DescribeNetError returns a compact diagnostic string for a network error.
-// For the errno classes recognised by NetErrorKind it adds errno_name with the
-// POSIX name (ECONNRESET also for WSAECONNRESET, for example), which does not
-// depend on the platform or the system language. Other errnos are reported as
-// errno=<number> only; their system message is part of err.
-func DescribeNetError(err error, c net.Conn) string {
+// NetErrorInfo describes a network error for diagnostics; see
+// NetErrorDetails. Empty fields are not known.
+type NetErrorInfo struct {
+	Kind    ErrorKind
+	Err     string // err.Error()
+	Timeout bool
+	Local   string // the connection's local address
+	Remote  string // the connection's remote address
+	Op      string // of the *net.OpError in the chain
+	Net     string
+	Source  string
+	Addr    string
+	Syscall string // of the *os.SyscallError in the chain
+	// Errno is the platform errno in the chain, 0 for none, and ErrnoName
+	// its POSIX name for the errnos that the classifiers know (ECONNRESET
+	// also for WSAECONNRESET, for example), which depends on neither the
+	// platform nor the system language.
+	Errno     int
+	ErrnoName string
+}
+
+// NetErrorDetails describes err, and the addresses of c if it is not nil, as
+// fields, which String formats as one compact line for logs.
+func NetErrorDetails(err error, c net.Conn) NetErrorInfo {
 	if err == nil {
-		return "kind=none"
+		return NetErrorInfo{Kind: KindNone}
 	}
-
 	t := &errText{err: err}
-	parts := []string{
-		"kind=" + netErrorKind(t),
-		fmt.Sprintf("err=%q", t.text()),
-	}
-
+	info := NetErrorInfo{Kind: netErrorKind(t), Err: t.text(), Timeout: isTimeout(t)}
 	if c != nil {
 		if local := c.LocalAddr(); local != nil {
-			parts = append(parts, fmt.Sprintf("local=%s", local.String()))
+			info.Local = local.String()
 		}
 		if remote := c.RemoteAddr(); remote != nil {
-			parts = append(parts, fmt.Sprintf("remote=%s", remote.String()))
+			info.Remote = remote.String()
 		}
 	}
-
-	parts = append(parts, fmt.Sprintf("timeout=%t", isTimeout(t)))
-
 	if opErr, ok := errors.AsType[*net.OpError](err); ok {
-		if opErr.Op != "" {
-			parts = append(parts, fmt.Sprintf("op=%s", opErr.Op))
-		}
-		if opErr.Net != "" {
-			parts = append(parts, fmt.Sprintf("net=%s", opErr.Net))
-		}
+		info.Op, info.Net = opErr.Op, opErr.Net
 		if opErr.Source != nil {
-			parts = append(parts, fmt.Sprintf("source=%s", opErr.Source.String()))
+			info.Source = opErr.Source.String()
 		}
 		if opErr.Addr != nil {
-			parts = append(parts, fmt.Sprintf("addr=%s", opErr.Addr.String()))
+			info.Addr = opErr.Addr.String()
 		}
 	}
-
 	if sysErr, ok := errors.AsType[*os.SyscallError](err); ok {
-		parts = append(parts, fmt.Sprintf("syscall=%s", sysErr.Syscall))
+		info.Syscall = sysErr.Syscall
 	}
+	info.Errno, info.ErrnoName = errnoOf(err)
+	return info
+}
 
-	parts = append(parts, errnoParts(err)...)
-
+// String formats i as space-separated key=value fields, such as
+// `kind=conn_reset err="..." remote=192.0.2.1:443 timeout=false errno=104
+// errno_name=ECONNRESET`.
+func (i NetErrorInfo) String() string {
+	if i.Kind == KindNone {
+		return "kind=none"
+	}
+	parts := []string{"kind=" + string(i.Kind), fmt.Sprintf("err=%q", i.Err)}
+	for _, f := range [...]struct{ key, value string }{{"local", i.Local}, {"remote", i.Remote}} {
+		if f.value != "" {
+			parts = append(parts, f.key+"="+f.value)
+		}
+	}
+	parts = append(parts, fmt.Sprintf("timeout=%t", i.Timeout))
+	for _, f := range [...]struct{ key, value string }{
+		{"op", i.Op}, {"net", i.Net}, {"source", i.Source}, {"addr", i.Addr}, {"syscall", i.Syscall},
+	} {
+		if f.value != "" {
+			parts = append(parts, f.key+"="+f.value)
+		}
+	}
+	if i.Errno != 0 {
+		parts = append(parts, fmt.Sprintf("errno=%d", i.Errno))
+		if i.ErrnoName != "" {
+			parts = append(parts, "errno_name="+i.ErrnoName)
+		}
+	}
 	return strings.Join(parts, " ")
+}
+
+// ErrnoName returns the POSIX name of the platform errno in err's chain for
+// the errnos that the classifiers know, such as ECONNRESET also for
+// WSAECONNRESET, or "".
+func ErrnoName(err error) string {
+	_, name := errnoOf(err)
+	return name
 }
 
 // errText holds the text of an error for the classifiers' fallbacks. Each

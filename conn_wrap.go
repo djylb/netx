@@ -19,37 +19,73 @@ type wrapOptions struct {
 	closeParent bool
 }
 
-// RawConnProvider is implemented by wrappers that can expose their underlying net.Conn.
-// RawConnOf also follows the standard library's NetConn() net.Conn method, as
-// implemented by *tls.Conn.
-type RawConnProvider interface {
-	RawConn() net.Conn
-}
-
 // WrapOption configures WrapConn.
 type WrapOption func(*wrapOptions)
 
-// WithParentClose makes WrapConn close parent after closing rwc.
-// parent is skipped when rwc unwraps to it through RawConn or NetConn, and
+// WithWrapParentClose makes WrapConn close parent after closing rwc.
+// parent is skipped when rwc unwraps to it through NetConn, and
 // net.ErrClosed from parent is ignored because rwc may already have closed it.
-func WithParentClose() WrapOption {
+func WithWrapParentClose() WrapOption {
 	return func(o *wrapOptions) {
 		o.closeParent = true
 	}
 }
 
-// RawConnOf returns v's underlying net.Conn when it is available.
-// It follows RawConn() and NetConn() chains to the innermost connection, and
-// returns nil for a nil connection, also a nil pointer such as a nil
-// *net.TCPConn, and for a value that is not a connection.
-func RawConnOf(v any) net.Conn {
+// InnermostConn returns the innermost connection beneath v: it follows the
+// wrappers of this package and the NetConn() net.Conn methods of others,
+// such as *tls.Conn's, which return the connection one layer down. It
+// returns v itself when v wraps nothing, and nil for a nil connection, also
+// a nil pointer such as a nil *net.TCPConn, and for a value that is not a
+// connection. The connection is borrowed: v's owner still closes it.
+func InnermostConn(v any) net.Conn {
 	return rawConnOf(v)
+}
+
+// ConnAs returns the first connection of type T in the chain beneath v, v
+// included, as errors.As does for errors: through the wrappers of this
+// package and NetConn methods, such as to find the *tls.Conn or
+// *TimeoutConn beneath other wrappers.
+func ConnAs[T any](v any) (T, bool) {
+	var seen [8]any
+	return connAs[T](v, 0, seen[:0])
+}
+
+func connAs[T any](v any, depth int, seen []any) (T, bool) {
+	var zero T
+	if v == nil || isNilPointer(v) {
+		return zero, false
+	}
+	if t, ok := v.(T); ok {
+		return t, true
+	}
+	if first, second, ok := layersOf(v); ok {
+		if slices.Contains(seen, v) {
+			return zero, false
+		}
+		seen = append(seen, v)
+		for _, inner := range [...]any{first, second} {
+			if t, ok := connAs[T](inner, depth, seen); ok {
+				return t, true
+			}
+		}
+		return zero, false
+	}
+	// Only looked at, not owned.
+	//noinspection GoResourceLeak
+	next, ok := nextConn(v)
+	if !ok || next == nil || depth >= maxUnwrapDepth {
+		return zero, false
+	}
+	if conn, isConn := v.(net.Conn); isConn && sameNetConn(next, conn) {
+		return zero, false
+	}
+	return connAs[T](next, depth+1, seen)
 }
 
 // WrapConn exposes rwc as a net.Conn using parent for addresses and deadlines.
 // A nil parent is rwc itself when it is a net.Conn, so that its own wrappers
 // keep their addresses and deadlines, and otherwise the connection beneath it.
-// Closing the returned connection closes rwc. Use WithParentClose to also close parent.
+// Closing the returned connection closes rwc. Use WithWrapParentClose to also close parent.
 func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.Conn {
 	cfg := newWrapOptions(opts)
 	if parent == nil {
@@ -57,7 +93,7 @@ func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.C
 			parent = c
 		} else {
 			// Borrowed: closing the result closes rwc, and parent only with
-			// WithParentClose.
+			// WithWrapParentClose.
 			//noinspection GoResourceLeak
 			parent = rawConnOf(rwc)
 		}
@@ -159,14 +195,12 @@ func (w *wrappedConn) innerReader() io.Reader {
 	return w.rwc
 }
 
-func (w *wrappedConn) RawConn() net.Conn {
+// NetConn returns the connection whose addresses and deadlines w uses.
+func (w *wrappedConn) NetConn() net.Conn {
 	if w == nil {
 		return nil
 	}
-	if raw := rawConnOf(w.parent); raw != nil {
-		return raw
-	}
-	return rawConnOf(w.rwc)
+	return w.parent
 }
 
 func rawConnOf(v any) net.Conn {
@@ -174,15 +208,13 @@ func rawConnOf(v any) net.Conn {
 	return rawConnOfDepth(v, 0, seen[:0])
 }
 
-// maxUnwrapDepth bounds RawConn/NetConn chains so cyclic wrappers cannot loop forever.
+// maxUnwrapDepth bounds NetConn chains so cyclic wrappers cannot loop forever.
 const maxUnwrapDepth = 16
 
 // nextConn returns the connection that v wraps, if v exposes one.
 // The returned connection is borrowed; inspecting it does not transfer ownership.
 func nextConn(v any) (net.Conn, bool) {
 	switch getter := v.(type) {
-	case RawConnProvider:
-		return getter.RawConn(), true
 	case interface{ NetConn() net.Conn }:
 		// *tls.Conn.NetConn does not accept a nil receiver.
 		if isNilPointer(getter) {
@@ -201,28 +233,29 @@ func isNilPointer(v any) bool {
 }
 
 // layersOf returns what a wrapper of this package wraps, one layer down and
-// in the order its RawConn looks at it, so that unwrapping goes through it
-// without calling RawConn, which would start over. Only these types match,
-// not types that embed them and may have a RawConn of their own.
+// in the order unwrapping looks at it, without their NetConn methods, so that
+// a cycle through them is seen and both sides of a WrapConn are looked at.
+// Only these types match, not types that embed them and may have a NetConn
+// of their own.
 func layersOf(v any) (first, second any, ok bool) {
 	switch c := v.(type) {
 	case *PrefixConn:
 		if c != nil {
-			return c.Conn, nil, true
+			return c.conn, nil, true
 		}
 	case *AddrOverrideConn:
 		if c != nil {
-			return c.Conn, nil, true
+			return c.conn, nil, true
 		}
 	case *TimeoutConn:
 		if c != nil {
-			return c.Conn, nil, true
+			return c.conn, nil, true
 		}
 	case *FramedConn:
 		if c != nil {
-			return c.Conn, nil, true
+			return c.conn, nil, true
 		}
-	case *TeeConn:
+	case *RecordingConn:
 		if c != nil {
 			return c.conn(), nil, true
 		}
@@ -234,13 +267,17 @@ func layersOf(v any) (first, second any, ok bool) {
 		if c != nil {
 			return c.parent, c.rwc, true
 		}
+	case *trackedConn:
+		if c != nil {
+			return c.conn, nil, true
+		}
 	default:
 		return nil, nil, false
 	}
 	return nil, nil, true // a nil wrapper
 }
 
-// rawConnOfDepth unwraps v. depth counts the RawConn and NetConn calls of
+// rawConnOfDepth unwraps v. depth counts the NetConn calls of
 // other packages' wrappers, which may return a new wrapper each time, and
 // seen holds this package's wrappers on the way, whose fields a caller may
 // have pointed back at them; either way a cycle stops.
@@ -285,7 +322,7 @@ func rawConnOfDepth(v any, depth int, seen []any) net.Conn {
 }
 
 // sameWrappedParent reports whether parent is rwc itself or any connection
-// reachable from rwc through RawConn or NetConn, so closing rwc closes parent.
+// reachable from rwc through NetConn, so closing rwc closes parent.
 func sameWrappedParent(rwc io.ReadWriteCloser, parent net.Conn) bool {
 	if rwc == nil || parent == nil {
 		return false

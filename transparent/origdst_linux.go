@@ -10,142 +10,74 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-
-	"github.com/djylb/netx"
 )
 
 // soOriginalDst is SO_ORIGINAL_DST for SOL_IP and IP6T_SO_ORIGINAL_DST for SOL_IPV6.
 const soOriginalDst = 80
 
-// OriginalDestination returns the pre-redirect destination of an accepted
-// TCP connection.
-//
-// On Linux it reads SO_ORIGINAL_DST or IP6T_SO_ORIGINAL_DST (REDIRECT/DNAT),
-// and on FreeBSD it queries pf with DIOCNATLOOK. When that lookup finds no
-// redirect, as for a connection that conntrack or pf has no translation for
-// or a host without them, both fall back to conn's local address, which is
-// the target for TPROXY or IP_BINDANY sockets. A direct, non-redirected
-// connection therefore yields its own local address rather than an error.
-// Other lookup failures, such as for a closed connection or, on FreeBSD,
-// without permission to read /dev/pf, are returned. On macOS it queries pf with
-// DIOCNATLOOK, which XNU only allows for root, and has no fallback. On other
-// platforms it returns ErrOriginalDestinationUnsupported. Wrappers such as
-// netx.TimeoutConn are looked through with netx.RawConnOf, so the lookup, and
-// the fallback to the local address, use the accepted socket rather than an
-// address that a wrapper reports, such as the destination of a PROXY header,
-// which conn.LocalAddr returns. A nil conn returns net.ErrClosed.
-func OriginalDestination(conn net.Conn) (*net.TCPAddr, error) {
-	if conn == nil {
-		return nil, net.ErrClosed
-	}
-	// A nil pointer, such as a nil *net.TCPConn, unwraps to nil.
-	if conn = netx.RawConnOf(conn); conn == nil {
-		return nil, net.ErrClosed
-	}
-	dst, err := redirectedDestinationFromConn(conn)
-	if err == nil {
-		return dst, nil
-	}
-	if !errors.Is(err, errNotRedirected) {
-		return nil, fmt.Errorf("transparent: original destination: %w", err)
-	}
-	localDst, localErr := destinationFromLocalAddr(conn.LocalAddr())
-	if localErr == nil {
-		return localDst, nil
-	}
-	return nil, fmt.Errorf("failed to get transparent address: redirect=%w local=%w", err, localErr)
-}
-
-func redirectedDestinationFromConn(conn net.Conn) (*net.TCPAddr, error) {
-	sysconn, ok := conn.(syscall.Conn)
-	if !ok {
-		// No socket that conntrack could have translated.
-		return nil, fmt.Errorf("%w: connection does not support SyscallConn", errNotRedirected)
-	}
-	raw, err := sysconn.SyscallConn()
-	if err != nil {
-		return nil, err
-	}
-
-	var dst *net.TCPAddr
-	var opErr error
-
-	err = raw.Control(func(fd uintptr) {
-		dst, opErr = originalDestinationFromFD(int(fd))
-	})
-
-	if err != nil {
-		return nil, err
-	}
-	if opErr != nil {
-		return nil, opErr
-	}
-	return dst, nil
-}
-
-// originalDestinationFromFD queries the pre-NAT destination recorded by
-// conntrack, trying SO_ORIGINAL_DST first and IP6T_SO_ORIGINAL_DST second.
+// lookupRedirect returns the destination that conntrack translated the
+// socket raw from, or an error wrapping errNotRedirected when it has none. It
+// asks SO_ORIGINAL_DST for an IPv4 local address, including one an IPv6
+// socket reports IPv4-mapped, and IP6T_SO_ORIGINAL_DST for an IPv6 one.
 //
 // syscall has no raw getsockopt, and SYS_GETSOCKOPT does not exist on
 // linux/386 where socket calls go through socketcall(2). The lookups therefore
 // use typed getsockopt helpers that work on every GOARCH and whose buffers
 // start with room for the sockaddr the kernel writes back; the kernel only
 // rejects buffers that are too small.
-func originalDestinationFromFD(fd int) (*net.TCPAddr, error) {
-	dst, err4 := originalDestinationIPv4(fd)
-	if err4 == nil {
-		return dst, nil
+func lookupRedirect(_ net.Conn, raw syscall.RawConn, local netip.AddrPort) (netip.AddrPort, error) {
+	lookup := originalDestinationIPv6
+	if local.Addr().Is4() {
+		lookup = originalDestinationIPv4
 	}
-	dst, err6 := originalDestinationIPv6(fd)
-	if err6 == nil {
-		return dst, nil
+	var dst netip.AddrPort
+	var opErr error
+	if err := raw.Control(func(fd uintptr) {
+		dst, opErr = lookup(int(fd))
+	}); err != nil {
+		return netip.AddrPort{}, err
 	}
-	if noTranslation(err4) && noTranslation(err6) {
-		return nil, fmt.Errorf("%w (errno4=%w, errno6=%w)", errNotRedirected, err4, err6)
+	if opErr != nil && noTranslation(opErr) {
+		return netip.AddrPort{}, fmt.Errorf("%w: %w", errNotRedirected, opErr)
 	}
-	return nil, fmt.Errorf("errno4=%w, errno6=%w", err4, err6)
+	return dst, opErr
 }
 
 // noTranslation reports whether a lookup error means that conntrack has no
 // translation for the socket: ENOENT, or the option unknown, as without
-// conntrack or for the other address family.
+// conntrack.
 func noTranslation(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOPROTOOPT) || errors.Is(err, syscall.EOPNOTSUPP)
 }
 
 // originalDestinationIPv4 reads SO_ORIGINAL_DST into an IPv6Mreq (20 bytes),
 // whose first 16 bytes receive the sockaddr_in.
-func originalDestinationIPv4(fd int) (*net.TCPAddr, error) {
+func originalDestinationIPv4(fd int) (netip.AddrPort, error) {
 	mreq, err := syscall.GetsockoptIPv6Mreq(fd, syscall.SOL_IP, soOriginalDst)
 	if err != nil {
-		return nil, err
+		return netip.AddrPort{}, err
 	}
-	return tcpAddrFromSockaddrInet4((*syscall.RawSockaddrInet4)(unsafe.Pointer(&mreq.Multiaddr))), nil
+	return addrPortFromSockaddrInet4((*syscall.RawSockaddrInet4)(unsafe.Pointer(&mreq.Multiaddr))), nil
 }
 
 // originalDestinationIPv6 reads IP6T_SO_ORIGINAL_DST into an IPv6MTUInfo
 // (32 bytes), which starts with the sockaddr_in6 (28 bytes).
-func originalDestinationIPv6(fd int) (*net.TCPAddr, error) {
+func originalDestinationIPv6(fd int) (netip.AddrPort, error) {
 	info, err := syscall.GetsockoptIPv6MTUInfo(fd, syscall.SOL_IPV6, soOriginalDst)
 	if err != nil {
-		return nil, err
+		return netip.AddrPort{}, err
 	}
-	return tcpAddrFromSockaddrInet6(&info.Addr), nil
+	return addrPortFromSockaddrInet6(&info.Addr), nil
 }
 
-func tcpAddrFromSockaddrInet4(sa *syscall.RawSockaddrInet4) *net.TCPAddr {
-	return &net.TCPAddr{
-		IP:   net.IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3]),
-		Port: sockaddrPort(&sa.Port),
-	}
+func addrPortFromSockaddrInet4(sa *syscall.RawSockaddrInet4) netip.AddrPort {
+	return netip.AddrPortFrom(netip.AddrFrom4(sa.Addr), sockaddrPort(&sa.Port))
 }
 
-func tcpAddrFromSockaddrInet6(sa *syscall.RawSockaddrInet6) *net.TCPAddr {
-	return &net.TCPAddr{
-		IP:   append(net.IP(nil), sa.Addr[:]...),
-		Port: sockaddrPort(&sa.Port),
-		Zone: scopeZone(netip.AddrFrom16(sa.Addr), sa.Scope_id),
-	}
+func addrPortFromSockaddrInet6(sa *syscall.RawSockaddrInet6) netip.AddrPort {
+	ip := netip.AddrFrom16(sa.Addr)
+	ip = ip.WithZone(scopeZone(ip, sa.Scope_id)).Unmap()
+	return netip.AddrPortFrom(ip, sockaddrPort(&sa.Port))
 }
 
 // scopeZone returns the zone of a link-local IPv6 address with scope ID
@@ -188,7 +120,7 @@ var zones struct {
 
 // sockaddrPort decodes sin_port/sin6_port, which hold the port in network byte
 // order regardless of host endianness.
-func sockaddrPort(p *uint16) int {
+func sockaddrPort(p *uint16) uint16 {
 	b := (*[2]byte)(unsafe.Pointer(p))
-	return int(b[0])<<8 | int(b[1])
+	return uint16(b[0])<<8 | uint16(b[1])
 }

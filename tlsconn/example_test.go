@@ -3,6 +3,7 @@ package tlsconn_test
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -14,14 +15,17 @@ import (
 	"github.com/djylb/netx/tlsconn"
 )
 
-// Upgrade a dialed connection with a handshake bounded by five seconds.
+// Upgrade a dialed connection, with the dial and the handshake bounded by ten
+// seconds.
 func ExampleClient() {
-	raw, err := net.Dial("tcp", "example.com:443")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", "example.com:443")
 	if err != nil {
 		log.Fatal(err)
 	}
 	// On failure raw is closed.
-	conn, err := tlsconn.Client(context.Background(), raw, &tls.Config{ServerName: "example.com"}, 5*time.Second)
+	conn, err := tlsconn.Client(ctx, raw, &tls.Config{ServerName: "example.com"})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,7 +50,9 @@ func ExampleServer() {
 			log.Fatal(err)
 		}
 		go func() {
-			conn, err := tlsconn.Server(context.Background(), raw, cfg, 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			conn, err := tlsconn.Server(ctx, raw, cfg)
+			cancel()
 			if err != nil {
 				return
 			}
@@ -100,9 +106,10 @@ func ExamplePinSet() {
 	defer func() { _ = conn.Close() }()
 }
 
-// Serve per-host certificates from files, picking up renewals within an hour.
-func ExampleCertCache() {
-	certs := &tlsconn.CertCache{MaxEntries: 1000, ReloadInterval: time.Hour, IdleTimeout: 24 * time.Hour}
+// Serve per-host certificates from files, picking up renewals as the files
+// change.
+func ExampleCertFiles() {
+	certs := &tlsconn.CertFiles{MaxEntries: 1000, IdleTimeout: 24 * time.Hour}
 	cfg := &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			dir := filepath.Join("/etc/certs", filepath.Base(hello.ServerName))
@@ -110,6 +117,66 @@ func ExampleCertCache() {
 		},
 	}
 	ln, err := tls.Listen("tcp", ":443", cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+}
+
+// Pick certificates by server name: added ones first, an authority-issued
+// one over a self-signed one and an exact name over a wildcard, then those
+// loaded on demand.
+func ExampleCertStore() {
+	wildcard, _ := tlsconn.NewSelfSigned(tlsconn.SelfSignedOptions{Hosts: []string{"*.example.com"}})
+	store := &tlsconn.CertStore{Load: func(_ context.Context, name string) (*tls.Certificate, error) {
+		if name != "shop.example.net" {
+			return nil, nil // none
+		}
+		c, err := tlsconn.NewSelfSigned(tlsconn.SelfSignedOptions{Hosts: []string{name}})
+		if err != nil {
+			return nil, err
+		}
+		return &c, nil
+	}}
+	if _, err := store.Add("wildcard", &wildcard); err != nil {
+		log.Fatal(err)
+	}
+	_ = &tls.Config{GetCertificate: store.GetCertificate}
+
+	for _, name := range []string{"www.example.com", "shop.example.net", "other.example.org"} {
+		c, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+		if err != nil {
+			fmt.Println(name, err)
+			continue
+		}
+		leaf, _ := x509.ParseCertificate(c.Certificate[0])
+		fmt.Println(name, leaf.DNSNames)
+	}
+	// Output:
+	// www.example.com [*.example.com]
+	// shop.example.net [shop.example.net]
+	// other.example.org tlsconn: no certificate for the server name
+}
+
+// Serve the certificate that each host's configuration names, kept in sync
+// with its files, and let the ranking choose for hosts that name none.
+func ExampleCertStore_Select() {
+	type host struct{ certID string }
+	hosts := map[string]host{"a.example.com": {certID: "a-internal"}, "b.example.com": {}}
+	store := &tlsconn.CertStore{
+		Select: func(hello *tls.ClientHelloInfo) (string, error) {
+			return hosts[hello.ServerName].certID, nil
+		},
+		OnError: func(err *tlsconn.CertError) { log.Println(err) },
+	}
+	if _, err := store.AddFiles("a-internal", "/etc/certs/a/cert.pem", "/etc/certs/a/key.pem"); err != nil {
+		log.Println(err)
+	}
+	if _, err := store.AddFiles("wildcard", "/etc/certs/wildcard/fullchain.pem", "/etc/certs/wildcard/privkey.pem"); err != nil {
+		log.Println(err)
+	}
+	store.SetDefault("wildcard")
+	ln, err := tls.Listen("tcp", ":443", &tls.Config{GetCertificate: store.GetCertificate})
 	if err != nil {
 		log.Fatal(err)
 	}

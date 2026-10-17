@@ -2,40 +2,13 @@ package tlsconn
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"math"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
-
-// A load that fails, as one for a name without files does, pushes no
-// working certificate out of a full cache.
-func TestCertCacheFailedLoadKeepsEntries(t *testing.T) {
-	dir := t.TempDir()
-	c := &CertCache{MaxEntries: 2}
-	for _, name := range []string{"a", "b"} {
-		cert, _ := NewSelfSigned(SelfSignedOptions{})
-		sub := filepath.Join(dir, name)
-		if err := os.Mkdir(sub, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		certFile, keyFile := writeCert(t, sub, cert)
-		if _, err := c.LoadFiles(certFile, keyFile); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := c.LoadFiles(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "missing.key")); err == nil {
-		t.Fatal("LoadFiles() of missing files succeeded")
-	}
-	if n := c.Len(); n != 2 {
-		t.Fatalf("Len() = %d after a failed load, want the 2 certificates kept", n)
-	}
-}
 
 // The longest validity does not wrap around into a certificate that has
 // already expired.
@@ -54,7 +27,7 @@ func TestNewSelfSignedLongestValidity(t *testing.T) {
 func TestServerNilConfig(t *testing.T) {
 	raw, peer := net.Pipe()
 	defer func() { _ = peer.Close() }()
-	if _, err := Server(context.Background(), raw, nil, time.Second); !errors.Is(err, errNoServerConfig) {
+	if _, err := Server(context.Background(), raw, nil); !errors.Is(err, errNoServerConfig) {
 		t.Fatalf("Server(nil config) error = %v, want %v", err, errNoServerConfig)
 	}
 	if _, err := raw.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
@@ -80,35 +53,4 @@ type forwardFunc func(ctx context.Context, network, address string) (net.Conn, e
 
 func (f forwardFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return f(ctx, network, address)
-}
-
-// Loads still in flight do not count toward MaxEntries, so one that fails
-// after others succeeded pushes no certificate out.
-func TestCertCacheInFlightLoadDoesNotEvict(t *testing.T) {
-	c := &CertCache{MaxEntries: 2}
-	release := make(chan struct{})
-	failed := make(chan struct{})
-	go func() {
-		_, _ = c.get("slow", false, func() (*tls.Certificate, error) {
-			<-release
-			return nil, errors.New("no such certificate")
-		})
-		close(failed)
-	}()
-	for c.Len() == 0 {
-		time.Sleep(time.Millisecond) // the slow load is in flight
-	}
-	for _, key := range []string{"a", "b"} {
-		if _, err := c.get(key, false, func() (*tls.Certificate, error) {
-			cert, err := NewSelfSigned(SelfSignedOptions{})
-			return &cert, err
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	close(release)
-	<-failed
-	if n := c.Len(); n != 2 {
-		t.Fatalf("Len() = %d, want the 2 loaded certificates", n)
-	}
 }

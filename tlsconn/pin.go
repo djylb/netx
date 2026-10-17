@@ -68,7 +68,8 @@ func (s *PinSet) Len() int {
 // pins replace; ClientConfig sets both. A pin names one exact certificate, so
 // its host names and validity dates are not checked: a pinned certificate is
 // accepted for any server name and after it expires. On a server it pins
-// client certificates, with ClientAuth set to RequireAnyClientCert.
+// client certificates, with ClientAuth set to RequireAnyClientCert, as
+// ServerConfig does.
 func (s *PinSet) VerifyConnection(cs tls.ConnectionState) error {
 	if len(cs.PeerCertificates) == 0 || !s.Contains(Fingerprint(cs.PeerCertificates[0].Raw)) {
 		return ErrNotPinned
@@ -77,14 +78,47 @@ func (s *PinSet) VerifyConnection(cs tls.ConnectionState) error {
 }
 
 // ClientConfig returns a copy of base, or a new Config if base is nil, that
-// trusts exactly the certificates pinned in s. A VerifyConnection of base
-// still runs, after the pin check.
+// trusts exactly the server certificates pinned in s. A VerifyConnection of
+// base still runs, after the pin check.
 func (s *PinSet) ClientConfig(base *tls.Config) *tls.Config {
+	cfg := s.config(base)
+	cfg.InsecureSkipVerify = true
+	return cfg
+}
+
+// ServerConfig returns a copy of base, or a new Config if base is nil, that
+// requires a client certificate and accepts exactly the ones pinned in s, as
+// for mutual authentication between peers with self-signed certificates.
+// ClientAuth is set to RequireAnyClientCert, since the pins replace the
+// certificate authority checks. A VerifyConnection of base still runs, after
+// the pin check. A GetConfigForClient of base is wrapped so that the Configs
+// it returns are pinned the same way.
+func (s *PinSet) ServerConfig(base *tls.Config) *tls.Config {
+	cfg := s.config(base)
+	cfg.ClientAuth = tls.RequireAnyClientCert
+	if get := cfg.GetConfigForClient; get != nil {
+		// The handshake uses the returned Config in place of this one, so
+		// it must pin too; a nil Config keeps this one.
+		cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			c, err := get(hello)
+			if err != nil || c == nil {
+				return c, err
+			}
+			c = s.config(c)
+			c.ClientAuth = tls.RequireAnyClientCert
+			return c, nil
+		}
+	}
+	return cfg
+}
+
+// config returns a copy of base whose VerifyConnection checks the pins
+// before that of base.
+func (s *PinSet) config(base *tls.Config) *tls.Config {
 	cfg := &tls.Config{}
 	if base != nil {
 		cfg = base.Clone()
 	}
-	cfg.InsecureSkipVerify = true
 	next := cfg.VerifyConnection
 	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		if err := s.VerifyConnection(cs); err != nil {

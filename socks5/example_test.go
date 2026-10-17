@@ -50,10 +50,10 @@ func Example() {
 	// client: bound 192.0.2.1:40000 <nil>
 }
 
-func ExampleParseDatagram() {
+func ExampleDecodeDatagram() {
 	packet, _ := socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("198.51.100.7"), Port: 53}, []byte("query"))
-	dst, payload, err := socks5.ParseDatagram(packet)
-	fmt.Println(dst, string(payload), err)
+	dst, n, err := socks5.DecodeDatagram(packet)
+	fmt.Println(dst, string(packet[n:]), err)
 	// Output: 198.51.100.7:53 query <nil>
 }
 
@@ -82,7 +82,7 @@ func ExampleServer() {
 			}
 			return nil
 		},
-		PacketConn: udp, // every association uses this port
+		UDPSocket: udp, // every association uses this port
 	}
 	ln, err := net.Listen("tcp", ":1080")
 	if err != nil {
@@ -110,7 +110,7 @@ func ExampleDialer() {
 
 // Serve SOCKS5, SOCKS4 and SOCKS4a over TLS. Clients reach it with a TLS
 // dialer as the Dialer's Forward, or the socks5+tls and socks4a+tls schemes
-// of the proxy package.
+// of the proxydial package.
 func ExampleServer_tls() {
 	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
 	if err != nil {

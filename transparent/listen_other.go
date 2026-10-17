@@ -2,11 +2,18 @@
 
 package transparent
 
-import (
-	"context"
-	"net"
-)
+import "syscall"
 
-func listen(context.Context, string) (net.Listener, error) {
-	return nil, ErrListenUnsupported
+// listenErr reports that Listen is unsupported here, before a socket is
+// made.
+func listenErr() error { return ErrListenUnsupported }
+
+//goland:noinspection GoUnusedParameter
+func control(string, string, syscall.RawConn) error {
+	return ErrListenUnsupported
+}
+
+//goland:noinspection GoUnusedParameter
+func controlPacket(string, string, syscall.RawConn) error {
+	return ErrListenUnsupported
 }

@@ -4,23 +4,17 @@ package netx
 
 import (
 	"errors"
-	"fmt"
 	"syscall"
 )
 
-// errnoParts returns the errno fields of DescribeNetError. errno_name is only
-// set for the errnos in the classifier tables; the system message of any other
-// errno is already part of err.
-func errnoParts(err error) []string {
+// errnoOf returns the errno in err's chain, 0 for none, and its POSIX name
+// for the errnos in the classifier tables.
+func errnoOf(err error) (int, string) {
 	errno, ok := extractErrno(err)
 	if !ok {
-		return nil
+		return 0, ""
 	}
-	parts := []string{fmt.Sprintf("errno=%d", errno)}
-	if name := errnoName(errno); name != "" {
-		parts = append(parts, "errno_name="+name)
-	}
-	return parts
+	return int(errno), errnoName(errno)
 }
 
 func extractErrno(err error) (syscall.Errno, bool) {
@@ -57,6 +51,12 @@ func errnoName(errno syscall.Errno) string {
 		return "EPERM"
 	case errorIsAny(err, timedOutErrnos):
 		return "ETIMEDOUT"
+	case errorIsAny(err, addrInUseErrnos):
+		return "EADDRINUSE"
+	case errorIsAny(err, addrNotAvailErrnos):
+		return "EADDRNOTAVAIL"
+	case errorIsAny(err, msgSizeErrnos):
+		return "EMSGSIZE"
 	default:
 		return ""
 	}

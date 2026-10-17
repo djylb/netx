@@ -1,21 +1,36 @@
-// Package proxyproto builds and parses PROXY protocol v1 and v2 headers,
+// Package proxyproto builds and decodes PROXY protocol v1 and v2 headers,
 // which carry the original client and destination addresses of a proxied
-// connection to the backend, and provides a Listener that reports those
-// addresses for the connections it accepts. The Listener
-// serves streams and UDP flows whose first datagram carries the header.
+// connection to the backend, and provides a Conn that reports those
+// addresses for a connection whose peer sends one, with a Listener that
+// wraps the connections it accepts. Both serve streams and UDP flows whose
+// first datagram carries the header.
 //
-// Parsing is lenient towards non-standard senders wherever that cannot change
-// who a connection is attributed to: version 1 lines may end in a bare LF,
-// use runs of spaces, any letter case, UDP4 and UDP6 tokens, address families
-// that differ from the token, and padded ports; version 2 headers may carry
-// any version nibble. Unknown commands, protocols and families, short address
-// blocks and truncated TLVs make the connection's own addresses, or the whole
-// TLVs, apply instead of failing. Parsed headers drop NOOP padding and keep
-// every other TLV in no more memory than the header took. The package depends
-// only on the standard library.
+// A header lets its sender choose the reported client address, so accept
+// one only from trusted peers, such as with TrustPrefixes:
+//
+//	ln := &proxyproto.Listener{
+//		Listener:  inner,
+//		PolicyFor: proxyproto.TrustPrefixes(netip.MustParsePrefix("10.0.0.0/8")),
+//	}
+//
+// To send a header, build it with NewHeader or HeaderFromConn and encode it
+// with Header.AppendBinary. HeaderOf finds the header of a Conn beneath
+// other wrappers.
+//
+// Decoding is lenient towards non-standard senders wherever that cannot
+// change who a connection is attributed to: version 1 lines may end in a bare
+// LF, use runs of spaces, any letter case, UDP4 and UDP6 tokens, address
+// families that differ from the token, and padded ports; version 2 headers
+// may carry any version nibble. Unknown commands, protocols and families,
+// short address blocks and truncated TLVs make the connection's own
+// addresses, or the whole TLVs, apply instead of failing. Decoded headers
+// drop NOOP padding and keep every other TLV in no more memory than the
+// header took. The package depends only on the standard library.
 package proxyproto
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 )
@@ -24,219 +39,182 @@ import (
 type Version int
 
 const (
-	// None sends no header.
-	None Version = iota
 	// V1 is the text header format.
-	V1
+	V1 Version = 1
 	// V2 is the binary header format.
-	V2
+	V2 Version = 2
 )
 
-// V1Header returns a PROXY protocol v1 header for client and target addresses.
+// NewHeader returns a header of version v for a connection from src to dst.
 //
-// Both addresses must be *net.TCPAddr or both *net.UDPAddr. v1 has no UDP
-// token, so UDP pairs are emitted with the TCP4/TCP6 tokens; use v2 to signal
-// UDP. An IPv4 and an IPv6 address are sent as TCP6 with the IPv4 side in its
-// IPv4-mapped form (::ffff:a.b.c.d).
-// Anything else yields "PROXY UNKNOWN\r\n".
-func V1Header(clientAddr, targetAddr net.Addr) []byte {
-	return appendV1(make([]byte, 0, maxV1Len), clientAddr, targetAddr)
-}
-
-// V2Header returns a PROXY protocol v2 header for client and target addresses.
+// Both addresses are *net.TCPAddr, both *net.UDPAddr or, for version 2, both
+// *net.UnixAddr of the same kind (stream or "unixgram"), and src must have an
+// IP address. A nil dst, or one with an unspecified IP address, stands for an
+// unknown destination: it is sent as the zero address of src's family
+// (0.0.0.0 or ::), with dst's port if any; a nil Unix dst is unnamed. An
+// IPv4 and an IPv6 address are sent as IPv6 with the IPv4 side in its
+// IPv4-mapped form (::ffff:a.b.c.d). NewHeader returns an error for other
+// pairs, such as a nil src, address types of other packages, or a TCP and a
+// UDP address. The header holds copies of the addresses.
 //
-// The address rules match V1Header, except that UDP pairs are sent as DGRAM,
-// mixed families as AF_INET6, and *net.UnixAddr pairs as AF_UNIX. Unsupported
-// addresses yield a LOCAL header.
-func V2Header(clientAddr, targetAddr net.Addr) []byte {
-	h := Header{Version: V2, Source: clientAddr, Destination: targetAddr}
-	b, _ := appendV2(make([]byte, 0, v2HeadLen+2*unixPathLen), &h) // cannot fail without TLVs
-	return b
-}
-
-// HeaderFromConn builds a PROXY protocol header from a connection's remote
-// and local addresses, as HeaderFromAddrs does.
-func HeaderFromConn(c net.Conn, version Version) []byte {
-	if c == nil || version == None {
-		return nil
+// For a header without addresses, such as for a proxy's own health checks,
+// use Header{Version: v, Local: true}.
+func NewHeader(v Version, src, dst net.Addr) (*Header, error) {
+	if v != V1 && v != V2 {
+		return nil, fmt.Errorf("proxyproto: unknown version %d", v)
 	}
-	return HeaderFromAddrs(c.RemoteAddr(), c.LocalAddr(), version)
-}
-
-// HeaderFromAddrs builds a PROXY protocol header from explicit addresses.
-//
-// A target that is nil, unspecified or not of the client's address type is sent
-// as the zero address of the client's family (0.0.0.0 or ::). Otherwise the
-// rules of V1Header and V2Header apply. It returns
-// nil for None and for unknown versions.
-func HeaderFromAddrs(clientAddr, targetAddr net.Addr, version Version) []byte {
-	if version == None {
-		return nil
-	}
-
-	targetAddr = normalizeTarget(clientAddr, targetAddr)
-
-	switch version {
-	case V2:
-		return V2Header(clientAddr, targetAddr)
-	case V1:
-		return V1Header(clientAddr, targetAddr)
-	default:
-		return nil
-	}
-}
-
-func normalizeTarget(src, dst net.Addr) net.Addr {
+	h := &Header{Version: v}
 	switch s := src.(type) {
 	case *net.TCPAddr:
+		d, ok := dst.(*net.TCPAddr)
+		if !ok && dst != nil {
+			return nil, mismatched(src, dst)
+		}
 		if s == nil {
-			return dst
+			return nil, errNilAddr
 		}
-		d := cloneTCPAddr(dst)
-		if d == nil {
-			d = &net.TCPAddr{Port: 0}
+		var dip net.IP
+		var dport int
+		if d != nil {
+			dip, dport = d.IP, d.Port
 		}
-		d.IP = normalizeTargetIP(s.IP, d.IP)
-		return d
+		h.Source = &net.TCPAddr{IP: cloneIP(s.IP), Port: s.Port, Zone: s.Zone}
+		h.Destination = &net.TCPAddr{IP: destinationIP(s.IP, dip), Port: dport}
 	case *net.UDPAddr:
+		d, ok := dst.(*net.UDPAddr)
+		if !ok && dst != nil {
+			return nil, mismatched(src, dst)
+		}
 		if s == nil {
-			return dst
+			return nil, errNilAddr
 		}
-		d := cloneUDPAddr(dst)
+		var dip net.IP
+		var dport int
+		if d != nil {
+			dip, dport = d.IP, d.Port
+		}
+		h.Source = &net.UDPAddr{IP: cloneIP(s.IP), Port: s.Port, Zone: s.Zone}
+		h.Destination = &net.UDPAddr{IP: destinationIP(s.IP, dip), Port: dport}
+	case *net.UnixAddr:
+		d, ok := dst.(*net.UnixAddr)
+		if !ok && dst != nil {
+			return nil, mismatched(src, dst)
+		}
+		if s == nil {
+			return nil, errNilAddr
+		}
+		h.Source = &net.UnixAddr{Name: s.Name, Net: s.Net}
 		if d == nil {
-			d = &net.UDPAddr{Port: 0}
-		}
-		d.IP = normalizeTargetIP(s.IP, d.IP)
-		return d
-	default:
-		return dst
-	}
-}
-
-func cloneTCPAddr(addr net.Addr) *net.TCPAddr {
-	tcpAddr, _ := addr.(*net.TCPAddr)
-	if tcpAddr == nil {
-		return nil
-	}
-	return &net.TCPAddr{
-		IP:   append(net.IP(nil), tcpAddr.IP...),
-		Port: tcpAddr.Port,
-		Zone: tcpAddr.Zone,
-	}
-}
-
-func cloneUDPAddr(addr net.Addr) *net.UDPAddr {
-	udpAddr, _ := addr.(*net.UDPAddr)
-	if udpAddr == nil {
-		return nil
-	}
-	return &net.UDPAddr{
-		IP:   append(net.IP(nil), udpAddr.IP...),
-		Port: udpAddr.Port,
-		Zone: udpAddr.Zone,
-	}
-}
-
-func normalizeTargetIP(srcIP, dstIP net.IP) net.IP {
-	if dstIP != nil && !dstIP.IsUnspecified() {
-		return dstIP
-	}
-	if srcIP.To4() != nil {
-		return net.IPv4zero
-	}
-	return net.IPv6zero
-}
-
-type proxyAddrMeta struct {
-	v1Protocol string
-	srcIP      net.IP
-	dstIP      net.IP
-	addrBytes  uint16
-	srcPort    uint16
-	dstPort    uint16
-	famProto   byte
-}
-
-func buildProxyAddrMeta(clientAddr, targetAddr net.Addr) (proxyAddrMeta, bool) {
-	switch c := clientAddr.(type) {
-	case *net.TCPAddr:
-		t, ok := targetAddr.(*net.TCPAddr)
-		if !ok || c == nil || t == nil {
-			return proxyAddrMeta{}, false
-		}
-		return proxyAddrMetaFromIPs(c.IP, t.IP, c.Port, t.Port, true)
-	case *net.UDPAddr:
-		u, ok := targetAddr.(*net.UDPAddr)
-		if !ok || c == nil || u == nil {
-			return proxyAddrMeta{}, false
-		}
-		return proxyAddrMetaFromIPs(c.IP, u.IP, c.Port, u.Port, false)
-	default:
-		return proxyAddrMeta{}, false
-	}
-}
-
-func proxyAddrMetaFromIPs(srcIP, dstIP net.IP, srcPort, dstPort int, tcp bool) (proxyAddrMeta, bool) {
-	if !validTCPPort(srcPort) || !validTCPPort(dstPort) {
-		return proxyAddrMeta{}, false
-	}
-	// The header is IPv4 only when both sides are IPv4.
-	// Otherwise both IPs are sent as 16 bytes, and To16 turns an IPv4 side
-	// into its IPv4-mapped form ::ffff:a.b.c.d.
-	src4, dst4 := srcIP.To4(), dstIP.To4()
-	ipv4 := src4 != nil && dst4 != nil
-	if ipv4 {
-		srcIP, dstIP = src4, dst4
-	} else {
-		srcIP, dstIP = srcIP.To16(), dstIP.To16()
-		if srcIP == nil || dstIP == nil {
-			return proxyAddrMeta{}, false
-		}
-	}
-	meta := proxyAddrMeta{
-		srcIP:   srcIP,
-		dstIP:   dstIP,
-		srcPort: uint16(srcPort),
-		dstPort: uint16(dstPort),
-	}
-	if tcp {
-		if ipv4 {
-			meta.v1Protocol = "TCP4"
-			meta.famProto = 0x11
-			meta.addrBytes = 12
+			h.Destination = &net.UnixAddr{Net: s.Net}
 		} else {
-			meta.v1Protocol = "TCP6"
-			meta.famProto = 0x21
-			meta.addrBytes = 36
+			h.Destination = &net.UnixAddr{Name: d.Name, Net: d.Net}
 		}
-		return meta, true
-	}
-
-	if ipv4 {
-		meta.v1Protocol = "TCP4"
-		meta.famProto = 0x12
-		meta.addrBytes = 12
-	} else {
-		meta.v1Protocol = "TCP6"
-		meta.famProto = 0x22
-		meta.addrBytes = 36
-	}
-	return meta, true
-}
-
-func validTCPPort(port int) bool {
-	return port >= 0 && port <= 65535
-}
-
-// appendIPText formats ip in the family given by its length, so a 16-byte
-// IPv4-mapped address prints as ::ffff:a.b.c.d.
-func appendIPText(dst []byte, ip net.IP) []byte {
-	switch len(ip) {
-	case net.IPv4len:
-		return netip.AddrFrom4([4]byte(ip)).AppendTo(dst)
-	case net.IPv6len:
-		return netip.AddrFrom16([16]byte(ip)).AppendTo(dst)
+	case nil:
+		return nil, errNilAddr
 	default:
-		return dst
+		return nil, fmt.Errorf("proxyproto: unsupported source address type %T", src)
 	}
+	if _, err := h.addrs(); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// HeaderFromConn returns a header of version v for c, from its remote
+// address to its local address, as NewHeader does.
+func HeaderFromConn(v Version, c net.Conn) (*Header, error) {
+	if c == nil {
+		return nil, errors.New("proxyproto: nil connection")
+	}
+	return NewHeader(v, c.RemoteAddr(), c.LocalAddr())
+}
+
+var errNilAddr = errors.New("proxyproto: nil address")
+
+func mismatched(src, dst net.Addr) error {
+	return fmt.Errorf("proxyproto: source %T and destination %T do not form an address pair", src, dst)
+}
+
+func cloneIP(ip net.IP) net.IP {
+	return append(net.IP(nil), ip...)
+}
+
+// destinationIP returns a copy of dst, or the zero address of src's family
+// when dst is unspecified.
+func destinationIP(src, dst net.IP) net.IP {
+	if len(dst) > 0 && !dst.IsUnspecified() {
+		return cloneIP(dst)
+	}
+	if src.To4() != nil {
+		return net.IPv4zero.To4()
+	}
+	return make(net.IP, net.IPv6len)
+}
+
+// ipPair is a pair of IP addresses as a header carries them: both IPv4, or
+// both IPv6 with any IPv4 side in its IPv4-mapped form, without zones.
+type ipPair struct {
+	src, dst netip.AddrPort
+	udp      bool
+}
+
+func (p ipPair) is4() bool { return p.src.Addr().Is4() }
+
+// newIPPair returns the pair of two TCP or two UDP addresses.
+func newIPPair(src, dst net.Addr) (ipPair, bool, error) {
+	var s, d netip.AddrPort
+	var udp bool
+	switch a := src.(type) {
+	case *net.TCPAddr:
+		b, ok := dst.(*net.TCPAddr)
+		if !ok {
+			return ipPair{}, false, nil
+		}
+		if a == nil || b == nil {
+			return ipPair{}, true, errNilAddr
+		}
+		var err error
+		if s, err = addrPort(a.IP, a.Port); err == nil {
+			d, err = addrPort(b.IP, b.Port)
+		}
+		if err != nil {
+			return ipPair{}, true, err
+		}
+	case *net.UDPAddr:
+		b, ok := dst.(*net.UDPAddr)
+		if !ok {
+			return ipPair{}, false, nil
+		}
+		if a == nil || b == nil {
+			return ipPair{}, true, errNilAddr
+		}
+		var err error
+		if s, err = addrPort(a.IP, a.Port); err == nil {
+			d, err = addrPort(b.IP, b.Port)
+		}
+		if err != nil {
+			return ipPair{}, true, err
+		}
+		udp = true
+	default:
+		return ipPair{}, false, nil
+	}
+	if !s.Addr().Is4() || !d.Addr().Is4() {
+		s = netip.AddrPortFrom(netip.AddrFrom16(s.Addr().As16()), s.Port())
+		d = netip.AddrPortFrom(netip.AddrFrom16(d.Addr().As16()), d.Port())
+	}
+	return ipPair{src: s, dst: d, udp: udp}, true, nil
+}
+
+// addrPort returns ip and port without a zone, with an IPv4-mapped address
+// as IPv4.
+func addrPort(ip net.IP, port int) (netip.AddrPort, error) {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.AddrPort{}, errors.New("proxyproto: address without an IP address")
+	}
+	if port < 0 || port > 0xffff {
+		return netip.AddrPort{}, fmt.Errorf("proxyproto: port %d out of range", port)
+	}
+	return netip.AddrPortFrom(a.Unmap(), uint16(port)), nil
 }

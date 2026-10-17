@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -31,13 +32,15 @@ type Addr struct {
 	Port uint16
 }
 
-// AddrFromNetAddr converts a *net.TCPAddr, a *net.UDPAddr, or another
-// net.Addr whose String is "host:port". It returns the zero Addr for nil or
-// for an address it cannot split.
+// AddrFromNetAddr converts a *net.TCPAddr, a *net.UDPAddr, an Addr, or
+// another net.Addr whose String is "host:port". It returns the zero Addr for
+// nil or for an address it cannot split.
 func AddrFromNetAddr(a net.Addr) Addr {
 	switch a := a.(type) {
 	case nil:
 		return Addr{}
+	case Addr:
+		return a
 	case *net.TCPAddr:
 		if a == nil {
 			return Addr{}
@@ -49,11 +52,21 @@ func AddrFromNetAddr(a net.Addr) Addr {
 		}
 		return addrFromIP(a.IP, a.Port)
 	}
+	if isNilPointer(a) {
+		return Addr{}
+	}
 	addr, err := ParseAddr(a.String())
 	if err != nil {
 		return Addr{}
 	}
 	return addr
+}
+
+// isNilPointer reports whether a holds a nil pointer, such as a nil *Addr,
+// whose String would panic.
+func isNilPointer(a net.Addr) bool {
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 func addrFromIP(ip net.IP, port int) Addr {
@@ -80,6 +93,10 @@ func ParseAddr(s string) (Addr, error) {
 	}
 	return Addr{Name: host, Port: uint16(port)}, nil
 }
+
+// Network returns "socks", so that an Addr is also a net.Addr, as for the
+// sources with domain names that UDPConn.AsNetPacketConn reports.
+func (a Addr) Network() string { return "socks" }
 
 // String returns the address as "host:port".
 func (a Addr) String() string {

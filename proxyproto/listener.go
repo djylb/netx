@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -13,10 +15,10 @@ import (
 )
 
 // DefaultHeaderTimeout bounds how long a Conn waits for its header when the
-// Listener's HeaderTimeout is not positive.
+// HeaderTimeout of its Config is not positive.
 const DefaultHeaderTimeout = 10 * time.Second
 
-// Policy tells a Listener whether a peer sends a PROXY protocol header.
+// Policy tells a Conn whether its peer sends a PROXY protocol header.
 type Policy uint8
 
 const (
@@ -33,51 +35,174 @@ const (
 	Ignore
 )
 
+// TrustPrefixes returns a function for Listener.PolicyFor under which peers
+// whose IP address is in one of the prefixes must send a header and other
+// peers are passed through without one, as Required and Ignore do. An IPv4 address and its
+// IPv4-mapped IPv6 form (::ffff:a.b.c.d) are the same peer, for addresses and
+// prefixes alike, so ::ffff:10.0.0.0/104 is 10.0.0.0/8, and an IPv6 prefix
+// that holds the IPv4-mapped form of an IPv4 peer, such as ::/0, holds the
+// peer. Zones are ignored. Peers without an IP address, such as those of a
+// Unix socket, are passed through.
+func TrustPrefixes(p ...netip.Prefix) func(peer net.Addr) Policy {
+	prefixes := make([]netip.Prefix, 0, len(p))
+	for _, pfx := range p {
+		if a := pfx.Addr(); a.Is4In6() && pfx.Bits() >= 96 {
+			pfx = netip.PrefixFrom(a.Unmap(), pfx.Bits()-96)
+		}
+		if pfx = pfx.Masked(); pfx.IsValid() {
+			prefixes = append(prefixes, pfx)
+		}
+	}
+	return func(peer net.Addr) Policy {
+		ip, ok := peerIP(peer)
+		if !ok {
+			return Ignore
+		}
+		mapped := netip.AddrFrom16(ip.As16())
+		for _, pfx := range prefixes {
+			if pfx.Contains(ip) || (ip.Is4() && pfx.Contains(mapped)) {
+				return Required
+			}
+		}
+		return Ignore
+	}
+}
+
+// peerIP returns the IP address of peer, unmapped and without a zone.
+func peerIP(peer net.Addr) (netip.Addr, bool) {
+	var ip netip.Addr
+	switch a := peer.(type) {
+	case nil:
+		return netip.Addr{}, false
+	case *net.TCPAddr:
+		ip = a.AddrPort().Addr()
+	case *net.UDPAddr:
+		ip = a.AddrPort().Addr()
+	default:
+		if isNilPointer(peer) {
+			return netip.Addr{}, false
+		}
+		s := peer.String()
+		if ap, err := netip.ParseAddrPort(s); err == nil {
+			ip = ap.Addr()
+		} else if ip, err = netip.ParseAddr(s); err != nil {
+			return netip.Addr{}, false
+		}
+	}
+	return ip.Unmap().WithZone(""), ip.IsValid()
+}
+
+// Config configures a Conn.
+type Config struct {
+	// HeaderTimeout bounds the wait for a header; a non-positive value means
+	// DefaultHeaderTimeout.
+	HeaderTimeout time.Duration
+	// Policy tells whether the peer sends a header; the zero value is
+	// Required.
+	Policy Policy
+	// Datagram is for connections that return one datagram per Read, such
+	// as those of a netx.PacketListener over a UDP socket. The header is then
+	// read from the first datagram, where it may be followed by the first
+	// payload or stand alone, and must be whole once the datagram holds the
+	// whole signature; later datagrams are passed through unchanged. TCP
+	// addresses in the header are reported as *net.UDPAddr, since version 1
+	// has no UDP token and UDP senders use TCP4 and TCP6.
+	Datagram bool
+}
+
+// NewConn returns c as a Conn that reads the PROXY protocol header of c's
+// peer as configured by cfg. The header is read the first time the Conn is
+// used, not by NewConn. The Conn owns c: closing it closes c. With the Ignore
+// policy it passes c through and reports no header. For a nil c, its methods
+// return net.ErrClosed, its addresses are nil and Close does nothing.
+func NewConn(c net.Conn, cfg Config) *Conn {
+	timeout := cfg.HeaderTimeout
+	if timeout <= 0 {
+		timeout = DefaultHeaderTimeout
+	}
+	if c != nil && isNilPointer(c) {
+		c = nil
+	}
+	pc := &Conn{conn: c, policy: cfg.Policy, timeout: timeout, datagram: cfg.Datagram}
+	if c == nil {
+		pc.err = net.ErrClosed
+		pc.drained.Store(true)
+		pc.done.Store(true)
+	} else if cfg.Policy == Ignore {
+		pc.drained.Store(true)
+		pc.done.Store(true)
+	}
+	return pc
+}
+
+// HeaderOf returns the header of the first Conn in the chain of c and the
+// connections that NetConn() net.Conn methods, such as *tls.Conn's, return
+// beneath it, reading the header first if needed, as Conn.Header does. It
+// returns nil and no error when there is no Conn, such as for a connection
+// that a Listener passed through under the Ignore policy.
+func HeaderOf(c net.Conn) (*Header, error) {
+	// A bound on the depth stops a chain of wrappers that loops.
+	for range maxUnwrapDepth {
+		if c == nil || isNilPointer(c) {
+			return nil, nil
+		}
+		if pc, ok := c.(*Conn); ok {
+			return pc.Header()
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil, nil
+		}
+		c = u.NetConn()
+	}
+	return nil, nil
+}
+
+// maxUnwrapDepth bounds the NetConn chain that HeaderOf follows.
+const maxUnwrapDepth = 16
+
+// isNilPointer reports whether v is a nil pointer in a non-nil interface,
+// whose methods, such as *tls.Conn's NetConn, may not accept it.
+func isNilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
+}
+
 // Listener wraps a net.Listener whose peers, such as load balancers, send a
 // PROXY protocol header, and reports the addresses from the header as the
 // connections' RemoteAddr and LocalAddr.
 //
 // Only trusted peers should be allowed to send a header, since it lets them
-// choose the reported client address; use Policy to restrict them.
+// choose the reported client address; restrict them with PolicyFor, such as
+// to TrustPrefixes. As described for Conn, writes to an accepted connection
+// do not wait for its header to be validated.
 type Listener struct {
 	net.Listener
-	// Policy decides for each accepted connection, by its peer address,
-	// whether a header is expected. Nil means Required for every peer.
-	Policy func(peer net.Addr) Policy
-	// HeaderTimeout bounds the wait for a header; a non-positive value means
-	// DefaultHeaderTimeout.
-	HeaderTimeout time.Duration
-	// Datagram is for listeners whose connections return one datagram per
-	// Read, such as netx.PacketListener over a UDP socket. The header is then
-	// read from the first datagram of each connection, where it may be
-	// followed by the first payload or stand alone, and must be whole once
-	// the datagram holds the whole signature; later datagrams are passed
-	// through unchanged. TCP addresses in the header are reported as
-	// *net.UDPAddr, since version 1 has no UDP token and UDP senders use
-	// TCP4 and TCP6.
-	Datagram bool
+	// PolicyFor, when set, decides for each accepted connection, by its peer
+	// address, whether a header is expected, in place of Config.Policy.
+	PolicyFor func(peer net.Addr) Policy
+	// Config configures each accepted Conn. Its Policy applies to every
+	// peer unless PolicyFor is set; the zero value is Required.
+	Config Config
 }
 
 // Accept waits for the next connection. Unless the policy is Ignore it returns
 // a *Conn, which reads the header the first time it is used, so a slow peer
-// does not hold up Accept.
+// does not hold up Accept. Under Ignore it returns the accepted connection
+// itself.
 func (l *Listener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
 	if err != nil {
 		return nil, err
 	}
-	policy := Required
-	if l.Policy != nil {
-		policy = l.Policy(c.RemoteAddr())
+	cfg := l.Config
+	if l.PolicyFor != nil {
+		cfg.Policy = l.PolicyFor(c.RemoteAddr())
 	}
-	if policy == Ignore {
+	if cfg.Policy == Ignore {
 		return c, nil
 	}
-	timeout := l.HeaderTimeout
-	if timeout <= 0 {
-		timeout = DefaultHeaderTimeout
-	}
-	return &Conn{Conn: c, policy: policy, timeout: timeout, datagram: l.Datagram}, nil
+	return NewConn(c, cfg), nil
 }
 
 // headerReadSize is the initial buffer for a stream header; it grows to the
@@ -99,12 +224,19 @@ var streamPool = sync.Pool{New: func() any {
 	return &b
 }}
 
-// Conn is a connection accepted by a Listener. It reads the PROXY protocol
-// header the first time it is read, its addresses are queried, or Header is
-// called. Avoid querying the addresses in the accept loop: that waits for the
-// header.
+// Conn is a connection whose peer sends a PROXY protocol header, from
+// NewConn or a Listener. It reads the header the first time it is read, its
+// addresses are queried, or Header is called. Avoid querying the addresses in
+// an accept loop: that waits for the header.
 //
-// The header must arrive within the Listener's HeaderTimeout. The read that
+// Writes do not wait for the header: Write, ReadFrom and CloseWrite go
+// straight to the connection beneath. Under Required and Optional, a server
+// that speaks first, or one that answers what it cannot use, as an HTTP
+// server answers 400, therefore writes to a peer that may have sent no header
+// or a malformed one. When that matters, call Header, or Read, first and
+// write only once it succeeds.
+//
+// The header must arrive within the HeaderTimeout. The read that
 // reaches it returns the timeout, and later ones an error matching
 // ErrNoHeader that is not a timeout, so that loops retrying timeouts do not
 // spin. A connection that cannot set deadlines is closed when the header
@@ -117,9 +249,9 @@ var streamPool = sync.Pool{New: func() any {
 type Conn struct {
 	readDeadline time.Time // set by the caller
 	expires      time.Time // end of the header timeout, from the first header read
-	net.Conn
-	err       error
-	timeoutAt error // the header timeout, returned once before err
+	conn         net.Conn
+	err          error
+	timeoutAt    error // the header timeout, returned once before err
 	// hsem serializes header reads; header and err are set before done.
 	hsem        chan struct{}
 	header      *Header
@@ -277,10 +409,10 @@ func (c *Conn) readHeader(callerBound bool) error {
 	}
 	c.reading, c.callerBound = true, callerBound
 	var guard *time.Timer
-	if c.Conn.SetReadDeadline(c.headerDeadline(c.readDeadline)) != nil {
+	if c.conn.SetReadDeadline(c.headerDeadline(c.readDeadline)) != nil {
 		// Without deadline support, closing the connection is the only way
 		// to end a header read that outlasts the header timeout.
-		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.Conn.Close() }) //nolint:staticcheck // QF1008: closes the wrapped Conn
+		guard = time.AfterFunc(time.Until(c.expires), func() { _ = c.conn.Close() })
 	}
 	c.mu.Unlock()
 
@@ -300,7 +432,7 @@ func (c *Conn) readHeader(callerBound bool) error {
 
 	c.mu.Lock()
 	c.reading = false
-	_ = c.Conn.SetReadDeadline(c.readDeadline)
+	_ = c.conn.SetReadDeadline(c.readDeadline)
 	c.mu.Unlock()
 	return err
 }
@@ -331,7 +463,7 @@ func (c *Conn) interrupted(err error) bool {
 func (c *Conn) readStreamHeader() error {
 	empty := 0 // reads in a row that returned nothing
 	for {
-		h, n, need, err := parse(c.hbuf)
+		h, n, need, err := decode(c.hbuf)
 		switch {
 		case err == nil:
 			c.header = h
@@ -353,7 +485,7 @@ func (c *Conn) readStreamHeader() error {
 			size := max(headerReadSize, min(need, 2*cap(c.hbuf)))
 			c.hbuf = append(make([]byte, 0, size), c.hbuf...)
 		}
-		m, rerr := c.Conn.Read(c.hbuf[len(c.hbuf):cap(c.hbuf)])
+		m, rerr := c.conn.Read(c.hbuf[len(c.hbuf):cap(c.hbuf)])
 		c.hbuf = c.hbuf[:len(c.hbuf)+m]
 		if m > 0 {
 			empty = 0
@@ -394,7 +526,7 @@ func (c *Conn) readDatagramHeader() error {
 	bp := datagramPool.Get().(*[]byte)
 	defer datagramPool.Put(bp)
 	buf := *bp
-	n, err := c.Conn.Read(buf)
+	n, err := c.conn.Read(buf)
 	if err != nil {
 		switch {
 		case c.interrupted(err):
@@ -404,7 +536,7 @@ func (c *Conn) readDatagramHeader() error {
 		}
 		return nil
 	}
-	h, size, err := Parse(buf[:n])
+	h, size, err := Decode(buf[:n])
 	switch {
 	case err == nil:
 		h.Source, h.Destination = h.UDPAddrs()
@@ -465,7 +597,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 		}
 		c.pendingMu.Unlock()
 	}
-	return c.Conn.Read(b)
+	return c.conn.Read(b)
 }
 
 // WriteTo copies the connection after the header to w. A stream lets a
@@ -513,21 +645,21 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	if splices(w, c.Conn) {
-		n, err := io.Copy(w, c.Conn)
+	if splices(w, c.conn) {
+		n, err := io.Copy(w, c.conn)
 		return total + n, err
 	}
 	switch rf := w.(type) {
 	case *net.TCPConn, *net.UnixConn:
 		// Their ReadFrom would copy through a buffer it allocates.
 	case io.ReaderFrom:
-		n, err := rf.ReadFrom(c.Conn)
+		n, err := rf.ReadFrom(c.conn)
 		return total + n, err
 	}
 	// Without ReadFrom, io.Copy would allocate a buffer for every call.
 	bp := streamPool.Get().(*[]byte)
 	defer streamPool.Put(bp)
-	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.Conn}, *bp)
+	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.conn}, *bp)
 	return total + n, err
 }
 
@@ -576,7 +708,10 @@ func (c *Conn) RemoteAddr() net.Addr {
 	if c.init(false) == nil && c.header != nil && c.header.Source != nil {
 		return c.streamAddr(c.header.Source)
 	}
-	return c.Conn.RemoteAddr()
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.RemoteAddr()
 }
 
 // LocalAddr returns the destination address from the header, or the local
@@ -585,7 +720,10 @@ func (c *Conn) LocalAddr() net.Addr {
 	if c.init(false) == nil && c.header != nil && c.header.Destination != nil {
 		return c.streamAddr(c.header.Destination)
 	}
-	return c.Conn.LocalAddr()
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.LocalAddr()
 }
 
 // streamAddr returns a header address as a stream connection reports it: a
@@ -602,10 +740,13 @@ func (c *Conn) streamAddr(a net.Addr) net.Addr {
 // beneath, so that a *net.TCPConn can splice the data. Writes do not wait
 // for the header.
 func (c *Conn) ReadFrom(r io.Reader) (int64, error) {
-	if rf, ok := c.Conn.(io.ReaderFrom); ok {
+	if c.conn == nil {
+		return 0, net.ErrClosed
+	}
+	if rf, ok := c.conn.(io.ReaderFrom); ok {
 		return rf.ReadFrom(r)
 	}
-	return io.Copy(writerOnly{c.Conn}, r)
+	return io.Copy(writerOnly{c.conn}, r)
 }
 
 // writerOnly hides every method but Write, so that io.Copy does not call
@@ -615,22 +756,28 @@ type writerOnly struct{ io.Writer }
 // SetDeadline sets the read and write deadlines. During a header read the
 // read deadline takes effect as described for Conn.
 func (c *Conn) SetDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.readDeadline = t
 	c.deadlineChangedLocked()
 	if !c.reading {
-		return c.Conn.SetDeadline(t)
+		return c.conn.SetDeadline(t)
 	}
-	if err := c.Conn.SetWriteDeadline(t); err != nil { //nolint:staticcheck // QF1008: the wrapped Conn, as around it
+	if err := c.conn.SetWriteDeadline(t); err != nil {
 		return err
 	}
-	return c.Conn.SetReadDeadline(c.headerDeadline(t))
+	return c.conn.SetReadDeadline(c.headerDeadline(t))
 }
 
 // SetReadDeadline sets the read deadline. During a header read it takes
 // effect as described for Conn.
 func (c *Conn) SetReadDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.readDeadline = t
@@ -638,20 +785,47 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	if c.reading {
 		t = c.headerDeadline(t)
 	}
-	return c.Conn.SetReadDeadline(t)
+	return c.conn.SetReadDeadline(t)
 }
 
 // CloseWrite shuts down the writing side of the connection when it supports
 // that, and otherwise returns an error matching errors.ErrUnsupported.
 func (c *Conn) CloseWrite() error {
-	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	if cw, ok := c.conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
 	return errors.ErrUnsupported
 }
 
-// RawConn returns the accepted connection, for unwrapping helpers such as
-// netx.RawConnOf. Reading it directly bypasses the header handling.
-func (c *Conn) RawConn() net.Conn {
-	return c.Conn
+// NetConn returns the connection beneath, as *tls.Conn's NetConn does, for
+// unwrapping helpers. Reading it directly bypasses the header handling.
+func (c *Conn) NetConn() net.Conn {
+	return c.conn
+}
+
+// Write writes to the connection. Writes do not wait for the header.
+func (c *Conn) Write(b []byte) (int, error) {
+	if c.conn == nil {
+		return 0, net.ErrClosed
+	}
+	return c.conn.Write(b)
+}
+
+// Close closes the connection, ending a header read in progress.
+func (c *Conn) Close() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+// SetWriteDeadline sets the write deadline.
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetWriteDeadline(t)
 }

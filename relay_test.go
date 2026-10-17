@@ -2,6 +2,7 @@ package netx
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -56,7 +57,7 @@ func TestRelayCopiesBothDirections(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		aToB, bToA, err := Relay(relayA, relayB)
+		aToB, bToA, err := Relay(context.Background(), relayA, relayB)
 		done <- result{aToB, bToA, err}
 	}()
 
@@ -77,10 +78,10 @@ func TestRelayCopiesBothDirections(t *testing.T) {
 	select {
 	case r := <-done:
 		if r.err != nil || r.aToB != int64(len(request)) || r.bToA != int64(len(response)) {
-			t.Fatalf("Relay() = %d, %d, %v", r.aToB, r.bToA, r.err)
+			t.Fatalf("Relay(context.Background()) = %d, %d, %v", r.aToB, r.bToA, r.err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Relay() did not return after one side closed")
+		t.Fatal("Relay(context.Background()) did not return after one side closed")
 	}
 	// Relay closed relayB, so userB sees EOF.
 	if _, err := userB.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -129,18 +130,18 @@ func TestRelayReportsFirstError(t *testing.T) {
 	boom := errors.New("boom")
 	a := &failingRWC{readErr: boom, closed: make(chan struct{})}
 	b := &blockingRWC{closed: make(chan struct{})}
-	_, _, err := Relay(a, b)
+	_, _, err := Relay(context.Background(), a, b)
 	if !errors.Is(err, boom) {
-		t.Fatalf("Relay() error = %v, want %v", err, boom)
+		t.Fatalf("Relay(context.Background()) error = %v, want %v", err, boom)
 	}
 	select {
 	case <-b.closed:
 	default:
-		t.Fatal("Relay() did not close b")
+		t.Fatal("Relay(context.Background()) did not close b")
 	}
 }
 
-// With WithHalfClose a client can shut down its sending side and still read
+// With WithRelayHalfClose a client can shut down its sending side and still read
 // the answer, which the backend sends after it has seen EOF.
 func TestRelayHalfClose(t *testing.T) {
 	testRelayHalfClose(t, func(c net.Conn) net.Conn { return c })
@@ -169,7 +170,7 @@ func testRelayHalfClose(t *testing.T, wrap func(net.Conn) net.Conn) {
 	var up, down int64
 	go func() {
 		var err error
-		up, down, err = Relay(relayA, wrap(relayB), WithHalfClose())
+		up, down, err = Relay(context.Background(), relayA, wrap(relayB), WithRelayHalfClose())
 		done <- err
 	}()
 
@@ -180,7 +181,7 @@ func testRelayHalfClose(t *testing.T, wrap func(net.Conn) net.Conn) {
 		t.Fatalf("answer = %q, %v", answer, err)
 	}
 	if err := <-done; err != nil || up != 4 || down != 9 {
-		t.Fatalf("Relay() = %d, %d, %v", up, down, err)
+		t.Fatalf("Relay(context.Background()) = %d, %d, %v", up, down, err)
 	}
 }
 
@@ -191,17 +192,17 @@ func TestRelayHalfCloseFallsBackToClose(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, backend) }()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := Relay(a, b, WithHalfClose())
+		_, _, err := Relay(context.Background(), a, b, WithRelayHalfClose())
 		done <- err
 	}()
 	_ = client.Close()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("Relay() error = %v", err)
+			t.Fatalf("Relay(context.Background()) error = %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Relay() did not return")
+		t.Fatal("Relay(context.Background()) did not return")
 	}
 }
 
@@ -259,7 +260,9 @@ func TestRelayCanSplice(t *testing.T) {
 		{"prefixed tcp to tcp", tcpA, NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), spliceOS},
 		{"pipe to tcp", tcpA, pipeA, false},
 		{"tcp to pipe", pipeA, tcpB, false},
-		{"tcp to wrapped tcp", NewTimeoutConn(tcpA, time.Second), tcpB, false},
+		{"tcp to timeout tcp", NewTimeoutConn(tcpA, time.Second), tcpB, spliceOS},
+		{"timeout tcp to tcp", tcpA, NewPrefixConn(NewTimeoutConn(tcpB, time.Second), nil), spliceOS},
+		{"tcp to observed tcp", ObserveConn(tcpA, nil, func(int64) error { return nil }), tcpB, false},
 		{"prefixed pipe to tcp", tcpA, NewPrefixConn(pipeA, nil), false},
 		{"nil prefix conn to tcp", tcpA, (*PrefixConn)(nil), false},
 	}
@@ -335,8 +338,16 @@ func TestRelayKeepsLargeProxyprotoDatagram(t *testing.T) {
 	src := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 5}
 	dst := &net.UDPAddr{IP: net.IPv4(6, 7, 8, 9), Port: 10}
 	const size = 40000
-	raw := &datagramConn{msgs: [][]byte{proxyproto.V1Header(src, dst), make([]byte, size), make([]byte, 7)}}
-	ln := &proxyproto.Listener{Listener: &oneConnListener{c: raw, done: make(chan struct{})}, Datagram: true}
+	h, err := proxyproto.NewHeader(proxyproto.V1, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := h.AppendBinary(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := &datagramConn{msgs: [][]byte{header, make([]byte, size), make([]byte, 7)}}
+	ln := &proxyproto.Listener{Listener: &oneConnListener{c: raw, done: make(chan struct{})}, Config: proxyproto.Config{Datagram: true}}
 	defer func() { _ = ln.Close() }()
 	c, err := ln.Accept()
 	if err != nil {
@@ -346,9 +357,9 @@ func TestRelayKeepsLargeProxyprotoDatagram(t *testing.T) {
 		t.Fatalf("RemoteAddr() = %s, want %s", got, src)
 	}
 	sink := &datagramConn{}
-	aToB, _, err := Relay(c, sink)
+	aToB, _, err := Relay(context.Background(), c, sink)
 	if err != nil || aToB != size+7 {
-		t.Fatalf("Relay() = %d, %v, want %d, nil", aToB, err, size+7)
+		t.Fatalf("Relay(context.Background()) = %d, %v, want %d, nil", aToB, err, size+7)
 	}
 	if got := sink.sizes(); len(got) != 2 || got[0] != size || got[1] != 7 {
 		t.Fatalf("datagrams written = %v, want [%d 7]", got, size)
@@ -427,6 +438,10 @@ func (c writerToConn) Read(b []byte) (int, error) { return c.customWriterTo.Read
 // that cannot splice into dst, and over a connection without WriteTo into a
 // TCPConn.
 func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
+	if raceEnabled {
+		// A copy from a socket gets the buffer again after each short read.
+		t.Skip("the race detector makes sync.Pool drop buffers")
+	}
 	outClient, outServer := tcpPair(t)
 	defer func() { _ = outClient.Close() }()
 	defer func() { _ = outServer.Close() }()
@@ -523,7 +538,7 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 		sink := &datagramSink{done: make(chan struct{})}
 		done := make(chan struct{})
 		go func() {
-			_, _, _ = Relay(src, sink)
+			_, _, _ = Relay(context.Background(), src, sink)
 			close(done)
 		}()
 		waitUntil(t, func() bool { return len(sink.sizes()) > 0 })
@@ -531,7 +546,7 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Fatal("Relay() did not return after its source was closed")
+			t.Fatal("Relay(context.Background()) did not return after its source was closed")
 		}
 		if got := sink.sizes(); len(got) != 1 || got[0] != size {
 			t.Fatalf("datagrams relayed = %v, want [%d]", got, size)
@@ -569,7 +584,7 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 		a, b := net.Pipe()
 		defer func() { _ = b.Close() }()
 		go func() { _ = NewFramedConn(b).WriteFrame(make([]byte, size)) }()
-		relayOne(t, NewFramedConn(a, WithDatagramReads()))
+		relayOne(t, NewFramedConn(a, WithFramedDatagrams()))
 	})
 	// The wrappers of this package are looked through.
 	for _, tt := range []struct {
@@ -578,9 +593,9 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 	}{
 		{"TimeoutConn", func(c net.Conn) net.Conn { return NewTimeoutConn(c, time.Minute) }},
 		{"ObserveConn", func(c net.Conn) net.Conn {
-			return ObserveConn(c, TrafficObserver{OnRead: func(int64) error { return nil }})
+			return ObserveConn(c, func(int64) error { return nil }, nil)
 		}},
-		{"TeeConn", func(c net.Conn) net.Conn { return NewTeeConn(c, 0) }},
+		{"RecordingConn", func(c net.Conn) net.Conn { return NewRecordingConn(c, 0) }},
 		{"PrefixConn", func(c net.Conn) net.Conn { return NewPrefixConn(c, nil) }},
 		{"AddrOverrideConn", func(c net.Conn) net.Conn { return NewAddrOverrideConn(c, nil, nil) }},
 	} {
@@ -588,7 +603,7 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 			a, b := net.Pipe()
 			defer func() { _ = b.Close() }()
 			go func() { _ = NewFramedConn(b).WriteFrame(make([]byte, size)) }()
-			relayOne(t, tt.wrap(NewFramedConn(a, WithDatagramReads())))
+			relayOne(t, tt.wrap(NewFramedConn(a, WithFramedDatagrams())))
 		})
 	}
 }
@@ -606,7 +621,7 @@ func TestRelayPassesEmptyDatagrams(t *testing.T) {
 	sink := &datagramSink{done: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
-		_, _, _ = Relay(NewFramedConn(a, WithDatagramReads()), sink)
+		_, _, _ = Relay(context.Background(), NewFramedConn(a, WithFramedDatagrams()), sink)
 		close(done)
 	}()
 	waitUntil(t, func() bool { return len(sink.sizes()) >= 3 })
@@ -653,7 +668,7 @@ func TestRelayDatagramsIntoReaderFrom(t *testing.T) {
 	sink := readFromSink{&datagramSink{done: make(chan struct{})}}
 	done := make(chan struct{})
 	go func() {
-		_, _, _ = Relay(NewFramedConn(a, WithDatagramReads()), sink)
+		_, _, _ = Relay(context.Background(), NewFramedConn(a, WithFramedDatagrams()), sink)
 		close(done)
 	}()
 	waitUntil(t, func() bool { return len(sink.sizes()) >= 3 })
@@ -661,5 +676,25 @@ func TestRelayDatagramsIntoReaderFrom(t *testing.T) {
 	<-done
 	if got := sink.sizes(); !slices.Equal(got, []int{40000, 0, 1}) {
 		t.Fatalf("datagrams relayed = %v, want [40000 0 1]", got)
+	}
+}
+
+// writerOnly hides every method but Write.
+type writerOnly struct{ io.Writer }
+
+// udpFlowConn is a connection of another package with one datagram per Read,
+// known to Relay only by its UDP address.
+type udpFlowConn struct{ *datagramConn }
+
+func (udpFlowConn) LocalAddr() net.Addr { return &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 2} }
+
+// Relay copies such a connection as datagrams, whole above its stream buffer.
+func TestRelayDatagramsByNetwork(t *testing.T) {
+	src := udpFlowConn{&datagramConn{msgs: [][]byte{make([]byte, 40000), {}, make([]byte, 7)}}}
+	if !datagramReader(src) {
+		t.Fatal("a connection on a UDP address is not read as datagrams")
+	}
+	if datagramReader(plainReader{}) {
+		t.Fatal("a reader without an address is read as datagrams")
 	}
 }

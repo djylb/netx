@@ -41,12 +41,12 @@ func newTestListener(t *testing.T) *Listener {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	return &Listener{Listener: ln, HeaderTimeout: time.Second}
+	return &Listener{Listener: ln, Config: Config{HeaderTimeout: time.Second}}
 }
 
 func TestListenerUsesHeader(t *testing.T) {
 	l := newTestListener(t)
-	header := V2Header(tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
+	header := wireOf(V2, tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
 	server, _ := acceptOne(t, l, append(header, "hello"...))
 
 	if got := server.RemoteAddr().String(); got != "203.0.113.7:40000" {
@@ -63,8 +63,8 @@ func TestListenerUsesHeader(t *testing.T) {
 	if err != nil || h.Version != V2 {
 		t.Fatalf("Header() = %v, %v", h, err)
 	}
-	if _, ok := server.(*Conn).RawConn().(*net.TCPConn); !ok {
-		t.Fatal("RawConn() is not the accepted TCP connection")
+	if _, ok := server.(*Conn).NetConn().(*net.TCPConn); !ok {
+		t.Fatal("NetConn() is not the accepted TCP connection")
 	}
 }
 
@@ -81,7 +81,7 @@ func TestListenerRequiredRejectsMissingHeader(t *testing.T) {
 
 func TestListenerOptionalPassesStream(t *testing.T) {
 	l := newTestListener(t)
-	l.Policy = func(net.Addr) Policy { return Optional }
+	l.PolicyFor = func(net.Addr) Policy { return Optional }
 	server, client := acceptOne(t, l, []byte("PRO"))
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -99,7 +99,7 @@ func TestListenerOptionalPassesStream(t *testing.T) {
 
 func TestListenerIgnore(t *testing.T) {
 	l := newTestListener(t)
-	l.Policy = func(net.Addr) Policy { return Ignore }
+	l.PolicyFor = func(net.Addr) Policy { return Ignore }
 	server, _ := acceptOne(t, l, nil)
 	if _, ok := server.(*net.TCPConn); !ok {
 		t.Fatalf("Accept() = %T, want the plain connection", server)
@@ -108,7 +108,7 @@ func TestListenerIgnore(t *testing.T) {
 
 func TestListenerHeaderTimeoutAndDeadlines(t *testing.T) {
 	l := newTestListener(t)
-	l.HeaderTimeout = 50 * time.Millisecond
+	l.Config.HeaderTimeout = 50 * time.Millisecond
 	server, _ := acceptOne(t, l, nil)
 	start := time.Now()
 	_, err := server.Read(make([]byte, 1))
@@ -118,8 +118,8 @@ func TestListenerHeaderTimeoutAndDeadlines(t *testing.T) {
 	}
 
 	// A deadline set before the header is read applies afterwards.
-	l.HeaderTimeout = time.Second
-	header := V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
+	l.Config.HeaderTimeout = time.Second
+	header := wireOf(V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
 	server, _ = acceptOne(t, l, header)
 	if err := server.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestListenerHeaderTimeoutAndDeadlines(t *testing.T) {
 
 func TestConnWriteTo(t *testing.T) {
 	l := newTestListener(t)
-	header := V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
+	header := wireOf(V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
 	server, client := acceptOne(t, l, append(header, "data"...))
 	_ = client.(*net.TCPConn).CloseWrite()
 	var out bytes.Buffer
@@ -156,8 +156,8 @@ func isTimeout(err error) bool {
 
 func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
 	l := newTestListener(t)
-	l.HeaderTimeout = 5 * time.Second
-	header := V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
+	l.Config.HeaderTimeout = 5 * time.Second
+	header := wireOf(V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2))
 	server, client := acceptOne(t, l, header[:8])
 
 	// A shorter caller deadline ends the header read without failing it.
@@ -179,7 +179,7 @@ func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
 	}
 
 	// The header timeout runs from the first attempt and still applies.
-	l.HeaderTimeout = 300 * time.Millisecond
+	l.Config.HeaderTimeout = 300 * time.Millisecond
 	server, _ = acceptOne(t, l, nil)
 	_ = server.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	start = time.Now()
@@ -226,7 +226,7 @@ func TestListenerCallerDeadlineBoundsHeader(t *testing.T) {
 // the header returns the timeout instead of waiting for that read.
 func TestListenerReadDeadlineWhileHeaderPending(t *testing.T) {
 	l := newTestListener(t)
-	l.HeaderTimeout = 2 * time.Second
+	l.Config.HeaderTimeout = 2 * time.Second
 	server, client := acceptOne(t, l, nil) // the peer sends nothing yet
 	go func() { _ = server.RemoteAddr() }()
 	time.Sleep(50 * time.Millisecond)
@@ -257,7 +257,7 @@ func TestListenerReadDeadlineWhileHeaderPending(t *testing.T) {
 
 	// The header still arrives for the call that reads it.
 	_ = server.SetReadDeadline(time.Time{})
-	if _, err := client.Write(append(V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), 'x')); err != nil {
+	if _, err := client.Write(append(wireOf(V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), 'x')); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 1)
@@ -270,7 +270,7 @@ func TestListenerReadDeadlineWhileHeaderPending(t *testing.T) {
 // allocate that before the bytes arrive.
 func TestListenerGrowsHeaderBufferWithData(t *testing.T) {
 	l := newTestListener(t)
-	l.HeaderTimeout = 2 * time.Second
+	l.Config.HeaderTimeout = 2 * time.Second
 	prefix := []byte(v2Signature + "\x21\x11\xff\xff")
 	server, _ := acceptOne(t, l, prefix)
 	c := server.(*Conn)
@@ -306,7 +306,7 @@ func TestListenerHeaderTimeoutWithoutDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &Listener{Listener: noDeadlineListener{ln}, HeaderTimeout: 100 * time.Millisecond}
+	l := &Listener{Listener: noDeadlineListener{ln}, Config: Config{HeaderTimeout: 100 * time.Millisecond}}
 	t.Cleanup(func() { _ = l.Close() })
 	server, _ := acceptOne(t, l, []byte("PROXY "))
 	done := make(chan error, 1)
@@ -329,8 +329,8 @@ func TestListenerHeaderTimeoutWithoutDeadlines(t *testing.T) {
 
 func TestListenerOptionalSignaturePrefix(t *testing.T) {
 	l := newTestListener(t)
-	l.HeaderTimeout = 100 * time.Millisecond
-	l.Policy = func(net.Addr) Policy { return Optional }
+	l.Config.HeaderTimeout = 100 * time.Millisecond
+	l.PolicyFor = func(net.Addr) Policy { return Optional }
 	buf := make([]byte, 16)
 
 	// A peer that sends a bare CRLF, the start of a version 2 signature, and
@@ -372,7 +372,7 @@ func TestListenerOptionalSignaturePrefix(t *testing.T) {
 	}
 
 	// Required still fails.
-	l.Policy = nil
+	l.PolicyFor = nil
 	server, _ = acceptOne(t, l, []byte("\r\n"))
 	if _, err := server.Read(buf); !isTimeout(err) {
 		t.Fatalf("Read() error = %v, want the header timeout", err)
@@ -411,11 +411,11 @@ func TestListenerReadsHeaderAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reads atomic.Int32
-	l := &Listener{Listener: countingListener{ln, &reads}, Policy: func(net.Addr) Policy { return Optional }}
+	l := &Listener{Listener: countingListener{ln, &reads}, PolicyFor: func(net.Addr) Policy { return Optional }}
 	t.Cleanup(func() { _ = l.Close() })
 	for _, data := range [][]byte{
-		append(V1Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
-		append(V2Header(tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
+		append(wireOf(V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
+		append(wireOf(V2, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)), "payload"...),
 		[]byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
 	} {
 		reads.Store(0)
@@ -456,7 +456,7 @@ func TestListenerGivesUpOnEmptyReads(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
-	l := &Listener{Listener: &oneConnListener{c: emptyReadConn{a}}, HeaderTimeout: time.Minute}
+	l := &Listener{Listener: &oneConnListener{c: emptyReadConn{a}}, Config: Config{HeaderTimeout: time.Minute}}
 	server, err := l.Accept()
 	if err != nil {
 		t.Fatal(err)
@@ -514,7 +514,7 @@ func TestListenerStreamReportsTCPAddrs(t *testing.T) {
 	l := newTestListener(t)
 	for _, header := range [][]byte{
 		[]byte("PROXY UDP4 192.0.2.1 192.0.2.2 1000 2000\r\n"),
-		V2Header(udp("192.0.2.1", 1000), udp("192.0.2.2", 2000)),
+		wireOf(V2, udp("192.0.2.1", 1000), udp("192.0.2.2", 2000)),
 	} {
 		server, _ := acceptOne(t, l, header)
 		if a, ok := server.RemoteAddr().(*net.TCPAddr); !ok || a.String() != "192.0.2.1:1000" {
@@ -559,7 +559,7 @@ func TestConnWriteToPoolsBuffer(t *testing.T) {
 		a, b := net.Pipe()
 		defer func() { _ = a.Close() }()
 		defer func() { _ = b.Close() }()
-		l := &Listener{Listener: &oneConnListener{c: &scriptConn{Conn: a, data: []byte("no header here")}}, Policy: func(net.Addr) Policy { return Optional }}
+		l := &Listener{Listener: &oneConnListener{c: &scriptConn{Conn: a, data: []byte("no header here")}}, PolicyFor: func(net.Addr) Policy { return Optional }}
 		c, err := l.Accept()
 		if err != nil {
 			t.Fatal(err)
@@ -589,8 +589,8 @@ func TestListenerOptionalHeaderTimeoutWithoutDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &Listener{Listener: noDeadlineListener{ln}, HeaderTimeout: 100 * time.Millisecond,
-		Policy: func(net.Addr) Policy { return Optional }}
+	l := &Listener{Listener: noDeadlineListener{ln}, Config: Config{HeaderTimeout: 100 * time.Millisecond},
+		PolicyFor: func(net.Addr) Policy { return Optional }}
 	t.Cleanup(func() { _ = l.Close() })
 	server, _ := acceptOne(t, l, nil)
 	if _, err := server.Read(make([]byte, 8)); !isTimeout(err) {
@@ -623,7 +623,7 @@ func TestConnWriteToTCPPoolsBuffer(t *testing.T) {
 		t.Skip("the race detector makes sync.Pool drop buffers")
 	}
 	l := newTestListener(t)
-	l.Policy = func(net.Addr) Policy { return Optional }
+	l.PolicyFor = func(net.Addr) Policy { return Optional }
 	sinkLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -666,5 +666,37 @@ func TestConnWriteToTCPPoolsBuffer(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy > 16<<10 {
 		t.Fatalf("WriteTo allocated %d bytes per connection, want no copy buffer", perCopy)
+	}
+}
+
+// Config.Policy applies to every peer, and PolicyFor replaces it per peer.
+func TestListenerConfigPolicy(t *testing.T) {
+	header := wireOf(V1, tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
+	for _, tt := range []struct {
+		name      string
+		data      string
+		payload   string
+		policyFor func(net.Addr) Policy
+		policy    Policy
+		wrapped   bool
+	}{
+		{"default required", string(header) + "hi", "hi", nil, Required, true},
+		{"optional for everyone", "hi", "hi", nil, Optional, true},
+		{"ignore for everyone", string(header), string(header), nil, Ignore, false},
+		{"policy for overrides", string(header) + "hi", "hi", func(net.Addr) Policy { return Required }, Ignore, true},
+		{"policy for ignores", "hi", "hi", func(net.Addr) Policy { return Ignore }, Required, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			l := newTestListener(t)
+			l.Config.Policy, l.PolicyFor = tt.policy, tt.policyFor
+			server, client := acceptOne(t, l, []byte(tt.data))
+			_ = client.(*net.TCPConn).CloseWrite()
+			if _, ok := server.(*Conn); ok != tt.wrapped {
+				t.Fatalf("Accept() returned a *Conn: %v, want %v", ok, tt.wrapped)
+			}
+			if got, err := io.ReadAll(server); err != nil || string(got) != tt.payload {
+				t.Fatalf("ReadAll() = %q, %v; want %q", got, err, tt.payload)
+			}
+		})
 	}
 }

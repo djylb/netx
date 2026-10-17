@@ -14,8 +14,9 @@ import (
 // MaxFramePayload is the maximum payload size of one framed message.
 const MaxFramePayload = 65535
 
-// ErrFrameTooLarge is returned by Write and WriteFrame when the payload exceeds MaxFramePayload.
-var ErrFrameTooLarge = errors.New("framed: frame size exceeds MaxFramePayload")
+// ErrFrameTooLarge is returned by WriteFrame, and by Write in datagram mode,
+// for a payload longer than MaxFramePayload.
+var ErrFrameTooLarge = errors.New("netx: frame size exceeds MaxFramePayload")
 
 // ErrFrameDesync is returned after a read or write failed in a way that lost
 // frame bytes, such as the end of the stream inside a frame (see FramedConn).
@@ -24,21 +25,24 @@ var ErrFrameTooLarge = errors.New("framed: frame size exceeds MaxFramePayload")
 // also wraps the failure that caused it, so errors.Is and errors.As still see
 // that cause (an EOF inside a frame as io.ErrUnexpectedEOF), except that a
 // timeout cause is hidden and the error never reports a timeout.
-var ErrFrameDesync = errors.New("framed: stream desynchronized by a partial frame")
+var ErrFrameDesync = errors.New("netx: framed stream desynchronized by a partial frame")
 
 // FramedConn reads and writes length-prefixed messages over a reliable stream.
 //
-// Each frame is a 2-byte big-endian length followed by the payload. Write and
-// WriteFrame send p as exactly one frame and reject payloads longer than
-// MaxFramePayload instead of splitting them.
+// Each frame is a 2-byte big-endian length followed by the payload.
 //
-// By default Read is stream-oriented: it returns the current frame, or as
+// By default the connection is a stream: Write sends p as one frame, or as
+// several when it is longer than MaxFramePayload, which Reads join up again.
+// Read it returns the current frame, or as
 // much of it as fits in p, and a longer frame continues in the next Reads
 // without being buffered. Empty frames are skipped, as they carry no stream
-// bytes, and an error inside a frame splits it between two Reads. Use
-// WithDatagramReads or ReadFrame when message boundaries matter, and
-// WithReadBuffer to serve small frames or small buffers from one read of the
-// connection.
+// bytes, and an error inside a frame splits it between two Reads.
+//
+// With WithFramedDatagrams each frame is a message, as a datagram is: Write
+// sends p as exactly one frame and fails with ErrFrameTooLarge for a longer
+// one, and Read returns one frame per call. WriteFrame and ReadFrame work on
+// one frame in either mode. WithFramedReadBuffer serves small frames or small
+// buffers from one read of the connection.
 //
 // An error that loses no frame bytes is returned unchanged and may be
 // retried: one between frames or inside a frame header, such as an expired
@@ -52,8 +56,8 @@ var ErrFrameDesync = errors.New("framed: stream desynchronized by a partial fram
 //
 // Reads and writes may run concurrently with each other.
 type FramedConn struct {
-	net.Conn
-	br       *bufio.Reader // set by WithReadBuffer
+	conn     net.Conn
+	br       *bufio.Reader // set by WithFramedReadBuffer
 	rerr     error
 	rpend    error  // error that cut a stream Read short, for the next Read
 	rpendAt  uint64 // rdeadlines before the read that left rpend
@@ -80,20 +84,22 @@ type framedOptions struct {
 // FramedOption configures NewFramedConn.
 type FramedOption func(*framedOptions)
 
-// WithDatagramReads makes Read return exactly one frame per call.
-// Bytes of a frame that do not fit in p are discarded, like a UDP socket
-// truncating a datagram. ReadFrame is not affected.
-func WithDatagramReads() FramedOption {
+// WithFramedDatagrams makes each frame a message, as a datagram is: Read
+// returns exactly one frame per call, discarding the bytes that do not fit
+// in p like a UDP socket truncating a datagram, and Write sends exactly one
+// frame, failing for a payload longer than MaxFramePayload. ReadFrame and
+// WriteFrame are not affected.
+func WithFramedDatagrams() FramedOption {
 	return func(o *framedOptions) {
 		o.datagramReads = true
 	}
 }
 
-// WithReadBuffer reads the stream through a buffer of size bytes, so a burst
+// WithFramedReadBuffer reads the stream through a buffer of size bytes, so a burst
 // of small frames costs one read of the wrapped connection instead of two per
 // frame. Bytes already in the buffer are lost to anyone who reads the wrapped
-// connection directly, for example through RawConnOf.
-func WithReadBuffer(size int) FramedOption {
+// connection directly, for example through InnermostConn.
+func WithFramedReadBuffer(size int) FramedOption {
 	return func(o *framedOptions) {
 		o.readBuffer = size
 	}
@@ -107,7 +113,7 @@ func NewFramedConn(c net.Conn, opts ...FramedOption) *FramedConn {
 			opt(&cfg)
 		}
 	}
-	fc := &FramedConn{Conn: c, datagram: cfg.datagramReads}
+	fc := &FramedConn{conn: c, datagram: cfg.datagramReads}
 	if cfg.readBuffer > 0 && c != nil {
 		fc.br = bufio.NewReaderSize(c, cfg.readBuffer)
 	}
@@ -119,7 +125,7 @@ func (fc *FramedConn) reader() io.Reader {
 	if fc.br != nil {
 		return fc.br
 	}
-	return fc.Conn
+	return fc.conn
 }
 
 // Read reads frame payload into p.
@@ -128,11 +134,11 @@ func (fc *FramedConn) reader() io.Reader {
 // error interrupts, is returned across several Reads and empty frames are
 // skipped; a Read that an error cuts short returns the bytes it read and
 // leaves the error to the next Read. With
-// WithDatagramReads, each call consumes exactly one frame, an empty one
+// WithFramedDatagrams, each call consumes exactly one frame, an empty one
 // included, and discards what does not fit in p; an empty p consumes and
 // discards one frame.
 func (fc *FramedConn) Read(p []byte) (int, error) {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return 0, net.ErrClosed
 	}
 	if len(p) == 0 && !fc.datagram {
@@ -165,7 +171,7 @@ func (fc *FramedConn) Read(p []byte) (int, error) {
 // ReadFrame reads and returns one complete frame.
 // If Read has already partially consumed a frame, ReadFrame returns the remaining bytes.
 func (fc *FramedConn) ReadFrame() ([]byte, error) {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return nil, net.ErrClosed
 	}
 	fc.rmu.Lock()
@@ -257,6 +263,42 @@ func (fc *FramedConn) takePendingLocked() error {
 	return err
 }
 
+// nextDatagram reads the next frame, as a datagram Read does, into a pooled
+// buffer that fits it, for Relay; see datagramSource. It waits for the
+// frame's header without a buffer.
+func (fc *FramedConn) nextDatagram() (*[]byte, error) {
+	if fc == nil || fc.conn == nil {
+		return nil, net.ErrClosed
+	}
+	fc.rmu.Lock()
+	defer fc.rmu.Unlock()
+	if fc.rerr != nil {
+		return nil, fc.rerr
+	}
+	if err := fc.takePendingLocked(); err != nil {
+		return nil, err
+	}
+	n := fc.remain
+	if n == 0 {
+		var err error
+		if n, err = fc.readHeaderLocked(); err != nil {
+			return nil, err
+		}
+	}
+	bp := getDatagramBuf(n)
+	if m, err := io.ReadFull(fc.reader(), *bp); err != nil {
+		putDatagramBuf(bp)
+		if m == 0 && !streamEnded(err) {
+			// No payload byte was lost: the next call reads the frame.
+			fc.remain = n
+			return nil, err
+		}
+		return nil, fc.failReadLocked(err)
+	}
+	fc.remain = 0
+	return bp, nil
+}
+
 // readDatagramLocked reads the next frame, or the one whose payload a failed
 // read left pending, into p and discards the bytes that do not fit.
 func (fc *FramedConn) readDatagramLocked(p []byte) (int, error) {
@@ -285,7 +327,7 @@ func (fc *FramedConn) readDatagramLocked(p []byte) (int, error) {
 			d, err = fc.br.Discard(rest)
 			discarded = int64(d)
 		} else {
-			discarded, err = io.CopyN(io.Discard, fc.Conn, int64(rest))
+			discarded, err = io.CopyN(io.Discard, fc.conn, int64(rest))
 		}
 		if err != nil {
 			if k == 0 && discarded == 0 && !streamEnded(err) {
@@ -309,26 +351,37 @@ func (fc *FramedConn) failReadLocked(err error) error {
 	return fc.rerr
 }
 
-// Write sends p as exactly one frame.
+// Write sends p as one frame. With stream reads, the default, a p longer than
+// MaxFramePayload is sent as several frames, which the reader joins up again,
+// so that io.Copy into a FramedConn works with any buffer; it returns the
+// bytes of the frames sent whole. With WithFramedDatagrams, where each
+// frame is a message, such a p fails with ErrFrameTooLarge, as WriteFrame
+// does in both modes.
 func (fc *FramedConn) Write(p []byte) (int, error) {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return 0, net.ErrClosed
 	}
-	if len(p) > MaxFramePayload {
+	if len(p) > MaxFramePayload && fc.datagram {
 		return 0, ErrFrameTooLarge
 	}
 	fc.wmu.Lock()
 	defer fc.wmu.Unlock()
 
-	if err := fc.writeFrameLocked(p); err != nil {
-		return 0, err
+	written := 0
+	for {
+		n := min(len(p)-written, MaxFramePayload)
+		if err := fc.writeFrameLocked(p[written : written+n]); err != nil {
+			return written, err
+		}
+		if written += n; written == len(p) {
+			return written, nil
+		}
 	}
-	return len(p), nil
 }
 
 // WriteFrame writes one complete frame.
 func (fc *FramedConn) WriteFrame(p []byte) error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
 	if len(p) > MaxFramePayload {
@@ -341,68 +394,70 @@ func (fc *FramedConn) WriteFrame(p []byte) error {
 }
 
 func (fc *FramedConn) SetDeadline(t time.Time) error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
 	// Counted once set, so that a Read that times out at the old deadline
 	// before it does not keep that timeout.
 	defer fc.rdeadlines.Add(1)
-	return fc.Conn.SetDeadline(t)
+	return fc.conn.SetDeadline(t)
 }
 
 func (fc *FramedConn) SetReadDeadline(t time.Time) error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
 	defer fc.rdeadlines.Add(1) // as in SetDeadline
-	return fc.Conn.SetReadDeadline(t)
+	return fc.conn.SetReadDeadline(t)
 }
 
 func (fc *FramedConn) SetWriteDeadline(t time.Time) error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
-	return fc.Conn.SetWriteDeadline(t)
+	return fc.conn.SetWriteDeadline(t)
 }
 
 func (fc *FramedConn) LocalAddr() net.Addr {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return nil
 	}
-	return fc.Conn.LocalAddr()
+	return fc.conn.LocalAddr()
 }
 
 func (fc *FramedConn) RemoteAddr() net.Addr {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return nil
 	}
-	return fc.Conn.RemoteAddr()
+	return fc.conn.RemoteAddr()
 }
 
 func (fc *FramedConn) Close() error {
-	if fc == nil || fc.Conn == nil {
-		return net.ErrClosed
+	if fc == nil || fc.conn == nil {
+		return nil
 	}
-	return fc.Conn.Close()
+	return fc.conn.Close()
 }
 
 // CloseWrite shuts down the writing side of the wrapped connection after the
 // frames written so far; see TimeoutConn.CloseWrite.
 func (fc *FramedConn) CloseWrite() error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
 	fc.wmu.Lock()
 	defer fc.wmu.Unlock()
-	return closeWrite(fc.Conn)
+	return closeWrite(fc.conn)
 }
 
-// RawConn returns the innermost connection beneath fc; see RawConnProvider.
-func (fc *FramedConn) RawConn() net.Conn {
+// NetConn returns the connection that fc wraps, as *tls.Conn's NetConn does;
+// see InnermostConn and ConnAs. Reading or writing it directly breaks the
+// framing.
+func (fc *FramedConn) NetConn() net.Conn {
 	if fc == nil {
 		return nil
 	}
-	return rawConnOf(fc.Conn)
+	return fc.conn
 }
 
 // framedWriteBufPool holds frame buffers for conns without a writev fast path.
@@ -415,7 +470,7 @@ var framedWriteBufPool = sync.Pool{
 }
 
 func (fc *FramedConn) writeFrameLocked(p []byte) error {
-	if fc == nil || fc.Conn == nil {
+	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
 	if fc.werr != nil {
@@ -425,12 +480,12 @@ func (fc *FramedConn) writeFrameLocked(p []byte) error {
 		written int64
 		err     error
 	)
-	if _, ok := fc.Conn.(*net.TCPConn); ok {
+	if _, ok := fc.conn.(*net.TCPConn); ok {
 		// The header and vector live in fc, so the writev does not allocate.
 		binary.BigEndian.PutUint16(fc.whdr[:], uint16(len(p)))
 		fc.wvec = [2][]byte{fc.whdr[:], p}
 		fc.wbufs = fc.wvec[:]
-		written, err = writeBuffers(fc.Conn, &fc.wbufs)
+		written, err = writeBuffers(fc.conn, &fc.wbufs)
 		fc.wvec = [2][]byte{} // do not keep p reachable
 	} else {
 		// One Write per frame, so wrappers such as TLS or mux streams do not
@@ -439,7 +494,7 @@ func (fc *FramedConn) writeFrameLocked(p []byte) error {
 		buf := binary.BigEndian.AppendUint16((*bp)[:0], uint16(len(p)))
 		buf = append(buf, p...)
 		var n int
-		n, err = writeAll(fc.Conn, buf)
+		n, err = writeAll(fc.conn, buf)
 		written = int64(n)
 		*bp = buf[:0]
 		framedWriteBufPool.Put(bp)

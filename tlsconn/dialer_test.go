@@ -94,7 +94,7 @@ func TestDialerErrors(t *testing.T) {
 		t.Errorf("Dial(closed port) = %v, %v; want the forward error", c, err)
 	}
 
-	// The handshake is bounded by Timeout when the peer stays silent.
+	// The handshake is bounded by HandshakeTimeout when the peer stays silent.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestDialerErrors(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	d = &Dialer{Config: &tls.Config{InsecureSkipVerify: true}, Timeout: 100 * time.Millisecond}
+	d = &Dialer{Config: &tls.Config{InsecureSkipVerify: true}, HandshakeTimeout: 100 * time.Millisecond}
 	if _, err := d.Dial("tcp", ln.Addr().String()); err == nil || time.Since(start) > 2*time.Second {
 		t.Fatalf("silent peer: error = %v after %v", err, time.Since(start))
 	}

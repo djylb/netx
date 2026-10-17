@@ -11,7 +11,7 @@ import (
 )
 
 func TestUDPUnsupported(t *testing.T) {
-	if _, err := ListenPacket(context.Background(), "127.0.0.1:0"); !errors.Is(err, errors.ErrUnsupported) {
+	if _, err := ListenPacket(context.Background(), "udp", "127.0.0.1:0"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("ListenPacket() error = %v", err)
 	}
 	if _, err := DialUDP(context.Background(), netip.MustParseAddrPort("127.0.0.1:1"), netip.MustParseAddrPort("127.0.0.1:2")); !errors.Is(err, errors.ErrUnsupported) {
@@ -22,7 +22,7 @@ func TestUDPUnsupported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = c.Close() }()
-	if _, _, _, err := ReadFromUDP(c, make([]byte, 1)); !errors.Is(err, errors.ErrUnsupported) {
+	if _, _, err := ReadFromUDP(c, make([]byte, 1)); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("ReadFromUDP() error = %v", err)
 	}
 }

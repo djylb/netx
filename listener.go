@@ -38,38 +38,61 @@ func NewChanListener(addr net.Addr, queue int) *ChanListener {
 
 // Deliver queues c for Accept, waiting for queue space until ctx is done or l
 // is closed. On success l owns c: Accept returns it, or Close closes it. On
-// failure Deliver closes c and returns ctx.Err() or net.ErrClosed.
+// failure it returns ctx.Err() or net.ErrClosed and c stays the caller's, to
+// close or to hand elsewhere.
 func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
 	if c == nil {
 		return errNilListenerConn
 	}
 	select {
 	case <-l.done:
-		_ = c.Close()
 		return net.ErrClosed
 	default:
 	}
 	// A context that is already done fails Deliver, rather than the select
 	// below picking between it and free queue space at random.
 	if err := ctx.Err(); err != nil {
-		_ = c.Close()
 		return err
 	}
 	select {
 	case l.conns <- c:
-		select {
-		case <-l.done:
-			// Close may have drained the queue before c entered it.
-			l.drain()
-		default:
-		}
+		l.delivered()
 		return nil
 	case <-l.done:
-		_ = c.Close()
 		return net.ErrClosed
 	case <-ctx.Done():
-		_ = c.Close()
 		return ctx.Err()
+	}
+}
+
+// TryDeliver queues c for Accept if the queue has room and l is open, and
+// reports whether it did; l then owns c, as after Deliver. Otherwise c stays
+// the caller's.
+func (l *ChanListener) TryDeliver(c net.Conn) bool {
+	if c == nil {
+		return false
+	}
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	select {
+	case l.conns <- c:
+		l.delivered()
+		return true
+	default:
+		return false
+	}
+}
+
+// delivered closes what a Close that raced with a delivery left queued.
+func (l *ChanListener) delivered() {
+	select {
+	case <-l.done:
+		// Close may have drained the queue before c entered it.
+		l.drain()
+	default:
 	}
 }
 
@@ -79,13 +102,15 @@ func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
 // reverse; a nil remote is reported as "pipe".
 func (l *ChanListener) Dial(ctx context.Context, remote net.Addr) (net.Conn, error) {
 	client, server := net.Pipe()
-	// Deliver owns the server end from here on and closes it on failure.
+	// Delivered, l owns sc; on failure it is closed below.
 	//noinspection GoResourceLeak
-	if err := l.Deliver(ctx, NewAddrOverrideConn(server, remote, l.addr)); err != nil {
+	sc := NewAddrOverrideConn(server, l.addr, remote)
+	if err := l.Deliver(ctx, sc); err != nil {
 		_ = client.Close()
+		_ = sc.Close()
 		return nil, err
 	}
-	return NewAddrOverrideConn(client, l.addr, remote), nil
+	return NewAddrOverrideConn(client, remote, l.addr), nil
 }
 
 // Accept waits for the next queued connection. It returns net.ErrClosed once
@@ -135,12 +160,12 @@ func (l *ChanListener) drain() {
 // and then return net.ErrClosed, so a server loop such as http.Server.Serve
 // handles c and returns when it is done.
 //
-// Accept returns c wrapped so that its Close can be observed; RawConnOf
+// Accept returns c wrapped so that its Close can be observed; InnermostConn
 // unwraps it. The wrapper hides c's concrete type, so to serve TLS pass the
 // plain connection and wrap the listener with tls.NewListener. Close closes c
 // only if Accept has not returned it yet.
-func NewSingleConnListener(c net.Conn) net.Listener {
-	l := &singleConnListener{conn: c, done: make(chan struct{})}
+func NewSingleConnListener(c net.Conn) *SingleConnListener {
+	l := &SingleConnListener{conn: c, done: make(chan struct{})}
 	if c != nil {
 		l.addr = c.LocalAddr()
 	}
@@ -150,7 +175,8 @@ func NewSingleConnListener(c net.Conn) net.Listener {
 	return l
 }
 
-type singleConnListener struct {
+// SingleConnListener is the listener that NewSingleConnListener returns.
+type SingleConnListener struct {
 	mu       sync.Mutex
 	conn     net.Conn // nil once accepted or closed
 	addr     net.Addr
@@ -158,7 +184,9 @@ type singleConnListener struct {
 	doneOnce sync.Once
 }
 
-func (l *singleConnListener) Accept() (net.Conn, error) {
+// Accept returns the connection the first time and then blocks until it or
+// l is closed, returning net.ErrClosed.
+func (l *SingleConnListener) Accept() (net.Conn, error) {
 	l.mu.Lock()
 	c := l.conn
 	l.conn = nil
@@ -170,7 +198,9 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 	return nil, net.ErrClosed
 }
 
-func (l *singleConnListener) Close() error {
+// Close ends a blocked Accept and closes the connection if Accept has not
+// returned it yet.
+func (l *SingleConnListener) Close() error {
 	l.mu.Lock()
 	c := l.conn
 	l.conn = nil
@@ -182,18 +212,19 @@ func (l *singleConnListener) Close() error {
 	return nil
 }
 
-func (l *singleConnListener) Addr() net.Addr {
+// Addr returns the connection's LocalAddr, or "pipe" if it has none.
+func (l *SingleConnListener) Addr() net.Addr {
 	return l.addr
 }
 
-func (l *singleConnListener) finish() {
+func (l *SingleConnListener) finish() {
 	l.doneOnce.Do(func() { close(l.done) })
 }
 
 // singleConn ends its listener's Accept loop when it is closed.
 type singleConn struct {
 	net.Conn
-	l *singleConnListener
+	l *SingleConnListener
 }
 
 func (c *singleConn) Close() error {
@@ -208,7 +239,7 @@ func (c *singleConn) CloseWrite() error {
 
 func (c *singleConn) innerReader() io.Reader { return c.Conn }
 
-func (c *singleConn) RawConn() net.Conn {
+func (c *singleConn) NetConn() net.Conn {
 	return c.Conn
 }
 

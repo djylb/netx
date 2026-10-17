@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -26,7 +27,7 @@ func TestServerUDPExactAnnouncementTakesOnlyItsSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := serve(t, &socks5.Server{PacketConn: pc})
+	addr := serve(t, &socks5.Server{UDPSocket: pc})
 	victim, attacker := newUDPClient(t), newUDPClient(t)
 	ctl, relay := associate(t, addr, socks5.AddrFromNetAddr(victim.LocalAddr()))
 	defer func() { _ = ctl.Close() }()
@@ -47,7 +48,7 @@ func TestServerUDPStoppedSharedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := serve(t, &socks5.Server{PacketConn: pc})
+	addr := serve(t, &socks5.Server{UDPSocket: pc})
 	waiting, _ := associate(t, addr, socks5.Addr{})
 	defer func() { _ = waiting.Close() }()
 	_ = pc.Close()
@@ -106,7 +107,7 @@ func TestServerSOCKS4BufferedRequestKeepsEarlyData(t *testing.T) {
 		return nil
 	}}
 	served := make(chan struct{})
-	go func() { _ = s.ServeConn(counted); close(served) }()
+	go func() { _ = s.ServeConn(context.Background(), counted); close(served) }()
 	defer func() { <-served }()
 
 	var req bytes.Buffer
@@ -124,9 +125,9 @@ func TestServerSOCKS4BufferedRequestKeepsEarlyData(t *testing.T) {
 	if _, err := io.ReadFull(client, buf); err != nil || string(buf) != "early" {
 		t.Fatalf("echo of the early data = %q, %v", buf, err)
 	}
-	// The early bytes do not change what the request carries.
-	if got := allowed.Load(); got != net.Conn(counted) {
-		t.Errorf("Allow saw req.Conn %T, want the served connection", got)
+	// req.Conn replays the early bytes over the served connection.
+	if got, _ := allowed.Load().(net.Conn); netx.InnermostConn(got) != net.Conn(counted) {
+		t.Errorf("Allow saw req.Conn %T, want one wrapping the served connection", got)
 	}
 	if n := counted.beforeWrite.Load(); n > 3 {
 		t.Errorf("the request took %d reads of the connection, want at most 3", n)
@@ -142,7 +143,7 @@ func TestServeDoesNotReportConnectionsEndedByClose(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var reported []error
-	s := &socks5.Server{PacketConn: pc, OnError: func(_ net.Conn, err error) {
+	s := &socks5.Server{UDPSocket: pc, OnError: func(_ net.Conn, err error) {
 		mu.Lock()
 		reported = append(reported, err)
 		mu.Unlock()

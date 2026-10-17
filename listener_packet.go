@@ -22,7 +22,7 @@ import (
 // while too many connections wait for Accept, are dropped. After a connection
 // is closed, the next datagram from its peer starts a new one. A connection
 // lasts until it is closed, so a server facing untrusted or spoofed peers
-// should set WithIdleTimeout or read deadlines.
+// should set WithPacketIdleTimeout or read deadlines.
 type PacketListener struct {
 	pc   net.PacketConn
 	udp  *net.UDPConn // pc, when it is one: alloc-free reads and writes
@@ -42,27 +42,45 @@ type PacketListener struct {
 }
 
 type packetListenerOptions struct {
-	filter      func(peer net.Addr) bool
+	filter      func(peer net.Addr, first []byte) bool
 	queue       int
 	backlog     int
 	idle        time.Duration
 	maxDatagram int
 }
 
+// Defaults of NewPacketListener.
+const (
+	// DefaultPacketQueue is how many datagrams a connection holds until
+	// they are read; see WithPacketQueue.
+	DefaultPacketQueue = 128
+	// DefaultPacketAcceptBacklog is how many new connections wait for
+	// Accept; see WithPacketAcceptBacklog.
+	DefaultPacketAcceptBacklog = 128
+	// DefaultPacketMaxDatagram is the largest datagram delivered in full;
+	// see WithPacketMaxDatagram.
+	DefaultPacketMaxDatagram = 65535
+)
+
 // PacketListenerOption configures NewPacketListener.
 type PacketListenerOption func(*packetListenerOptions)
 
-// WithAcceptFilter drops the datagrams of a new peer for which filter returns
-// false instead of starting a connection for it. filter runs on the read loop,
-// so it must be fast. It may close the listener or its connections.
-func WithAcceptFilter(filter func(peer net.Addr) bool) PacketListenerOption {
+// WithPacketAcceptFilter drops a datagram of a new peer for which filter
+// returns false instead of starting a connection for it. filter gets the
+// peer and the datagram, which is valid only during the call, so that it can
+// check a token or cookie in it before anything is allocated for the peer,
+// and reply with WriteTo without state, as a retry does; peers that only
+// spoof their source then take no place in the accept backlog. It runs on the
+// read loop, so it must be fast. It may close the listener or its
+// connections.
+func WithPacketAcceptFilter(filter func(peer net.Addr, first []byte) bool) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.filter = filter
 	}
 }
 
 // WithPacketQueue sets how many datagrams a connection holds until they are
-// read, 128 by default. A datagram larger than 2 KiB takes the room of several
+// read, DefaultPacketQueue by default. A datagram larger than 2 KiB takes the room of several
 // in proportion to its size, so a connection holds at most n × 2 KiB of
 // queued datagrams, or a single larger one. Each connection also takes a
 // pointer-sized slot per datagram up front, when its first datagram arrives.
@@ -72,29 +90,29 @@ func WithPacketQueue(n int) PacketListenerOption {
 	}
 }
 
-// WithAcceptBacklog sets how many new connections wait for Accept, 128 by
-// default.
-func WithAcceptBacklog(n int) PacketListenerOption {
+// WithPacketAcceptBacklog sets how many new connections wait for Accept,
+// DefaultPacketAcceptBacklog by default.
+func WithPacketAcceptBacklog(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.backlog = n
 	}
 }
 
-// WithIdleTimeout closes a connection that has neither received nor sent a
+// WithPacketIdleTimeout closes a connection that has neither received nor sent a
 // datagram for d since Accept returned it. Its pending and later Reads return
 // io.EOF. Connections waiting for Accept are kept with their datagrams. A
 // non-positive d, the default, keeps idle connections.
-func WithIdleTimeout(d time.Duration) PacketListenerOption {
+func WithPacketIdleTimeout(d time.Duration) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.idle = d
 	}
 }
 
-// WithMaxDatagram sets the largest datagram that is delivered in full, 65535
-// bytes by default; longer ones are truncated. The packet connection is still
+// WithPacketMaxDatagram sets the largest datagram that is delivered in full,
+// DefaultPacketMaxDatagram bytes by default; longer ones are truncated. The packet connection is still
 // read with a buffer of at least 65535 bytes, since Windows drops a datagram that
 // does not fit, and reports neither its sender nor its data.
-func WithMaxDatagram(n int) PacketListenerOption {
+func WithPacketMaxDatagram(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.maxDatagram = n
 	}
@@ -106,7 +124,7 @@ func WithMaxDatagram(n int) PacketListenerOption {
 // read errors are retried, with a growing delay while they persist, and an
 // expired read deadline on pc is cleared.
 func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketListener {
-	cfg := packetListenerOptions{queue: 128, backlog: 128, maxDatagram: 65535}
+	cfg := packetListenerOptions{queue: DefaultPacketQueue, backlog: DefaultPacketAcceptBacklog, maxDatagram: DefaultPacketMaxDatagram}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
@@ -199,6 +217,75 @@ func (l *PacketListener) Addr() net.Addr {
 	return l.pc.LocalAddr()
 }
 
+// WriteTo sends p to addr from the packet connection, outside any
+// connection of the listener, such as a reply that the accept filter sends
+// to a peer it does not accept yet.
+func (l *PacketListener) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if isClosedChan(l.done) {
+		return 0, net.ErrClosed
+	}
+	if ua, ok := addr.(*net.UDPAddr); ok && ua != nil && l.udp != nil {
+		return l.udp.WriteToUDPAddrPort(p, ua.AddrPort())
+	}
+	return l.pc.WriteTo(p, addr)
+}
+
+// ErrPacketPeerConnected is returned by PacketListener.Dial for a peer that
+// has a connection already.
+var ErrPacketPeerConnected = errors.New("netx: packet listener peer already connected")
+
+// Dial returns a connection to peer over the listener's packet connection, as
+// if peer had sent a datagram, but without Accept: datagrams from peer are
+// read from it, and its writes are sent to peer. It reaches a known peer from
+// the socket that also accepts others, as hole punching does. It returns
+// ErrPacketPeerConnected if peer has a connection, accepted or not, and
+// net.ErrClosed once the listener is closed. The idle timeout of the
+// connection starts at Dial.
+func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
+	if peer == nil {
+		return nil, errors.New("netx: nil peer address")
+	}
+	var ap netip.AddrPort
+	if ua, ok := peer.(*net.UDPAddr); ok && ua != nil {
+		ap = unmapAddrPort(ua.AddrPort())
+	}
+	key := ""
+	if !ap.IsValid() {
+		key = peer.String()
+	} else {
+		peer = net.UDPAddrFromAddrPort(ap)
+	}
+	c := l.makeConn(ap, peer)
+	c.touch()
+	c.accepted.Store(true)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if isClosedChan(l.done) {
+		return nil, net.ErrClosed
+	}
+	if ap.IsValid() {
+		if l.conns[ap] != nil {
+			return nil, ErrPacketPeerConnected
+		}
+		l.conns[ap] = c
+	} else {
+		if l.other[key] != nil {
+			return nil, ErrPacketPeerConnected
+		}
+		l.other[key] = c
+	}
+	return c, nil
+}
+
+// unmapAddrPort returns ap with an IPv4-mapped IPv6 address as IPv4, as
+// which a dual-stack socket reports IPv4 peers, so that a peer has one key.
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	if ap.Addr().Is4In6() {
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	}
+	return ap
+}
+
 func (l *PacketListener) readLoop() {
 	buf := make([]byte, max(l.opts.maxDatagram, 65535))
 	var failures int
@@ -216,8 +303,10 @@ func (l *PacketListener) readLoop() {
 			n, addr, err = l.pc.ReadFrom(buf)
 			if ua, ok := addr.(*net.UDPAddr); ok && ua != nil {
 				ap = ua.AddrPort()
+				addr = nil // reported from ap
 			}
 		}
+		ap = unmapAddrPort(ap)
 		if err != nil {
 			select {
 			case <-l.done:
@@ -273,7 +362,7 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
 	}
 	l.mu.Unlock()
 	if c == nil {
-		if c = l.newConn(ap, addr, key); c == nil {
+		if c = l.newConn(p, ap, addr, key); c == nil {
 			return
 		}
 	}
@@ -285,8 +374,9 @@ var testHookBeforeFilter func(*PacketListener)
 
 // newConn starts a connection for a new peer, keyed by ap or else by key,
 // unless the accept filter rejects it, the backlog is full or the listener
-// is closed. Only the read loop starts connections.
-func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *packetConn {
+// is closed, or returns the connection that Dial made for the peer
+// meanwhile. Only the read loop and Dial start connections.
+func (l *PacketListener) newConn(p []byte, ap netip.AddrPort, addr net.Addr, key string) *packetConn {
 	// Drop the datagram before anything is allocated for it while Accept
 	// falls behind. Only the read loop adds to the backlog, so a full one
 	// stays full until newConn checks it again below.
@@ -309,25 +399,26 @@ func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *
 			testHookBeforeFilter(l)
 		}
 		l.filtering.Store(true)
-		ok := !l.closing.Load() && l.opts.filter(addr)
+		ok := !l.closing.Load() && l.opts.filter(addr, p)
 		l.filtering.Store(false)
 		if !ok {
 			return nil
 		}
 	}
-	c := &packetConn{
-		l:             l,
-		ap:            ap,
-		peer:          addr,
-		queue:         make(chan *[]byte, l.opts.queue),
-		closed:        make(chan struct{}),
-		readDeadline:  makeDeadline(),
-		writeDeadline: makeDeadline(),
-	}
+	c := l.makeConn(ap, addr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if isClosedChan(l.done) {
 		return nil
+	}
+	// Dial, or the filter, may have connected the peer meanwhile; the
+	// datagram is then its.
+	if ap.IsValid() {
+		if other := l.conns[ap]; other != nil {
+			return other
+		}
+	} else if other := l.other[key]; other != nil {
+		return other
 	}
 	select {
 	case l.accept <- c:
@@ -340,6 +431,19 @@ func (l *PacketListener) newConn(ap netip.AddrPort, addr net.Addr, key string) *
 		l.other[key] = c
 	}
 	return c
+}
+
+// makeConn returns a connection to peer, keyed by ap if it is valid.
+func (l *PacketListener) makeConn(ap netip.AddrPort, peer net.Addr) *packetConn {
+	return &packetConn{
+		l:             l,
+		ap:            ap,
+		peer:          peer,
+		queue:         make(chan *[]byte, l.opts.queue),
+		closed:        make(chan struct{}),
+		readDeadline:  makeDeadline(),
+		writeDeadline: makeDeadline(),
+	}
 }
 
 func (l *PacketListener) remove(c *packetConn) {
@@ -418,9 +522,10 @@ type packetConn struct {
 	queued atomic.Int64 // packetCost of the datagrams in queue
 	closed chan struct{}
 	once   sync.Once
-	err    error // reported by Read after shutdown
+	// accepted, after once, fills the word that once leaves.
+	accepted atomic.Bool // returned by Accept; the idle sweep skips it until then
+	err      error       // reported by Read after shutdown
 
-	accepted      atomic.Bool  // returned by Accept; the idle sweep skips it until then
 	active        atomic.Int64 // clockOffset of the last datagram or of Accept
 	readDeadline  deadline
 	writeDeadline deadline
@@ -512,6 +617,32 @@ func (c *packetConn) Read(b []byte) (int, error) {
 		return 0, c.err
 	case <-expired:
 		return 0, os.ErrDeadlineExceeded
+	}
+}
+
+// nextDatagram returns the next datagram from the peer in its queued
+// buffer, as Read would, for Relay; see datagramSource.
+func (c *packetConn) nextDatagram() (*[]byte, error) {
+	expired := c.readDeadline.wait()
+	select {
+	case <-c.closed:
+		return nil, c.err
+	case <-expired:
+		return nil, os.ErrDeadlineExceeded
+	default:
+	}
+	select {
+	case p := <-c.queue:
+		if isClosedChan(c.closed) {
+			putPacketBuf(p)
+			return nil, c.err
+		}
+		c.queued.Add(-packetCost(len(*p)))
+		return p, nil
+	case <-c.closed:
+		return nil, c.err
+	case <-expired:
+		return nil, os.ErrDeadlineExceeded
 	}
 }
 

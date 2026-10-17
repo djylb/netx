@@ -41,7 +41,7 @@ func TestServerNoAuthAuthenticatorDecides(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _ = c.Write(append([]byte{socks5.Version, byte(len(methods))}, methods...))
+		_, _ = c.Write(append([]byte{socks5.Version5, byte(len(methods))}, methods...))
 		if m, err := socks5.ReadMethod(c); err != nil || m != socks5.MethodNoAuth {
 			t.Fatalf("methods %v: selected %v, %v", methods, m, err)
 		}
@@ -122,7 +122,7 @@ func TestServerUDPIgnoresForeignAnnouncement(t *testing.T) {
 	}
 	handlers := make(chan string, 1)
 	s := &socks5.Server{
-		PacketConn: pc,
+		UDPSocket: pc,
 		AllowPacket: func(req *socks5.Request, _ socks5.Addr) bool {
 			handlers <- req.Conn.RemoteAddr().String()
 			return false
@@ -189,7 +189,7 @@ func associateWithoutAddr(t *testing.T, s *socks5.Server, announced socks5.Addr)
 	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
-	go func() { _ = s.ServeConn(noAddrConn{server}) }()
+	go func() { _ = s.ServeConn(context.Background(), noAddrConn{server}) }()
 	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
 	_ = socks5.WriteMethods(client, socks5.MethodNoAuth)
 	if _, err := socks5.ReadMethod(client); err != nil {
@@ -209,7 +209,7 @@ func TestServerUDPWithoutRemoteAddr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &socks5.Server{PacketConn: pc}
+	s := &socks5.Server{UDPSocket: pc}
 	defer func() { _ = s.Close() }()
 	var replyErr *socks5.ReplyError
 	if _, err := associateWithoutAddr(t, s, socks5.Addr{}); !errors.As(err, &replyErr) {
@@ -366,7 +366,7 @@ func TestServerAllowSeesEveryIPForm(t *testing.T) {
 		"refused without code": name("refused.example"),
 	} {
 		c := handshake(t, addr)
-		_, _ = c.Write(append([]byte{socks5.Version, byte(socks5.CmdConnect), 0}, wire...))
+		_, _ = c.Write(append([]byte{socks5.Version5, byte(socks5.CmdConnect), 0}, wire...))
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 		if _, err := socks5.ReadReply(c); err == nil {
 			t.Errorf("%s: CONNECT allowed", desc)
@@ -422,7 +422,7 @@ func TestServerUDPKeepsAssociationAfterUndeliverableReply(t *testing.T) {
 	}
 	errs := make(chan error, 8)
 	addr := serve(t, &socks5.Server{
-		PacketConn: oversizePacketConn{PacketConn: pc, limit: 1024},
+		UDPSocket: oversizePacketConn{PacketConn: pc, limit: 1024},
 		OnError: func(_ net.Conn, err error) {
 			select {
 			case errs <- err:
@@ -481,8 +481,8 @@ func TestServerServesUncomparableConnsAndListeners(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- s.ServeConn(sliceConn{Conn: server, scratch: make([]byte, 1)}) }()
-	if _, err := client.Write([]byte{socks5.Version}); err != nil {
+	go func() { done <- s.ServeConn(context.Background(), sliceConn{Conn: server, scratch: make([]byte, 1)}) }()
+	if _, err := client.Write([]byte{socks5.Version5}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -513,7 +513,7 @@ func TestServerUDPAnnouncedPortWithoutAddress(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			addr := serve(t, &socks5.Server{PacketConn: pc})
+			addr := serve(t, &socks5.Server{UDPSocket: pc})
 			a, b := newUDPClient(t), newUDPClient(t)
 			port := func(c *net.UDPConn) uint16 { return uint16(c.LocalAddr().(*net.UDPAddr).Port) }
 			_, relayA := associate(t, addr, tt.announce(port(a)))
@@ -534,7 +534,7 @@ func TestServerUDPIdleClosesControlWithoutDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &socks5.Server{PacketConn: pc, UDPIdleTimeout: 100 * time.Millisecond}
+	s := &socks5.Server{UDPSocket: pc, UDPIdleTimeout: 100 * time.Millisecond}
 	defer func() { _ = s.Close() }()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -548,7 +548,7 @@ func TestServerUDPIdleClosesControlWithoutDeadlines(t *testing.T) {
 			served <- err
 			return
 		}
-		served <- s.ServeConn(noDeadlineConn{c})
+		served <- s.ServeConn(context.Background(), noDeadlineConn{c})
 	}()
 	ctl, _ := associate(t, ln.Addr().String(), socks5.Addr{})
 	defer func() { _ = ctl.Close() }()
@@ -683,7 +683,7 @@ func TestServerHandshakeTimeoutWithoutDeadlines(t *testing.T) {
 			served <- err
 			return
 		}
-		served <- s.ServeConn(noDeadlineConn{c})
+		served <- s.ServeConn(context.Background(), noDeadlineConn{c})
 	}()
 	client, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -761,7 +761,7 @@ func TestServerUDPAnnouncedPendingDoesNotBlockUnannounced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := serve(t, &socks5.Server{PacketConn: pc})
+	addr := serve(t, &socks5.Server{UDPSocket: pc})
 	a, b := newUDPClient(t), newUDPClient(t)
 	_, _ = associate(t, addr, socks5.AddrFromNetAddr(a.LocalAddr()))
 	_, relayB := associate(t, addr, socks5.Addr{})
@@ -807,7 +807,7 @@ func TestServerCloseEndsRelayWaitingOnTarget(t *testing.T) {
 			served <- err
 			return
 		}
-		served <- s.ServeConn(c)
+		served <- s.ServeConn(context.Background(), c)
 	}()
 	c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).Dial("tcp", target)
 	if err != nil {

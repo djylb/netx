@@ -270,29 +270,34 @@ func TestDatagram(t *testing.T) {
 	if !bytes.Equal(packet, want) {
 		t.Fatalf("AppendDatagram() = %v, want %v", packet, want)
 	}
-	addr, data, err := ParseDatagram(packet)
-	if err != nil || addr != dst || !bytes.Equal(data, payload) {
-		t.Fatalf("ParseDatagram() = %v, %q, %v", addr, data, err)
+	addr, n, err := DecodeDatagram(packet)
+	if err != nil || addr != dst || !bytes.Equal(packet[n:], payload) {
+		t.Fatalf("DecodeDatagram() = %v, %d, %v", addr, n, err)
 	}
 
 	// Senders that put the payload length in the reserved field are accepted.
 	withLength := append([]byte{0, 5}, packet[2:]...)
-	if _, data, err := ParseDatagram(withLength); err != nil || !bytes.Equal(data, payload) {
-		t.Fatalf("ParseDatagram(rsv length) = %q, %v", data, err)
+	if _, n, err := DecodeDatagram(withLength); err != nil || !bytes.Equal(withLength[n:], payload) {
+		t.Fatalf("DecodeDatagram(rsv length) = %d, %v", n, err)
 	}
-	if _, data, err := ParseDatagram(packet[:10]); err != nil || len(data) != 0 {
-		t.Fatalf("ParseDatagram(empty payload) = %q, %v", data, err)
+	if _, n, err := DecodeDatagram(packet[:10]); err != nil || n != 10 {
+		t.Fatalf("DecodeDatagram(empty payload) = %d, %v", n, err)
 	}
-	if _, _, err := ParseDatagram([]byte{0, 0, 1, 1, 0, 0, 0, 0, 0, 0}); !errors.Is(err, ErrFragmented) {
-		t.Fatalf("ParseDatagram(fragment) error = %v", err)
-	}
-	for _, short := range [][]byte{nil, {0, 0}, {0, 0, 0}, {0, 0, 0, 1, 1, 2}, {0, 0, 0, 3, 4, 'a'}} {
-		if _, _, err := ParseDatagram(short); !errors.Is(err, ErrMalformed) {
-			t.Fatalf("ParseDatagram(%v) error = %v, want %v", short, err, ErrMalformed)
+	for _, tt := range []struct {
+		b    []byte
+		want error
+	}{
+		{[]byte{0, 0, 1, 1, 0, 0, 0, 0, 0, 0}, ErrFragmented},
+		{nil, ErrMalformed},
+		{[]byte{0, 0}, ErrMalformed},
+		{[]byte{0, 0, 0}, ErrMalformed},
+		{[]byte{0, 0, 0, 1, 1, 2}, ErrMalformed},
+		{[]byte{0, 0, 0, 3, 4, 'a'}, ErrMalformed},
+		{[]byte{0, 0, 0, 7, 0}, ErrAddrType},
+	} {
+		if addr, n, err := DecodeDatagram(tt.b); !errors.Is(err, tt.want) || n != 0 || addr != (Addr{}) {
+			t.Fatalf("DecodeDatagram(%v) = %v, %d, %v, want %v", tt.b, addr, n, err, tt.want)
 		}
-	}
-	if _, _, err := ParseDatagram([]byte{0, 0, 0, 7, 0}); !errors.Is(err, ErrAddrType) {
-		t.Fatalf("ParseDatagram(atyp) error = %v", err)
 	}
 
 	prefix := []byte("keep")
@@ -336,20 +341,22 @@ func TestStrings(t *testing.T) {
 	}
 }
 
-func FuzzParseDatagram(f *testing.F) {
+func FuzzDecodeDatagram(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 1, 127, 0, 0, 1, 0, 53, 'x'})
 	f.Add([]byte{0, 0, 0, 3, 3, 'a', 'b', 'c', 0, 80})
 	f.Add([]byte{0, 0, 0, 4})
 	f.Fuzz(func(t *testing.T, b []byte) {
-		addr, payload, err := ParseDatagram(b)
+		addr, n, err := DecodeDatagram(b)
 		if err != nil {
 			return
 		}
+		payload := b[n:]
 		again, err := AppendDatagram(nil, addr, payload)
 		if err != nil {
 			t.Fatalf("AppendDatagram() error = %v", err)
 		}
-		addr2, payload2, err := ParseDatagram(again)
+		addr2, n2, err := DecodeDatagram(again)
+		payload2 := again[n2:]
 		if err != nil || addr2 != addr || !bytes.Equal(payload, payload2) {
 			t.Fatalf("round trip = %v, %q, %v; want %v, %q", addr2, payload2, err, addr, payload)
 		}
@@ -418,12 +425,12 @@ func TestDecodeAddr(t *testing.T) {
 // A failure reply is reported by its code even when its address, which
 // servers often leave unset, cannot be decoded.
 func TestReadReplyFailureWithBadAddress(t *testing.T) {
-	_, err := ReadReply(bytes.NewReader([]byte{Version, byte(ReplyConnectionRefused), 0, 0}))
+	_, err := ReadReply(bytes.NewReader([]byte{Version5, byte(ReplyConnectionRefused), 0, 0}))
 	var replyErr *ReplyError
 	if !errors.As(err, &replyErr) || replyErr.Reply != ReplyConnectionRefused {
 		t.Fatalf("ReadReply() error = %v, want the connection refused reply", err)
 	}
-	if _, err := ReadReply(bytes.NewReader([]byte{Version, 0, 0, 0, 0})); !errors.Is(err, ErrAddrType) {
+	if _, err := ReadReply(bytes.NewReader([]byte{Version5, 0, 0, 0, 0})); !errors.Is(err, ErrAddrType) {
 		t.Fatalf("ReadReply() of a success with a bad address = %v, want ErrAddrType", err)
 	}
 }

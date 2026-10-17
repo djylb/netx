@@ -26,11 +26,12 @@ func (partialErrRWC) Close() error {
 	return nil
 }
 
-func TestObserveReadWriteCloserJoinsObserverAndIOErrors(t *testing.T) {
-	observed := ObserveReadWriteCloser(partialErrRWC{}, TrafficObserver{
-		OnRead:  func(int64) error { return errTrafficObserver },
-		OnWrite: func(int64) error { return errTrafficObserver },
-	})
+func TestObserveJoinsObserverAndIOErrors(t *testing.T) {
+	observed := &observedReadWriteCloser{
+		rwc:     partialErrRWC{},
+		onRead:  func(int64) error { return errTrafficObserver },
+		onWrite: func(int64) error { return errTrafficObserver },
+	}
 
 	if _, err := observed.Read(make([]byte, 1)); !errors.Is(err, errTrafficIO) || !errors.Is(err, errTrafficObserver) {
 		t.Fatalf("Read() error = %v, want both IO and observer errors", err)
@@ -42,7 +43,7 @@ func TestObserveReadWriteCloserJoinsObserverAndIOErrors(t *testing.T) {
 
 func TestObserveConnWithoutObserversReturnsInput(t *testing.T) {
 	var conn net.Conn = &countedCloseConn{}
-	if got := ObserveConn(conn, TrafficObserver{}); got != conn {
+	if got := ObserveConn(conn, nil, nil); got != conn {
 		t.Fatalf("ObserveConn() = %v, want original conn", got)
 	}
 }

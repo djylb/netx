@@ -1,9 +1,10 @@
-package proxy
+package proxydial
 
 import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -40,13 +41,13 @@ func serveOnce(t *testing.T, handle func(net.Conn)) string {
 	return ln.Addr().String()
 }
 
-func mustDialer(t *testing.T, rawURL string) ContextDialer {
+func mustDialer(t *testing.T, rawURL string) netx.ContextDialer {
 	t.Helper()
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := FromURL(u, nil)
+	d, err := FromURL(u, nil, nil)
 	if err != nil {
 		t.Fatalf("FromURL(%s) error = %v", rawURL, err)
 	}
@@ -109,8 +110,8 @@ func TestHTTPConnectRejected(t *testing.T) {
 		_, _ = io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
 	})
 	_, err := mustDialer(t, "http://"+addr).DialContext(context.Background(), "tcp", "example.com:80")
-	if err == nil || !strings.Contains(err.Error(), "407") {
-		t.Fatalf("DialContext() error = %v, want 407", err)
+	if ce, ok := errors.AsType[*ConnectError](err); !ok || ce.StatusCode != 407 {
+		t.Fatalf("DialContext() error = %v, want a 407 ConnectError", err)
 	}
 }
 
@@ -321,12 +322,12 @@ func TestDialContextEndsStalledHandshake(t *testing.T) {
 
 //goland:noinspection HttpUrlsUsage
 func TestFromURLErrors(t *testing.T) {
-	if _, err := FromURL(nil, nil); err == nil {
+	if _, err := FromURL(nil, nil, nil); err == nil {
 		t.Error("FromURL(nil) succeeded")
 	}
 	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks6://proxy", "https+tls://proxy", "ftp+tls://proxy"} {
 		u, _ := url.Parse(raw)
-		if _, err := FromURL(u, nil); err == nil {
+		if _, err := FromURL(u, nil, nil); err == nil {
 			t.Errorf("FromURL(%s) succeeded", raw)
 		}
 	}
@@ -365,7 +366,7 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("ALL_PROXY", "")
 	t.Setenv("all_proxy", "")
 	forward := &recordingDialer{}
-	d, err := FromEnvironment(forward)
+	d, err := FromEnvironment(forward, nil)
 	if err != nil || d != forward {
 		t.Fatalf("FromEnvironment(unset) = %v, %v; want forward", d, err)
 	}
@@ -373,7 +374,7 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("all_proxy", "socks5://proxy.internal:1081")
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "localhost, .corp.example, 10.0.0.0/8")
-	d, err = FromEnvironment(forward)
+	d, err = FromEnvironment(forward, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +387,7 @@ func TestFromEnvironment(t *testing.T) {
 	}
 
 	t.Setenv("no_proxy", "")
-	if d, err := FromEnvironment(nil); err != nil {
+	if d, err := FromEnvironment(nil, nil); err != nil {
 		t.Fatal(err)
 	} else if _, ok := d.(*socks5.Dialer); !ok {
 		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5.Dialer", d)
@@ -395,7 +396,7 @@ func TestFromEnvironment(t *testing.T) {
 	// A value without a scheme is an http proxy, as for curl.
 	for raw, want := range map[string]string{"127.0.0.1:1080": "127.0.0.1:1080", "proxy.local:3128": "proxy.local:3128", "proxy.local": "proxy.local:80"} {
 		t.Setenv("ALL_PROXY", raw)
-		d, err := FromEnvironment(nil)
+		d, err := FromEnvironment(nil, nil)
 		if err != nil {
 			t.Fatalf("FromEnvironment(ALL_PROXY=%s) error = %v", raw, err)
 		}
@@ -405,11 +406,11 @@ func TestFromEnvironment(t *testing.T) {
 	}
 
 	t.Setenv("ALL_PROXY", "gopher://proxy")
-	if _, err := FromEnvironment(nil); err == nil {
+	if _, err := FromEnvironment(nil, nil); err == nil {
 		t.Fatal("FromEnvironment(bad scheme) succeeded")
 	}
 	t.Setenv("ALL_PROXY", "http://[::1")
-	if _, err := FromEnvironment(nil); err == nil {
+	if _, err := FromEnvironment(nil, nil); err == nil {
 		t.Fatal("FromEnvironment(bad URL) succeeded")
 	}
 }
@@ -548,7 +549,7 @@ func TestFromURLSOCKSVariants(t *testing.T) {
 
 	forward := &recordingDialer{}
 	u, _ := url.Parse("SOCKS5H+TLS://proxy")
-	dialer, err := FromURL(u, forward)
+	dialer, err := FromURL(u, forward, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +677,7 @@ func TestHTTPDialerHeaderTabs(t *testing.T) {
 func TestFromEnvironmentBypassDialerDial(t *testing.T) {
 	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1")
 	t.Setenv("NO_PROXY", "localhost")
-	d, err := FromEnvironment(nil)
+	d, err := FromEnvironment(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,5 +725,338 @@ func TestHTTPConnectTimeoutKeepsBorrowedParent(t *testing.T) {
 	}
 	if parent.closed.Load() {
 		t.Fatal("the CONNECT timeout closed the borrowed parent")
+	}
+}
+
+// Handshake runs CONNECT on a connection the caller made, returns that
+// connection when the proxy sent nothing after its reply and a PrefixConn
+// replaying those bytes otherwise, and leaves the connection open on failure.
+func TestHTTPDialerHandshake(t *testing.T) {
+	for _, tt := range []struct {
+		name, reply string
+		wantPrefix  bool
+		wantErr     bool
+	}{
+		{"plain", "HTTP/1.1 200 OK\r\n\r\n", false, false},
+		{"early bytes", "HTTP/1.1 200 OK\r\n\r\nhello", true, false},
+		{"refused", "HTTP/1.1 403 Forbidden\r\n\r\n", false, true},
+	} {
+		addr := serveOnce(t, func(c net.Conn) {
+			req, err := http.ReadRequest(bufio.NewReader(c))
+			if err != nil || req.Method != http.MethodConnect || req.RequestURI != "example.com:443" {
+				return
+			}
+			echoAfter(c, tt.reply)
+		})
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := (&HTTPDialer{}).Handshake(context.Background(), c, "example.com:443")
+		if tt.wantErr {
+			if err == nil {
+				t.Fatalf("%s: Handshake() succeeded", tt.name)
+			}
+			if err := c.Close(); err != nil {
+				t.Fatalf("%s: Handshake() closed the connection: %v", tt.name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: Handshake() error = %v", tt.name, err)
+		}
+		if _, ok := conn.(*netx.PrefixConn); ok != tt.wantPrefix {
+			t.Fatalf("%s: Handshake() = %T, want PrefixConn %v", tt.name, conn, tt.wantPrefix)
+		}
+		if !tt.wantPrefix && conn != c {
+			t.Fatalf("%s: Handshake() = %v, want the given connection", tt.name, conn)
+		}
+		want := "ping"
+		if tt.wantPrefix {
+			want = "hello" + want
+		}
+		if _, err := io.WriteString(conn, "ping"); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, len(want))
+		if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != want {
+			t.Fatalf("%s: tunnel read = %q, %v; want %q", tt.name, buf, err, want)
+		}
+		_ = conn.Close()
+	}
+}
+
+// A canceled context ends Handshake with its error and leaves the connection
+// open, with the deadline it poisoned.
+func TestHTTPDialerHandshakeCanceled(t *testing.T) {
+	addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if _, err := (&HTTPDialer{}).Handshake(ctx, c, "example.com:443"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handshake() error = %v, want context.Canceled", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Handshake() closed the connection: %v", err)
+	}
+}
+
+// Replies other than 2xx are *ConnectErrors carrying the status and header,
+// so that callers can answer a 407 challenge or tell 403 from 502.
+func TestHTTPConnectError(t *testing.T) {
+	for _, tt := range []struct {
+		reply  string
+		code   int
+		status string
+		header string
+	}{
+		{"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"p\"\r\nContent-Length: 0\r\n\r\n", 407, "407 Proxy Authentication Required", `Basic realm="p"`},
+		{"HTTP/1.1 403 Forbidden\r\n\r\n", 403, "403 Forbidden", ""},
+		{"HTTP/1.0 502 Bad Gateway\r\n\r\n", 502, "502 Bad Gateway", ""},
+		{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 101, "101 Switching Protocols", ""},
+	} {
+		addr := serveOnce(t, func(c net.Conn) {
+			if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+				return
+			}
+			_, _ = io.WriteString(c, tt.reply)
+		})
+		_, err := (&HTTPDialer{ProxyAddr: addr}).DialContext(context.Background(), "tcp", "example.com:443")
+		ce, ok := errors.AsType[*ConnectError](err)
+		if !ok {
+			t.Fatalf("DialContext() error = %v, want a *ConnectError", err)
+		}
+		if ce.StatusCode != tt.code || ce.Status != tt.status || ce.Header.Get("Proxy-Authenticate") != tt.header {
+			t.Errorf("ConnectError = %+v, want %d %q with Proxy-Authenticate %q", ce, tt.code, tt.status, tt.header)
+		}
+	}
+}
+
+// FromURL applies the caller's TLS config to https and +tls proxies, filling
+// in a missing ServerName on a clone and leaving the caller's config alone.
+//
+//goland:noinspection HttpUrlsUsage
+func TestFromURLTLSConfig(t *testing.T) {
+	roots := x509.NewCertPool()
+	named := &tls.Config{ServerName: "front.example"}
+	unnamed := &tls.Config{RootCAs: roots}
+	configOf := func(raw string, cfg *tls.Config) *tls.Config {
+		u, _ := url.Parse(raw)
+		d, err := FromURL(u, nil, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch d := d.(type) {
+		case *HTTPDialer:
+			return d.TLSConfig
+		case *socks5.Dialer:
+			if td, ok := d.Forward.(*tlsDialer); ok {
+				return td.config
+			}
+		}
+		return nil
+	}
+	for _, raw := range []string{"https://proxy:8443", "socks5+tls://proxy", "socks4a+tls://proxy"} {
+		if got := configOf(raw, nil); got == nil || got.ServerName != "proxy" {
+			t.Errorf("%s with nil config = %#v", raw, got)
+		}
+		if got := configOf(raw, named); got != named {
+			t.Errorf("%s did not use the named config as is", raw)
+		}
+		if got := configOf(raw, unnamed); got == unnamed || got.ServerName != "proxy" || got.RootCAs != roots {
+			t.Errorf("%s with unnamed config = %#v", raw, got)
+		}
+	}
+	if unnamed.ServerName != "" {
+		t.Fatal("FromURL modified the caller's config")
+	}
+	for _, raw := range []string{"http://proxy", "socks5://proxy"} {
+		if got := configOf(raw, named); got != nil {
+			t.Errorf("%s uses TLS", raw)
+		}
+	}
+}
+
+func TestParseURL(t *testing.T) {
+	for raw, want := range map[string]string{
+		"127.0.0.1:1080":            "http://127.0.0.1:1080",
+		"proxy.local:3128":          "http://proxy.local:3128",
+		"proxy.local":               "http://proxy.local",
+		"u:p@proxy.local:3128":      "http://u:p@proxy.local:3128",
+		"[::1]:8080":                "http://[::1]:8080",
+		"socks5h://u:p@proxy:1080":  "socks5h://u:p@proxy:1080",
+		"HTTPS://proxy.example:443": "https://proxy.example:443",
+	} {
+		u, err := ParseURL(raw)
+		if err != nil || u.String() != want {
+			t.Errorf("ParseURL(%q) = %v, %v; want %s", raw, u, err, want)
+		}
+	}
+	for raw, secret := range map[string]string{
+		"socks5://alice:topsecret@proxy:bad": "topsecret",
+		"socks5://u:pa/ss@h:1":               "pa",
+		"socks5://u:p%zzw@h:1":               "%zz",
+		"u:p%zzw@h:1":                        "%zz",
+		"http://[::1":                        "",
+	} {
+		_, err := ParseURL(raw)
+		if err == nil {
+			t.Fatalf("ParseURL(%q) succeeded", raw)
+		}
+		if secret != "" && strings.Contains(err.Error(), secret) {
+			t.Fatalf("error %q contains part of the password", err)
+		}
+	}
+}
+
+// Proxy URLs whose user information did not parse as such are rejected
+// without the password in the error, whether they come from FromURL,
+// ParseURL or ALL_PROXY.
+//
+//goland:noinspection HttpUrlsUsage
+func TestProxyURLErrorsHidePassword(t *testing.T) {
+	for _, raw := range []string{
+		"http:///user:s3cret@host:1080",
+		"socks5:///user:s3cret@host",
+		"//user:s3cret@host:1080/x",
+		"http://user:12#s3cret@host",
+		"http://host/user:s3cret@x",
+		"http://host?user:s3cret@x",
+		"https://host:1/?s3cret",
+	} {
+		var errs []error
+		if u, err := url.Parse(raw); err == nil {
+			_, err := FromURL(u, nil, nil)
+			errs = append(errs, err)
+		}
+		_, err := ParseURL(raw)
+		errs = append(errs, err)
+		t.Setenv("ALL_PROXY", raw)
+		_, err = FromEnvironment(nil, nil)
+		errs = append(errs, err)
+		for _, err := range errs {
+			if err == nil {
+				t.Fatalf("%q accepted", raw)
+			}
+			if strings.Contains(err.Error(), "s3cret") {
+				t.Fatalf("%q: error %q holds the password", raw, err)
+			}
+		}
+	}
+	for _, raw := range []string{"http://u:p@host/", "//u:p@host:1080"} {
+		if u, err := ParseURL(raw); err != nil || u.Scheme != "http" || u.Host == "" {
+			t.Errorf("ParseURL(%q) = %v, %v", raw, u, err)
+		}
+	}
+}
+
+// After a timeout Handshake closes the connection beneath a *tls.Conn, so
+// that the caller's Close sends no close_notify.
+func TestHTTPDialerHandshakeTimeoutClosesBeneathTLS(t *testing.T) {
+	cert := httptest.NewUnstartedServer(nil)
+	cert.StartTLS()
+	serverCfg := &tls.Config{Certificates: cert.TLS.Certificates}
+	cert.Close()
+	addr := serveOnce(t, func(c net.Conn) {
+		tc := tls.Server(c, serverCfg)
+		_, _ = io.Copy(io.Discard, tc) // completes the handshake, never replies
+	})
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	tc := tls.Client(raw, &tls.Config{InsecureSkipVerify: true})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := (&HTTPDialer{}).Handshake(ctx, tc, "example.com:443"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Handshake() error = %v, want context.DeadlineExceeded", err)
+	}
+	// The expired deadline that ended the handshake may be reported before
+	// the close, as on the simulated network of js/wasm.
+	_ = raw.SetDeadline(time.Time{})
+	if _, err := raw.Write([]byte{0}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("write beneath TLS error = %v, want net.ErrClosed", err)
+	}
+}
+
+// Username and Password become Basic Proxy-Authorization unless Header holds
+// that field already, and errors never name the password.
+func TestHTTPDialerCredentials(t *testing.T) {
+	basic := func(user, password string) string {
+		return "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+password)) + "\r\n"
+	}
+	for _, tt := range []struct {
+		name string
+		d    HTTPDialer
+		want string // the only Proxy-Authorization line, or "" for none
+	}{
+		{"none", HTTPDialer{}, ""},
+		{"basic", HTTPDialer{Username: "alice", Password: "s3cret"}, basic("alice", "s3cret")},
+		{"password only", HTTPDialer{Password: "s3cret"}, basic("", "s3cret")},
+		{"header wins", HTTPDialer{Username: "alice", Password: "s3cret", Header: textproto.MIMEHeader{"proxy-authorization": {"Bearer t"}}}, "proxy-authorization: Bearer t\r\n"},
+		{"empty header field", HTTPDialer{Username: "alice", Password: "s3cret", Header: textproto.MIMEHeader{"Proxy-Authorization": {}}}, basic("alice", "s3cret")},
+	} {
+		req, err := tt.d.request("example.com:443")
+		if err != nil {
+			t.Fatalf("%s: request() error = %v", tt.name, err)
+		}
+		n := strings.Count(strings.ToLower(string(req)), "\r\nproxy-authorization:")
+		if tt.want == "" && n != 0 || tt.want != "" && (n != 1 || !strings.Contains(string(req), "\r\n"+tt.want)) {
+			t.Errorf("%s: request %q, want Proxy-Authorization %q", tt.name, req, tt.want)
+		}
+	}
+	_, err := (&HTTPDialer{Username: "a:b", Password: "s3cret"}).request("example.com:443")
+	if err == nil || strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "a:b") {
+		t.Fatalf("request() with a colon in Username error = %v", err)
+	}
+	//goland:noinspection HttpUrlsUsage
+	if d := mustDialer(t, "http://alice:s3cret@proxy").(*HTTPDialer); d.Username != "alice" || d.Password != "s3cret" || d.Header != nil {
+		t.Fatalf("FromURL() = %#v, want the user information as Username and Password", d)
+	}
+}
+
+// FromEnvironment with NO_PROXY returns a *Bypass whose Proxy is FromURL's
+// dialer, which callers can adjust.
+func TestFromEnvironmentBypass(t *testing.T) {
+	t.Setenv("all_proxy", "")
+	t.Setenv("ALL_PROXY", "http://proxy.internal:3128")
+	t.Setenv("no_proxy", "")
+	t.Setenv("NO_PROXY", "localhost")
+	forward := &recordingDialer{}
+	d, err := FromEnvironment(forward, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, ok := d.(*Bypass)
+	if !ok || b.Direct != forward || !b.NoProxy.Match("localhost:80") {
+		t.Fatalf("FromEnvironment() = %#v, want a *Bypass", d)
+	}
+	if hd, ok := b.Proxy.(*HTTPDialer); !ok || hd.ProxyAddr != "proxy.internal:3128" || hd.Forward != forward {
+		t.Fatalf("Bypass.Proxy = %#v, want an *HTTPDialer", b.Proxy)
+	}
+}
+
+func TestBypassDial(t *testing.T) {
+	target := serveEcho(t)
+	proxied := &recordingDialer{}
+	// Direct defaults to a zero net.Dialer.
+	b := &Bypass{Proxy: proxied, NoProxy: ParseNoProxy("127.0.0.1")}
+	conn, err := b.DialContext(context.Background(), "tcp", target)
+	if err != nil {
+		t.Fatalf("direct dial error = %v", err)
+	}
+	_ = conn.Close()
+	if _, err := b.Dial("tcp", "example.com:443"); err == nil || strings.Join(proxied.dialed, " ") != "example.com:443" {
+		t.Fatalf("proxied dial = %v, dialed %v", err, proxied.dialed)
+	}
+	if _, err := (&Bypass{}).DialContext(context.Background(), "tcp", "example.com:443"); !errors.Is(err, errNoProxyDialer) {
+		t.Fatalf("dial without Proxy error = %v", err)
 	}
 }

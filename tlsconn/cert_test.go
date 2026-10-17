@@ -1,6 +1,7 @@
 package tlsconn
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -12,7 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,7 +55,7 @@ func dialServer(t *testing.T, serverCfg, cfg *tls.Config) (resumed bool, err err
 	if err != nil {
 		t.Fatal(err)
 	}
-	tc, err := Client(context.Background(), raw, cfg, 2*time.Second)
+	tc, err := Client(timeoutContext(t, 2*time.Second), raw, cfg)
 	if err != nil {
 		return false, err
 	}
@@ -170,7 +171,7 @@ func writeCert(t *testing.T, dir string, cert tls.Certificate) (certFile, keyFil
 	return certFile, keyFile
 }
 
-// fakeClock is a clock for CertCache that moves only when told to.
+// fakeClock is a clock for CertFiles and CertStore that moves only when told to.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -186,172 +187,6 @@ func (f *fakeClock) advance(d time.Duration) {
 	f.mu.Lock()
 	f.t = f.t.Add(d)
 	f.mu.Unlock()
-}
-
-func TestCertCacheFiles(t *testing.T) {
-	first, _ := NewSelfSigned(SelfSignedOptions{})
-	certFile, keyFile := writeCert(t, t.TempDir(), first)
-	const reload = time.Minute
-	clock := &fakeClock{t: time.Now()}
-	c := &CertCache{ReloadInterval: reload, now: clock.now}
-
-	got, err := c.LoadFiles(certFile, keyFile)
-	if err != nil || Fingerprint(got.Certificate[0]) != Fingerprint(first.Certificate[0]) {
-		t.Fatalf("LoadFiles() = %v", err)
-	}
-	// A renewed certificate is not read before ReloadInterval.
-	second, _ := NewSelfSigned(SelfSignedOptions{})
-	writeCert(t, filepath.Dir(certFile), second)
-	clock.advance(reload - time.Second)
-	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
-		t.Fatal("second LoadFiles did not use the cache")
-	}
-
-	// It is picked up after ReloadInterval.
-	clock.advance(time.Second)
-	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(second.Certificate[0]) {
-		t.Fatal("renewed certificate not reloaded")
-	}
-
-	// A failed reload keeps the previous certificate, and the next reload
-	// is due only after another ReloadInterval.
-	if err := os.WriteFile(certFile, []byte("broken"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	clock.advance(reload)
-	if kept, err := c.LoadFiles(certFile, keyFile); err != nil || kept != got {
-		t.Fatalf("after a failed reload LoadFiles() = %v, %v; want the previous certificate", kept, err)
-	}
-	third, _ := NewSelfSigned(SelfSignedOptions{})
-	writeCert(t, filepath.Dir(certFile), third)
-	if kept, _ := c.LoadFiles(certFile, keyFile); kept != got {
-		t.Fatal("reloaded again right after a failed reload")
-	}
-	clock.advance(reload)
-	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(third.Certificate[0]) {
-		t.Fatal("certificate not reloaded after a failed reload")
-	}
-
-	// A failed first load is not cached.
-	if _, err := c.LoadFiles(filepath.Join(t.TempDir(), "missing.pem"), keyFile); err == nil {
-		t.Fatal("missing file loaded")
-	}
-	if c.Len() != 1 {
-		t.Fatalf("Len() = %d, want 1", c.Len())
-	}
-}
-
-// Without ReloadInterval the files of an expired certificate are read again,
-// at most once a minute.
-func TestCertCacheReloadsExpiredFiles(t *testing.T) {
-	first, _ := NewSelfSigned(SelfSignedOptions{ValidFor: time.Hour})
-	certFile, keyFile := writeCert(t, t.TempDir(), first)
-	clock := &fakeClock{t: time.Now()}
-	c := &CertCache{now: clock.now}
-	got, err := c.LoadFiles(certFile, keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, _ := NewSelfSigned(SelfSignedOptions{})
-	writeCert(t, filepath.Dir(certFile), second)
-	clock.advance(30 * time.Minute)
-	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
-		t.Fatal("valid certificate reloaded")
-	}
-	// Past NotAfter, ValidFor from when it was made.
-	clock.advance(time.Hour + time.Second)
-	if got, _ = c.LoadFiles(certFile, keyFile); Fingerprint(got.Certificate[0]) != Fingerprint(second.Certificate[0]) {
-		t.Fatal("expired certificate not reloaded")
-	}
-}
-
-// MaxEntries counts the loaded certificates, also across failed loads,
-// Clear and the idle sweep.
-func TestCertCacheCountsLoadedEntries(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
-	c := &CertCache{MaxEntries: 2, IdleTimeout: time.Hour, now: clock.now}
-	pems := make([][2][]byte, 4)
-	for i := range pems {
-		cert, _ := NewSelfSigned(SelfSignedOptions{})
-		pems[i][0], pems[i][1], _ = EncodePEM(cert)
-	}
-	check := func(want int) {
-		t.Helper()
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.loaded != want || len(c.entries) != want {
-			t.Fatalf("loaded = %d, entries = %d, want %d", c.loaded, len(c.entries), want)
-		}
-	}
-	for i := range pems {
-		if _, err := c.LoadPEM(pems[i][0], pems[i][1]); err != nil {
-			t.Fatal(err)
-		}
-		_, _ = c.LoadPEM([]byte("bad"), []byte("bad"))
-	}
-	check(2)
-	c.Clear()
-	check(0)
-	_, _ = c.LoadPEM(pems[0][0], pems[0][1])
-	clock.advance(2 * time.Hour)
-	_, _ = c.LoadPEM(pems[1][0], pems[1][1]) // the sweep drops the first
-	check(1)
-	_, _ = c.LoadPEM(pems[2][0], pems[2][1])
-	_, _ = c.LoadPEM(pems[3][0], pems[3][1])
-	check(2)
-}
-
-func TestCertCachePEM(t *testing.T) {
-	var c CertCache
-	certs := make([][2][]byte, 3)
-	for i := range certs {
-		cert, _ := NewSelfSigned(SelfSignedOptions{})
-		certs[i][0], certs[i][1], _ = EncodePEM(cert)
-	}
-
-	// Concurrent first loads of one certificate share one result.
-	var wg sync.WaitGroup
-	results := make([]*tls.Certificate, 8)
-	for i := range results {
-		wg.Go(func() {
-			results[i], _ = c.LoadPEM(certs[0][0], certs[0][1])
-		})
-	}
-	wg.Wait()
-	for _, r := range results {
-		if r == nil || r != results[0] {
-			t.Fatal("concurrent loads returned different certificates")
-		}
-	}
-	if other, _ := c.LoadPEM(certs[1][0], certs[1][1]); other == results[0] {
-		t.Fatal("different PEM data shared a cache entry")
-	}
-	if _, err := c.LoadPEM([]byte("x"), []byte("y")); err == nil {
-		t.Fatal("invalid PEM loaded")
-	}
-
-	// MaxEntries drops the least recently used certificate.
-	c.MaxEntries = 2
-	_, _ = c.LoadPEM(certs[0][0], certs[0][1])
-	_, _ = c.LoadPEM(certs[2][0], certs[2][1])
-	if c.Len() != 2 {
-		t.Fatalf("Len() = %d, want 2", c.Len())
-	}
-	if again, _ := c.LoadPEM(certs[0][0], certs[0][1]); again != results[0] {
-		t.Fatal("recently used certificate was evicted")
-	}
-
-	// IdleTimeout drops certificates nobody loads.
-	c.IdleTimeout = 20 * time.Millisecond
-	time.Sleep(30 * time.Millisecond)
-	_, _ = c.LoadPEM(certs[2][0], certs[2][1])
-	if c.Len() != 1 {
-		t.Fatalf("Len() after idle = %d, want 1", c.Len())
-	}
-	c.Clear()
-	if c.Len() != 0 {
-		t.Fatalf("Len() after Clear = %d", c.Len())
-	}
 }
 
 func TestPinSetClientConfigKeepsBaseCheck(t *testing.T) {
@@ -386,69 +221,253 @@ func TestEncodePEMEd25519Pointer(t *testing.T) {
 	}
 }
 
-// TestCertCacheWaitersAndReloads has callers wait on a slow first load while
-// another caller reloads right after it, for the race detector.
-func TestCertCacheWaitersAndReloads(t *testing.T) {
-	cert, _ := NewSelfSigned(SelfSignedOptions{})
-	var loads atomic.Int32
-	load := func() (*tls.Certificate, error) {
-		if loads.Add(1) == 1 {
-			time.Sleep(50 * time.Millisecond) // the first load: others wait
-		}
-		c := cert
-		return &c, nil
-	}
-	c := &CertCache{ReloadInterval: time.Nanosecond}
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Go(func() {
-			if got, err := c.get("k", true, load); err != nil || got == nil {
-				t.Errorf("get() = %v, %v", got, err)
-			}
-		})
-	}
-	wg.Go(func() {
-		for range 200 {
-			_, _ = c.get("k", true, load)
-		}
-	})
-	wg.Wait()
-}
-
-// A certificate cached from PEM data does not keep that data, which holds
-// the private key, reachable.
-func TestCertCacheDoesNotKeepPEMInput(t *testing.T) {
-	cert, err := NewSelfSigned(SelfSignedOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM, keyPEM, err := EncodePEM(cert)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c CertCache
-	released := make(chan struct{})
-	func() {
-		// The PEM blocks are slices of a larger buffer, such as a whole
-		// configuration file.
-		buf := new([1 << 20]byte)
-		n := copy(buf[:], certPEM)
-		m := copy(buf[n:], keyPEM)
-		runtime.AddCleanup(buf, func(done chan struct{}) { close(done) }, released)
-		if _, err := c.LoadPEM(buf[:n:n], buf[n:n+m:n+m]); err != nil {
+// ExtKeyUsage makes client certificates, or certificates for either side;
+// the default is a server certificate, which a verifying server rejects as a
+// client certificate.
+func TestNewSelfSignedExtKeyUsage(t *testing.T) {
+	both := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	for _, tc := range []struct {
+		usage      []x509.ExtKeyUsage
+		want       []x509.ExtKeyUsage
+		clientAuth bool
+	}{
+		{nil, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, false},
+		{[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, true},
+		{both, both, true},
+	} {
+		cert, err := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: tc.usage})
+		if err != nil {
 			t.Fatal(err)
 		}
-	}()
-	for range 10 {
-		runtime.GC()
-		select {
-		case <-released:
-			if c.Len() != 1 {
-				t.Fatalf("Len() = %d, want 1", c.Len())
-			}
-			return
-		case <-time.After(20 * time.Millisecond):
+		if !slices.Equal(cert.Leaf.ExtKeyUsage, tc.want) {
+			t.Fatalf("ExtKeyUsage(%v) = %v, want %v", tc.usage, cert.Leaf.ExtKeyUsage, tc.want)
+		}
+		pool := x509.NewCertPool()
+		pool.AddCert(cert.Leaf)
+		server, _ := NewSelfSigned(SelfSignedOptions{})
+		err = handshakePair(t,
+			&tls.Config{Certificates: []tls.Certificate{server}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool},
+			&tls.Config{Certificates: []tls.Certificate{cert}, InsecureSkipVerify: true})
+		if (err == nil) != tc.clientAuth {
+			t.Fatalf("ExtKeyUsage %v as a client certificate: server error = %v", tc.want, err)
 		}
 	}
-	t.Fatal("the PEM input is still reachable from the cache")
+	// The options' slice is not shared with the certificate.
+	usage := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	cert, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: usage})
+	usage[0] = x509.ExtKeyUsageAny
+	if cert.Leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+		t.Fatal("certificate shares the options' ExtKeyUsage")
+	}
+}
+
+// handshakePair runs a handshake between Server with serverCfg and Client
+// with clientCfg over a pipe and returns the server's error, which is where a
+// rejected client certificate shows.
+func handshakePair(t *testing.T, serverCfg, clientCfg *tls.Config) error {
+	t.Helper()
+	serverRaw, clientRaw := net.Pipe()
+	defer func() { _ = clientRaw.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Server(timeoutContext(t, 5*time.Second), serverRaw, serverCfg)
+		if err == nil {
+			_ = serverRaw.Close() // no close_notify to an unread pipe
+		}
+		done <- err
+	}()
+	if tc, err := Client(timeoutContext(t, 5*time.Second), clientRaw, clientCfg); err == nil {
+		// Drain until the server ends, so that its last flight, or the
+		// alert of a rejection, is read.
+		_, _ = io.Copy(io.Discard, tc)
+	}
+	return <-done
+}
+
+// ServerConfig requires a client certificate and accepts only pinned ones,
+// as between peers with self-signed certificates for either side.
+func TestPinSetServerConfig(t *testing.T) {
+	both := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	serverCert, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	clientCert, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	other, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	clientPins := NewPinSet(Fingerprint(serverCert.Certificate[0]))
+	serverPins := NewPinSet(Fingerprint(clientCert.Certificate[0]))
+
+	base := &tls.Config{Certificates: []tls.Certificate{serverCert}}
+	serverCfg := serverPins.ServerConfig(base)
+	if serverCfg.ClientAuth != tls.RequireAnyClientCert || base.ClientAuth != tls.NoClientCert || base.VerifyConnection != nil {
+		t.Fatalf("ClientAuth = %v, base changed: %v", serverCfg.ClientAuth, base.ClientAuth)
+	}
+	client := func(cert tls.Certificate) *tls.Config {
+		return clientPins.ClientConfig(&tls.Config{Certificates: []tls.Certificate{cert}})
+	}
+	if err := handshakePair(t, serverCfg, client(clientCert)); err != nil {
+		t.Fatalf("pinned client certificate: %v", err)
+	}
+	if err := handshakePair(t, serverCfg, client(other)); !errors.Is(err, ErrNotPinned) {
+		t.Fatalf("other client certificate error = %v, want %v", err, ErrNotPinned)
+	}
+	if err := handshakePair(t, serverCfg, clientPins.ClientConfig(nil)); err == nil {
+		t.Fatal("handshake without a client certificate succeeded")
+	}
+
+	// A VerifyConnection of base runs after the pins, and a nil base works.
+	errPolicy := errors.New("policy")
+	withPolicy := serverPins.ServerConfig(&tls.Config{
+		Certificates:     []tls.Certificate{serverCert},
+		VerifyConnection: func(tls.ConnectionState) error { return errPolicy },
+	})
+	if err := handshakePair(t, withPolicy, client(clientCert)); !errors.Is(err, errPolicy) {
+		t.Fatalf("base check error = %v, want %v", err, errPolicy)
+	}
+	if cfg := serverPins.ServerConfig(nil); cfg.ClientAuth != tls.RequireAnyClientCert || cfg.VerifyConnection == nil {
+		t.Fatal("ServerConfig(nil) does not pin client certificates")
+	}
+}
+
+// The Configs that a GetConfigForClient of the base returns are pinned too,
+// as the handshake uses them in place of the outer one.
+func TestPinSetServerConfigGetConfigForClient(t *testing.T) {
+	both := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	serverCert, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	clientCert, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	other, _ := NewSelfSigned(SelfSignedOptions{ExtKeyUsage: both})
+	clientPins := NewPinSet(Fingerprint(serverCert.Certificate[0]))
+	serverPins := NewPinSet(Fingerprint(clientCert.Certificate[0]))
+
+	errPolicy := errors.New("policy")
+	var policy atomic.Bool
+	inner := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		VerifyConnection: func(tls.ConnectionState) error {
+			if policy.Load() {
+				return errPolicy
+			}
+			return nil
+		},
+	}
+	var returnNil atomic.Bool
+	serverCfg := serverPins.ServerConfig(&tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			if returnNil.Load() {
+				return nil, nil
+			}
+			return inner, nil
+		},
+	})
+	client := func(cert *tls.Certificate) *tls.Config {
+		cfg := &tls.Config{}
+		if cert != nil {
+			cfg.Certificates = []tls.Certificate{*cert}
+		}
+		return clientPins.ClientConfig(cfg)
+	}
+	for _, nilConfig := range []bool{false, true} {
+		returnNil.Store(nilConfig)
+		if err := handshakePair(t, serverCfg, client(&clientCert)); err != nil {
+			t.Fatalf("nil config %v: pinned client certificate: %v", nilConfig, err)
+		}
+		if err := handshakePair(t, serverCfg, client(&other)); !errors.Is(err, ErrNotPinned) {
+			t.Fatalf("nil config %v: other client certificate error = %v, want %v", nilConfig, err, ErrNotPinned)
+		}
+		if err := handshakePair(t, serverCfg, client(nil)); err == nil {
+			t.Fatalf("nil config %v: handshake without a client certificate succeeded", nilConfig)
+		}
+	}
+	// The returned Config's own check runs after the pins, and it is not
+	// changed itself.
+	returnNil.Store(false)
+	policy.Store(true)
+	if err := handshakePair(t, serverCfg, client(&clientCert)); !errors.Is(err, errPolicy) {
+		t.Fatalf("returned config's check error = %v, want %v", err, errPolicy)
+	}
+	if inner.ClientAuth != tls.NoClientCert {
+		t.Fatal("GetConfigForClient's Config was changed")
+	}
+}
+
+// NewCA makes a CA that signs leaves only; Issue's certificates verify
+// against it, chain included, end with it, and serve in a CertStore as
+// issued by an authority.
+func TestNewCAAndIssue(t *testing.T) {
+	ca, err := NewCA(SelfSignedOptions{Hosts: []string{"Test CA"}, ValidFor: 48 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ca.Leaf.IsCA || ca.Leaf.MaxPathLen != 0 || !ca.Leaf.MaxPathLenZero || ca.Leaf.KeyUsage&x509.KeyUsageCertSign == 0 || ca.Leaf.Subject.CommonName != "Test CA" {
+		t.Fatalf("CA = %+v", ca.Leaf)
+	}
+	if def, _ := NewCA(SelfSignedOptions{}); def.Leaf.Subject.CommonName != "Private CA" {
+		t.Fatalf("default CA name = %q", def.Leaf.Subject.CommonName)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Leaf)
+
+	server, err := Issue(ca, SelfSignedOptions{Hosts: []string{"svc.internal", "10.0.0.1"}, ValidFor: 365 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(server.Certificate) != 2 || !bytes.Equal(server.Certificate[1], ca.Certificate[0]) || server.Leaf == nil {
+		t.Fatal("issued chain is not leaf, then CA")
+	}
+	if server.Leaf.NotAfter.After(ca.Leaf.NotAfter) {
+		t.Fatalf("issued NotAfter %v outlives the CA's %v", server.Leaf.NotAfter, ca.Leaf.NotAfter)
+	}
+	for _, name := range []string{"svc.internal", "10.0.0.1"} {
+		if _, err := server.Leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: name}); err != nil {
+			t.Fatalf("issued certificate for %s: %v", name, err)
+		}
+	}
+	if err := serveAndDial(t, server, &tls.Config{RootCAs: roots, ServerName: "svc.internal"}); err != nil {
+		t.Fatalf("handshake with an issued certificate: %v", err)
+	}
+
+	// Ranked as issued in a CertStore with the CA among its Roots, over a
+	// self-signed certificate for the same name valid longer.
+	self, _ := NewSelfSigned(SelfSignedOptions{Hosts: []string{"svc.internal"}, ValidFor: 10 * 365 * 24 * time.Hour})
+	s := &CertStore{Roots: roots}
+	mustAdd(t, s, "self", &self)
+	issuedID := mustAdd(t, s, "", &server)
+	if got, _ := s.forName(context.Background(), "svc.internal"); !sameLeaf(got, &server) {
+		t.Fatal("issued certificate not preferred")
+	}
+	if infos := s.Match("svc.internal"); infos[0].ID != issuedID || !infos[0].Authority {
+		t.Fatalf("Match() = %+v", infos)
+	}
+
+	// Issued client certificates for mutual TLS.
+	client, err := Issue(ca, SelfSignedOptions{Hosts: []string{"client"}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCfg := &tls.Config{Certificates: []tls.Certificate{server}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: roots}
+	if err := handshakePair(t, serverCfg, &tls.Config{Certificates: []tls.Certificate{client}, RootCAs: roots, ServerName: "svc.internal"}); err != nil {
+		t.Fatalf("mutual TLS with issued certificates: %v", err)
+	}
+	if err := handshakePair(t, serverCfg, &tls.Config{Certificates: []tls.Certificate{server}, RootCAs: roots, ServerName: "svc.internal"}); err == nil {
+		t.Fatal("a server certificate passed as a client certificate")
+	}
+
+	if _, err := Issue(self, SelfSignedOptions{}); err == nil {
+		t.Fatal("Issue signed with a certificate that is not a CA")
+	}
+	noKey := ca
+	noKey.PrivateKey = nil
+	if _, err := Issue(noKey, SelfSignedOptions{}); err == nil {
+		t.Fatal("Issue signed without the CA's key")
+	}
+}
+
+// CertID is the ID that a CertStore gives a certificate added without one.
+func TestCertID(t *testing.T) {
+	cert, _ := NewSelfSigned(SelfSignedOptions{})
+	var s CertStore
+	if id := mustAdd(t, &s, "", &cert); id != CertID(&cert) || len(id) != 64 {
+		t.Fatalf("Add ID %s, CertID %s", id, CertID(&cert))
+	}
+	if CertID(nil) != "" || CertID(&tls.Certificate{}) != "" {
+		t.Fatal("CertID of no certificate is not empty")
+	}
 }

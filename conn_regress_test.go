@@ -19,12 +19,12 @@ func TestWrapConnNilParentKeepsRWCWrappers(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 	override := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 4242}
-	c := WrapConn(NewAddrOverrideConn(a, override, nil), nil)
+	c := WrapConn(NewAddrOverrideConn(a, nil, override), nil)
 	if got := c.RemoteAddr(); got != override {
 		t.Fatalf("RemoteAddr() = %v, want the override %v", got, override)
 	}
-	if raw := RawConnOf(c); raw != a {
-		t.Fatalf("RawConnOf() = %v, want the pipe", raw)
+	if raw := InnermostConn(c); raw != a {
+		t.Fatalf("InnermostConn() = %v, want the pipe", raw)
 	}
 	var nilConn *net.TCPConn
 	if got := WrapConn(nilConn, nil); got.LocalAddr() != nil {
@@ -78,7 +78,7 @@ func TestFramedConnShortReadTimeoutNotKept(t *testing.T) {
 func TestAddrOverrideConnPassesDataThrough(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = b.Close() }()
-	c := NewAddrOverrideConn(a, &net.TCPAddr{Port: 1}, nil)
+	c := NewAddrOverrideConn(a, nil, &net.TCPAddr{Port: 1})
 	if got := unwrapPrefix(c); got != a {
 		t.Fatalf("unwrapPrefix() = %v, want the wrapped conn", got)
 	}
@@ -96,15 +96,15 @@ func TestAddrOverrideConnPassesDataThrough(t *testing.T) {
 	}
 }
 
-// RawConnOf returns nil, not a nil pointer in an interface, for a nil
+// InnermostConn returns nil, not a nil pointer in an interface, for a nil
 // connection, so that callers can check the result against nil.
-func TestRawConnOfNilPointer(t *testing.T) {
+func TestInnermostConnNilPointer(t *testing.T) {
 	var tcp *net.TCPConn
-	if got := RawConnOf(tcp); got != nil {
-		t.Fatalf("RawConnOf(nil *net.TCPConn) = %#v, want nil", got)
+	if got := InnermostConn(tcp); got != nil {
+		t.Fatalf("InnermostConn(nil *net.TCPConn) = %#v, want nil", got)
 	}
-	if got := RawConnOf(NewPrefixConn(tcp, nil)); got != nil {
-		t.Fatalf("RawConnOf(PrefixConn over nil) = %#v, want nil", got)
+	if got := InnermostConn(NewPrefixConn(tcp, nil)); got != nil {
+		t.Fatalf("InnermostConn(PrefixConn over nil) = %#v, want nil", got)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestPacketListenerCloseHoldingFilterLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	filtered := make(chan struct{}, 1)
-	NewPacketListener(pc, WithAcceptFilter(func(net.Addr) bool {
+	NewPacketListener(pc, WithPacketAcceptFilter(func(net.Addr, []byte) bool {
 		filtered <- struct{}{}
 		mu.Lock()
 		defer mu.Unlock()
@@ -236,10 +236,10 @@ func TestFramedConnUnexpectedEOFInsideFrameDesyncs(t *testing.T) {
 		case "ReadFrame":
 			_, err = NewFramedConn(&unexpectedEOFConn{}).ReadFrame()
 		case "datagram":
-			_, err = NewFramedConn(&unexpectedEOFConn{}, WithDatagramReads()).Read(make([]byte, 8))
+			_, err = NewFramedConn(&unexpectedEOFConn{}, WithFramedDatagrams()).Read(make([]byte, 8))
 		case "datagram discard":
 			// An empty buffer discards the whole payload.
-			_, err = NewFramedConn(&unexpectedEOFConn{}, WithDatagramReads()).Read(nil)
+			_, err = NewFramedConn(&unexpectedEOFConn{}, WithFramedDatagrams()).Read(nil)
 		case "stream":
 			_, err = NewFramedConn(&unexpectedEOFConn{}).Read(make([]byte, 8))
 		}
@@ -256,16 +256,16 @@ type cyclicThroughNetx struct {
 	outer net.Conn
 }
 
-func (c *cyclicThroughNetx) RawConn() net.Conn { return c.outer }
+func (c *cyclicThroughNetx) NetConn() net.Conn { return c.outer }
 
-func TestRawConnOfStopsOnCyclesThroughWrappers(t *testing.T) {
+func TestInnermostConnStopsOnCyclesThroughWrappers(t *testing.T) {
 	c := &cyclicThroughNetx{}
 	c.outer = NewTimeoutConn(c, time.Second)
-	if got := RawConnOf(c); got == nil {
-		t.Fatal("RawConnOf(cycle) = nil, want a conn from the cycle")
+	if got := InnermostConn(c); got == nil {
+		t.Fatal("InnermostConn(cycle) = nil, want a conn from the cycle")
 	}
 	parent := &countedCloseConn{}
-	if err := WrapConn(c, parent, WithParentClose()).Close(); err != nil {
+	if err := WrapConn(c, parent, WithWrapParentClose()).Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 	if datagramReader(NewPrefixConn(c.outer, nil)) {
@@ -275,7 +275,7 @@ func TestRawConnOfStopsOnCyclesThroughWrappers(t *testing.T) {
 
 // Chains of this package's wrappers unwrap to the innermost connection
 // however deep they are, and a wrapper pointed back at itself stops.
-func TestRawConnOfDeepAndSelfReferentialWrappers(t *testing.T) {
+func TestInnermostConnDeepAndSelfReferentialWrappers(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
@@ -283,13 +283,13 @@ func TestRawConnOfDeepAndSelfReferentialWrappers(t *testing.T) {
 	for range 40 {
 		deep = NewTimeoutConn(NewPrefixConn(deep, nil), time.Second)
 	}
-	if got := RawConnOf(deep); got != a {
-		t.Fatalf("RawConnOf(80 wrappers) = %T, want the pipe", got)
+	if got := InnermostConn(deep); got != a {
+		t.Fatalf("InnermostConn(80 wrappers) = %T, want the pipe", got)
 	}
 	self := NewPrefixConn(nil, nil)
-	self.Conn = self
-	if got := RawConnOf(self); got == nil {
-		t.Fatal("RawConnOf(self-referential wrapper) = nil, want a conn from the cycle")
+	self.conn = self
+	if got := InnermostConn(self); got == nil {
+		t.Fatal("InnermostConn(self-referential wrapper) = nil, want a conn from the cycle")
 	}
 }
 
@@ -300,14 +300,48 @@ type overridingConn struct {
 	alt net.Conn
 }
 
-func (c overridingConn) RawConn() net.Conn { return c.alt }
+func (c overridingConn) NetConn() net.Conn { return c.alt }
 
-func TestRawConnOfFollowsEmbeddingTypesRawConn(t *testing.T) {
+func TestInnermostConnFollowsEmbeddingTypesRawConn(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 	c := overridingConn{TimeoutConn: NewTimeoutConn(a, time.Second), alt: b}
-	if got := RawConnOf(c); got != b {
-		t.Fatalf("RawConnOf() = %v, want the connection its RawConn returns", got)
+	if got := InnermostConn(c); got != b {
+		t.Fatalf("InnermostConn() = %v, want the connection its RawConn returns", got)
 	}
 }
+
+// ConnAs finds a connection of a type beneath wrappers, also through NetConn
+// methods of other packages' wrappers.
+func TestConnAs(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	timeout := NewTimeoutConn(a, time.Minute)
+	c := NewPrefixConn(WrapConn(&netConnOnly{timeout}, nil), nil)
+	if got, ok := ConnAs[*TimeoutConn](c); !ok || got != timeout {
+		t.Fatalf("ConnAs[*TimeoutConn]() = %v, %v", got, ok)
+	}
+	if got, ok := ConnAs[*PrefixConn](c); !ok || got != c {
+		t.Fatalf("ConnAs[*PrefixConn]() = %v, %v; want c itself", got, ok)
+	}
+	if _, ok := ConnAs[*FramedConn](c); ok {
+		t.Fatal("ConnAs[*FramedConn]() found one that is not there")
+	}
+	if got, ok := ConnAs[interface{ CloseWrite() error }](c); !ok || got == nil {
+		t.Fatal("ConnAs[interface] did not find a CloseWrite")
+	}
+	if InnermostConn(c) != a {
+		t.Fatal("InnermostConn() is not the pipe")
+	}
+}
+
+// netConnOnly is another package's wrapper that only shows what it wraps
+// through NetConn.
+type netConnOnly struct{ c net.Conn }
+
+func (n *netConnOnly) Read(b []byte) (int, error)  { return n.c.Read(b) }
+func (n *netConnOnly) Write(b []byte) (int, error) { return n.c.Write(b) }
+func (n *netConnOnly) Close() error                { return n.c.Close() }
+func (n *netConnOnly) NetConn() net.Conn           { return n.c }

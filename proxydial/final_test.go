@@ -1,4 +1,4 @@
-package proxy
+package proxydial
 
 import (
 	"context"
@@ -18,7 +18,7 @@ func TestFromEnvironmentErrorHidesPassword(t *testing.T) {
 	} {
 		t.Setenv("all_proxy", "")
 		t.Setenv("ALL_PROXY", raw)
-		_, err := FromEnvironment(nil)
+		_, err := FromEnvironment(nil, nil)
 		if err == nil {
 			t.Fatalf("FromEnvironment(%q) succeeded", raw)
 		}

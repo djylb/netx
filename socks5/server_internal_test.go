@@ -16,7 +16,7 @@ func TestServerUDPDoesNotKeepEndedAssociations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{PacketConn: pc, UDPIdleTimeout: time.Nanosecond}
+	s := &Server{UDPSocket: pc, UDPIdleTimeout: time.Nanosecond}
 	defer func() { _ = s.Close() }()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

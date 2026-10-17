@@ -11,6 +11,9 @@ const (
 	errorAccessDenied   syscall.Errno = 5     // ERROR_ACCESS_DENIED
 	errorNetnameDeleted syscall.Errno = 64    // ERROR_NETNAME_DELETED
 	wsaEACCES           syscall.Errno = 10013 // WSAEACCES
+	wsaEMSGSIZE         syscall.Errno = 10040 // WSAEMSGSIZE
+	wsaEADDRINUSE       syscall.Errno = 10048 // WSAEADDRINUSE
+	wsaEADDRNOTAVAIL    syscall.Errno = 10049 // WSAEADDRNOTAVAIL
 	wsaENETUNREACH      syscall.Errno = 10051 // WSAENETUNREACH
 	wsaECONNABORTED     syscall.Errno = 10053 // WSAECONNABORTED
 	wsaECONNRESET       syscall.Errno = 10054 // WSAECONNRESET
@@ -23,13 +26,16 @@ const (
 // Errno tables used by the error classifiers in errors.go. The invented
 // syscall.E* values stay in the tables for errors built by portable code.
 var (
-	connResetErrnos   = []error{wsaECONNRESET, errorNetnameDeleted, syscall.ECONNRESET}
-	connAbortedErrnos = []error{wsaECONNABORTED, syscall.ECONNABORTED}
-	brokenPipeErrnos  = []error{wsaESHUTDOWN, syscall.EPIPE}
-	connRefusedErrnos = []error{wsaECONNREFUSED, syscall.ECONNREFUSED}
-	hostUnreachErrnos = []error{wsaEHOSTUNREACH, syscall.EHOSTUNREACH}
-	netUnreachErrnos  = []error{wsaENETUNREACH, syscall.ENETUNREACH}
-	accessErrnos      = []error{wsaEACCES, errorAccessDenied, syscall.EACCES}
-	permErrnos        = []error{syscall.EPERM}
-	timedOutErrnos    = []error{wsaETIMEDOUT, syscall.ETIMEDOUT}
+	connResetErrnos    = []error{wsaECONNRESET, errorNetnameDeleted, syscall.ECONNRESET}
+	connAbortedErrnos  = []error{wsaECONNABORTED, syscall.ECONNABORTED}
+	brokenPipeErrnos   = []error{wsaESHUTDOWN, syscall.EPIPE}
+	connRefusedErrnos  = []error{wsaECONNREFUSED, syscall.ECONNREFUSED}
+	hostUnreachErrnos  = []error{wsaEHOSTUNREACH, syscall.EHOSTUNREACH}
+	netUnreachErrnos   = []error{wsaENETUNREACH, syscall.ENETUNREACH}
+	accessErrnos       = []error{wsaEACCES, errorAccessDenied, syscall.EACCES}
+	permErrnos         = []error{syscall.EPERM}
+	timedOutErrnos     = []error{wsaETIMEDOUT, syscall.ETIMEDOUT}
+	addrInUseErrnos    = []error{wsaEADDRINUSE, syscall.EADDRINUSE}
+	addrNotAvailErrnos = []error{wsaEADDRNOTAVAIL, syscall.EADDRNOTAVAIL}
+	msgSizeErrnos      = []error{wsaEMSGSIZE, syscall.EMSGSIZE}
 )

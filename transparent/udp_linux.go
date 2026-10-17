@@ -5,53 +5,140 @@ package transparent
 import (
 	"context"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"syscall"
 	"unsafe"
 )
 
-const (
-	ipRecvOrigDstAddr   = 0x14 // IP_RECVORIGDSTADDR, also the IP_ORIGDSTADDR message type
-	ipv6RecvOrigDstAddr = 0x4a // IPV6_RECVORIGDSTADDR, also IPV6_ORIGDSTADDR
-)
+// packetErr reports no error: ListenPacket is supported.
+func packetErr() error { return nil }
 
-func listenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
-	lc := net.ListenConfig{Control: controlSocket(func(fd int) error {
-		if err := setTransparent(fd); err != nil {
-			return err
-		}
-		return setOptions(fd, []sockopt{
-			{level: solIP, name: ipRecvOrigDstAddr},
-			{level: solIPv6, name: ipv6RecvOrigDstAddr},
-		})
-	})}
-	pc, err := lc.ListenPacket(ctx, "udp", address)
-	if err != nil {
-		return nil, err
-	}
-	return pc.(*net.UDPConn), nil
-}
-
-func readFromUDP(c *net.UDPConn, b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
+func readFromUDP(c *net.UDPConn, b []byte) (int, PacketInfo, error) {
 	// Room for the original destination after other control messages the
 	// socket may have been asked for, such as timestamps or IP_PKTINFO.
 	var oob [512]byte
 	n, oobn, flags, src, err := c.ReadMsgUDPAddrPort(b, oob[:])
 	if err != nil {
-		return n, netip.AddrPort{}, netip.AddrPort{}, err
+		return n, PacketInfo{}, err
 	}
-	src = unmapAddrPort(src)
-	if dst, ok := origDstFromControl(oob[:oobn]); ok {
-		return n, src, dst, nil
+	info := PacketInfo{Src: unmapAddrPort(src)}
+	laddr, _ := c.LocalAddr().(*net.UDPAddr)
+	bound := unmapAddrPort(laddr.AddrPort())
+	dst, ok := origDstFromControl(oob[:oobn])
+	if !ok {
+		if flags&syscall.MSG_CTRUNC != 0 {
+			// The local address would name the wrong destination.
+			return n, info, ErrControlTruncated
+		}
+		info.Dst = bound
+		return n, info, nil
 	}
-	if flags&syscall.MSG_CTRUNC != 0 {
-		// The local address would name the wrong destination.
-		return n, src, netip.AddrPort{}, ErrControlTruncated
+	info.Dst = dst
+	if info.Redirected, err = datagramRedirected(c, dst, bound); err != nil {
+		info.Redirected = false
+		return n, info, fmt.Errorf("transparent: is %v local: %w", dst.Addr(), err)
 	}
-	local, _ := c.LocalAddr().(*net.UDPAddr)
-	return n, src, unmapAddrPort(local.AddrPort()), nil
+	return n, info, nil
+}
+
+// datagramRedirected reports whether a datagram addressed to dst reached c,
+// bound to bound, through a redirect. A multicast or limited broadcast
+// datagram was not. Only a redirect delivers one for
+// another port, or, to a socket bound to one address, for another address.
+// To a wildcard socket on its own port, a datagram was redirected unless dst
+// is an address of this host, which isLocalAddrCached looks up.
+func datagramRedirected(c *net.UDPConn, dst, bound netip.AddrPort) (bool, error) {
+	switch {
+	case isGroupAddr(dst.Addr()):
+		// Broadcast and multicast reach the socket as one of their hosts;
+		// a proxy must not send them on, nor answer from them.
+		return false, nil
+	case dst.Port() != bound.Port():
+		return true, nil
+	case !bound.Addr().IsUnspecified():
+		return !sameAddrPort(dst, bound), nil
+	}
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return false, err
+	}
+	return isRedirected(dst, bound, func(ip netip.Addr) (bool, error) {
+		return isLocalAddrCached(raw, ip)
+	})
+}
+
+// sameAddrPort reports whether a and b are the same address and port. Zones
+// are ignored: one interface may be named by its name or by its index.
+func sameAddrPort(a, b netip.AddrPort) bool {
+	return a.Port() == b.Port() && a.Addr().WithZone("") == b.Addr().WithZone("")
+}
+
+// writeFrom sends b to to from c with from as its source address, which an
+// IP_PKTINFO or IPV6_PKTINFO control message sets, so that a socket on a
+// wildcard address answers from the address it was sent to rather than one
+// the kernel picks for the route.
+func writeFrom(c *net.UDPConn, b []byte, from, to netip.AddrPort) (int, error) {
+	var oob []byte
+	if ip := from.Addr().Unmap(); ip.Is4() {
+		// struct in_pktinfo: ipi_ifindex, ipi_spec_dst, ipi_addr.
+		oob = make([]byte, syscall.CmsgSpace(syscall.SizeofInet4Pktinfo))
+		data := setCmsg(oob, syscall.IPPROTO_IP, syscall.IP_PKTINFO, syscall.SizeofInet4Pktinfo)
+		a := ip.As4()
+		copy(data[4:8], a[:])
+	} else {
+		// struct in6_pktinfo: ipi6_addr, ipi6_ifindex.
+		oob = make([]byte, syscall.CmsgSpace(syscall.SizeofInet6Pktinfo))
+		data := setCmsg(oob, syscall.IPPROTO_IPV6, syscall.IPV6_PKTINFO, syscall.SizeofInet6Pktinfo)
+		a := ip.As16()
+		copy(data[:16], a[:])
+	}
+	n, _, err := c.WriteMsgUDPAddrPort(b, oob, to)
+	return n, err
+}
+
+// setCmsg writes the header of a control message of n bytes to oob and
+// returns its data.
+func setCmsg(oob []byte, level, typ, n int) []byte {
+	h := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[0]))
+	h.Level, h.Type = int32(level), int32(typ)
+	h.SetLen(syscall.CmsgLen(n))
+	return oob[cmsgHeaderLen : cmsgHeaderLen+n]
+}
+
+// readDatagram waits until raw is readable, holding no buffer meanwhile, and
+// reads one datagram into a buffer from datagramPool, which the caller puts
+// back.
+func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
+	var bp *[]byte
+	var n int
+	var opErr error
+	err := raw.Read(func(fd uintptr) bool {
+		bp = datagramPool.Get().(*[]byte)
+		for {
+			n, opErr = syscall.Read(int(fd), *bp)
+			if opErr != syscall.EINTR {
+				break
+			}
+		}
+		if opErr == syscall.EAGAIN {
+			datagramPool.Put(bp)
+			bp = nil
+			return false
+		}
+		return true
+	})
+	if err == nil {
+		err = opErr
+	}
+	if err != nil {
+		if bp != nil {
+			datagramPool.Put(bp)
+		}
+		return nil, 0, err
+	}
+	return bp, max(n, 0), nil
 }
 
 // cmsgHeaderLen is the length of a control message header with its padding.
@@ -100,78 +187,18 @@ func dialUDP(ctx context.Context, local, remote netip.AddrPort) (*net.UDPConn, e
 	}
 	d := net.Dialer{
 		LocalAddr: net.UDPAddrFromAddrPort(local),
-		Control: controlSocket(func(fd int) error {
-			if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		Control: func(network, address string, c syscall.RawConn) error {
+			if err := controlFD(c, func(fd int) error {
+				return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			}); err != nil {
 				return err
 			}
-			return setTransparent(fd)
-		}),
+			return Control(network, address, c)
+		},
 	}
 	c, err := d.DialContext(ctx, network, remote.String())
 	if err != nil {
 		return nil, err
 	}
 	return c.(*net.UDPConn), nil
-}
-
-func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
-	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-}
-
-// setTransparent sets IP_TRANSPARENT and IPV6_TRANSPARENT where the socket
-// family has them.
-func setTransparent(fd int) error {
-	return setOptions(fd, []sockopt{
-		{level: solIP, name: ipTransparent},
-		{level: solIPv6, name: ipv6Transparent},
-	})
-}
-
-type sockopt struct {
-	level int
-	name  int
-}
-
-// setOptions enables boolean socket options, skipping those the socket's
-// family does not have, and returns the first other failure. It fails when
-// none could be set, as in a sandbox without them, rather than leaving the
-// socket without what the caller needs.
-func setOptions(fd int, opts []sockopt) error {
-	var firstErr, skipped error
-	set := false
-	for _, opt := range opts {
-		switch err := syscall.SetsockoptInt(fd, opt.level, opt.name, 1); {
-		case err == nil:
-			set = true
-		case isIgnorableSockopt(err):
-			if skipped == nil {
-				skipped = err
-			}
-		case firstErr == nil:
-			firstErr = err
-		}
-	}
-	if firstErr == nil && !set {
-		return skipped
-	}
-	return firstErr
-}
-
-func isIgnorableSockopt(err error) bool {
-	return errors.Is(err, syscall.ENOPROTOOPT) ||
-		errors.Is(err, syscall.EINVAL) ||
-		errors.Is(err, syscall.EAFNOSUPPORT)
-}
-
-// controlSocket adapts fn to net.ListenConfig.Control and net.Dialer.Control.
-func controlSocket(fn func(fd int) error) func(string, string, syscall.RawConn) error {
-	return func(_, _ string, raw syscall.RawConn) error {
-		var sockErr error
-		if err := raw.Control(func(fd uintptr) {
-			sockErr = fn(int(fd))
-		}); err != nil {
-			return err
-		}
-		return sockErr
-	}
 }

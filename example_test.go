@@ -72,7 +72,7 @@ func ExampleRelay() {
 
 	done := make(chan struct{})
 	go func() {
-		up, down, err := netx.Relay(front, back)
+		up, down, err := netx.Relay(context.Background(), front, back)
 		fmt.Println(up, down, err)
 		close(done)
 	}()
@@ -88,29 +88,73 @@ func ExampleRelay() {
 	// 4 4 <nil>
 }
 
+// Count what a relay passes and end it from outside, as when an allowance
+// runs out.
+func ExampleWithRelayFlows() {
+	client, front := net.Pipe()
+	back, backend := net.Pipe()
+	go func() { _, _ = io.Copy(backend, backend) }()
+
+	var counted int64
+	count := netx.RelayFlow{Done: func(n int64) error {
+		counted += n
+		return nil
+	}}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error)
+	go func() {
+		_, _, err := netx.Relay(ctx, front, back, netx.WithRelayFlows(count, netx.RelayFlow{}))
+		done <- err
+	}()
+
+	_, _ = client.Write([]byte("ping"))
+	_, _ = io.ReadFull(client, make([]byte, 4))
+	cancel(errors.New("allowance used up"))
+	err := <-done
+	fmt.Println(err, counted)
+	// Output:
+	// allowance used up 4
+}
+
+// Close every connection of a group at once.
+func ExampleConnGroup() {
+	var user netx.ConnGroup
+	a, b := net.Pipe()
+	remove, _ := user.Add(a)
+	defer remove()
+	fmt.Println(user.Len())
+	_ = user.CloseMembers(nil)
+	_, err := b.Read(make([]byte, 1))
+	fmt.Println(user.Len(), err)
+	// Output:
+	// 1
+	// 0 EOF
+}
+
 // Hand a connection on after sniffing its first bytes.
-func ExampleNewPrefixConn() {
+func ExamplePeek() {
 	client, server := net.Pipe()
 	go func() {
 		_, _ = client.Write([]byte("GET / HTTP/1.1\r\n"))
 		_ = client.Close()
 	}()
 
-	head := make([]byte, 4)
-	_, _ = io.ReadFull(server, head)
-	c := netx.NewPrefixConn(server, head) // the next reader sees the whole request
-	all, _ := io.ReadAll(c)
+	c, head, _ := netx.PeekFull(context.Background(), server, 4)
+	fmt.Printf("%q\n", head)
+	all, _ := io.ReadAll(c) // the next reader sees the whole request
 	fmt.Printf("%q\n", all)
-	// Output: "GET / HTTP/1.1\r\n"
+	// Output:
+	// "GET "
+	// "GET / HTTP/1.1\r\n"
 }
 
 // Serve one goroutine per UDP peer, like a TCP server.
 func ExamplePacketListener() {
-	pc, err := net.ListenPacket("udp", ":5353")
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatal(err)
 	}
-	l := netx.NewPacketListener(pc, netx.WithIdleTimeout(time.Minute))
+	l := netx.NewPacketListener(pc, netx.WithPacketIdleTimeout(time.Minute))
 	for {
 		c, err := l.Accept()
 		if err != nil {

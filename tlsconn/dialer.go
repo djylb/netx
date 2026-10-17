@@ -21,9 +21,10 @@ type Dialer struct {
 	// Without a ServerName, the host of the dialed address is used, as
 	// tls.Dialer does, or the whole address when it has no port.
 	Config *tls.Config
-	// Timeout bounds the handshake as in Client; DefaultTimeout if not
-	// positive.
-	Timeout time.Duration
+	// HandshakeTimeout, if positive, also bounds the handshake, after the
+	// dial and within the context's deadline. Without it, and without a
+	// context deadline, the handshake is bounded by DefaultHandshakeTimeout.
+	HandshakeTimeout time.Duration
 	// Forward dials the underlying connection; nil means a zero net.Dialer.
 	Forward ContextDialer
 }
@@ -57,7 +58,13 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, err
 	}
-	tc, err := Client(ctx, raw, cfg, d.Timeout)
+	hsCtx := ctx
+	if d.HandshakeTimeout > 0 {
+		var cancel context.CancelFunc
+		hsCtx, cancel = context.WithTimeout(ctx, d.HandshakeTimeout)
+		defer cancel()
+	}
+	tc, err := Client(hsCtx, raw, cfg)
 	if err != nil {
 		return nil, err
 	}

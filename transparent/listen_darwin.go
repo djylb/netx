@@ -2,14 +2,19 @@
 
 package transparent
 
-import (
-	"context"
-	"net"
-)
+import "syscall"
 
-// listen returns an ordinary listener: pf rdr rules redirect traffic to it,
-// and OriginalDestination looks up the original target with DIOCNATLOOK.
-func listen(ctx context.Context, address string) (net.Listener, error) {
-	var lc net.ListenConfig
-	return lc.Listen(ctx, "tcp", address)
+// listenErr reports no error: an ordinary listener does, as pf rdr rules
+// redirect traffic to it and OriginalDestination looks up the original
+// target with DIOCNATLOOK.
+func listenErr() error { return nil }
+
+//goland:noinspection GoUnusedParameter
+func control(string, string, syscall.RawConn) error {
+	return nil
+}
+
+//goland:noinspection GoUnusedParameter
+func controlPacket(string, string, syscall.RawConn) error {
+	return ErrListenUnsupported
 }

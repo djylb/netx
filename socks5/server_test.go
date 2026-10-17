@@ -161,7 +161,8 @@ func TestServerHooks(t *testing.T) {
 		ConnectAddr: func(*socks5.Request, net.Conn) socks5.Addr {
 			return socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1234}
 		},
-		Relay: func(_ context.Context, _ *socks5.Request, client, target net.Conn) error {
+		Relay: func(_ context.Context, req *socks5.Request, target net.Conn) error {
+			client := req.Conn
 			relayed <- struct{}{}
 			defer func() { _ = client.Close(); _ = target.Close() }()
 			go func() { _, _ = io.Copy(target, client) }()
@@ -328,11 +329,11 @@ func exchange(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UD
 	if err != nil {
 		return "", socks5.Addr{}
 	}
-	src, data, err := socks5.ParseDatagram(buf[:n])
+	src, h, err := socks5.DecodeDatagram(buf[:n])
 	if err != nil {
 		t.Fatalf("reply datagram error = %v", err)
 	}
-	return string(data), src
+	return string(buf[h:n]), src
 }
 
 // eventuallyNoReply sends payload until the relay stops replying, as an
@@ -367,7 +368,7 @@ func TestServerUDPSharedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := serve(t, &socks5.Server{PacketConn: pc})
+	addr := serve(t, &socks5.Server{UDPSocket: pc})
 
 	ctl, relay := associate(t, addr, socks5.Addr{})
 	if relay.String() != pc.LocalAddr().String() {
@@ -446,7 +447,7 @@ func TestServerUDPPerAssociationSocket(t *testing.T) {
 
 func TestServerUDPIdleTimeout(t *testing.T) {
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
-	addr := serve(t, &socks5.Server{PacketConn: pc, UDPIdleTimeout: 100 * time.Millisecond})
+	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPIdleTimeout: 100 * time.Millisecond})
 	ctl, _ := associate(t, addr, socks5.Addr{})
 	_ = ctl.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -486,7 +487,7 @@ func (m *memPacketConn) Close() error {
 func TestServerUDPCustomEgress(t *testing.T) {
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	addr := serve(t, &socks5.Server{
-		PacketConn: pc,
+		UDPSocket: pc,
 		DialPacket: func(context.Context, *socks5.Request) (socks5.PacketConn, error) {
 			return &memPacketConn{replies: make(chan []byte, 8), closed: make(chan struct{})}, nil
 		},
@@ -506,8 +507,8 @@ func TestServerUDPCustomEgress(t *testing.T) {
 		if err != nil {
 			return "", socks5.Addr{}
 		}
-		src, data, _ := socks5.ParseDatagram(buf[:n])
-		return string(data), src
+		src, h, _ := socks5.DecodeDatagram(buf[:n])
+		return string(buf[h:n]), src
 	}
 	// Domain names reach the custom egress unresolved. A loopback datagram
 	// can be lost on a busy host, so it is sent again until answered.
@@ -550,7 +551,7 @@ func TestServerCloseEndsConnections(t *testing.T) {
 	if err := s.Serve(ln); !errors.Is(err, socks5.ErrServerClosed) {
 		t.Fatalf("Serve() after Close = %v", err)
 	}
-	if err := s.ServeConn(nopConn{}); !errors.Is(err, socks5.ErrServerClosed) {
+	if err := s.ServeConn(context.Background(), nopConn{}); !errors.Is(err, socks5.ErrServerClosed) {
 		t.Fatalf("ServeConn() after Close = %v", err)
 	}
 }
@@ -584,10 +585,10 @@ func TestServerCloseDoesNotHoldLockWhileClosing(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	slow := &slowCloseConn{Conn: server, closing: make(chan struct{}), release: make(chan struct{})}
 	served := make(chan error, 1)
-	go func() { served <- s.ServeConn(slow) }()
+	go func() { served <- s.ServeConn(context.Background(), slow) }()
 	// The pipe is synchronous: once the server has read this byte, it tracks
 	// the connection.
-	if _, err := client.Write([]byte{socks5.Version}); err != nil {
+	if _, err := client.Write([]byte{socks5.Version5}); err != nil {
 		t.Fatal(err)
 	}
 	closed := make(chan error, 1)
@@ -595,7 +596,7 @@ func TestServerCloseDoesNotHoldLockWhileClosing(t *testing.T) {
 	<-slow.closing
 
 	other := make(chan error, 1)
-	go func() { other <- s.ServeConn(nopConn{}) }()
+	go func() { other <- s.ServeConn(context.Background(), nopConn{}) }()
 	select {
 	case err := <-other:
 		if !errors.Is(err, socks5.ErrServerClosed) {
@@ -654,7 +655,7 @@ func TestServerUDPOutlivesControl(t *testing.T) {
 	echo := udpEcho(t)
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	const idle = time.Second
-	addr := serve(t, &socks5.Server{PacketConn: pc, UDPOutlivesControl: true, UDPIdleTimeout: idle})
+	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPOutlivesControl: true, UDPIdleTimeout: idle})
 	ctl, relay := associate(t, addr, socks5.Addr{})
 	client := newUDPClient(t)
 	_ = ctl.(*net.TCPConn).CloseWrite()

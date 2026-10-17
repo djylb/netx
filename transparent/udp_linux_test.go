@@ -84,7 +84,7 @@ func TestReadFromUDPDoesNotAllocate(t *testing.T) {
 		t.Fatalf("origDstFromControl() = %v allocations, want 0", n)
 	}
 
-	ln, err := ListenPacket(context.Background(), "127.0.0.1:0")
+	ln, err := ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	skipWithoutPrivilege(t, err)
 	if err != nil {
 		t.Fatalf("ListenPacket() error = %v", err)
@@ -105,7 +105,7 @@ func TestReadFromUDPDoesNotAllocate(t *testing.T) {
 	_ = ln.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 64)
 	n := testing.AllocsPerRun(runs, func() {
-		if _, _, _, err := ReadFromUDP(ln, buf); err != nil {
+		if _, _, err := ReadFromUDP(ln, buf); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -122,7 +122,7 @@ func skipWithoutPrivilege(t *testing.T, err error) {
 }
 
 func TestListenPacketAndDialUDP(t *testing.T) {
-	ln, err := ListenPacket(context.Background(), "127.0.0.1:0")
+	ln, err := ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	skipWithoutPrivilege(t, err)
 	if err != nil {
 		t.Fatalf("ListenPacket() error = %v", err)
@@ -139,13 +139,14 @@ func TestListenPacketAndDialUDP(t *testing.T) {
 	}
 	buf := make([]byte, 64)
 	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, src, dst, err := ReadFromUDP(ln, buf)
-	if err != nil || string(buf[:n]) != "query" {
-		t.Fatalf("ReadFromUDP() = %q, %v", buf[:n], err)
+	n, info, err := ReadFromUDP(ln, buf)
+	if err != nil || string(buf[:n]) != "query" || info.Redirected {
+		t.Fatalf("ReadFromUDP() = %q, redirected %v, %v; want query, false", buf[:n], info.Redirected, err)
 	}
-	if src.String() != client.LocalAddr().String() || dst.String() != ln.LocalAddr().String() {
-		t.Fatalf("ReadFromUDP() src %v dst %v, want %v and %v", src, dst, client.LocalAddr(), ln.LocalAddr())
+	if info.Src.String() != client.LocalAddr().String() || info.Dst.String() != ln.LocalAddr().String() {
+		t.Fatalf("ReadFromUDP() src %v dst %v, want %v and %v", info.Src, info.Dst, client.LocalAddr(), ln.LocalAddr())
 	}
+	src := info.Src
 
 	// Answer from an address that is not local, as for a redirected datagram.
 	spoofed := netip.MustParseAddrPort("198.51.100.1:5353")
@@ -173,7 +174,7 @@ func TestListenPacketAndDialUDP(t *testing.T) {
 // Other control messages the socket asks for do not push the original
 // destination out of the buffer.
 func TestReadFromUDPWithOtherControlMessages(t *testing.T) {
-	ln, err := ListenPacket(context.Background(), "0.0.0.0:0")
+	ln, err := ListenPacket(context.Background(), "udp", "0.0.0.0:0")
 	skipWithoutPrivilege(t, err)
 	if err != nil {
 		t.Fatalf("ListenPacket() error = %v", err)
@@ -209,8 +210,62 @@ func TestReadFromUDPWithOtherControlMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, dst, err := ReadFromUDP(ln, make([]byte, 16))
-	if want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port); err != nil || dst != want {
-		t.Fatalf("ReadFromUDP() dst = %v, %v, want %v", dst, err, want)
+	// The wildcard socket asks whether 127.0.0.1 is local: it is, so the
+	// datagram was sent to the socket directly.
+	_, info, err := ReadFromUDP(ln, make([]byte, 16))
+	if want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port); err != nil || info.Dst != want || info.Redirected {
+		t.Fatalf("ReadFromUDP() dst = %v, redirected %v, %v; want %v, false", info.Dst, info.Redirected, err, want)
+	}
+}
+
+func TestDatagramRedirected(t *testing.T) {
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	for _, tt := range []struct {
+		dst, bound string
+		redirected bool
+	}{
+		{"127.0.0.1:53", "127.0.0.1:53", false},
+		{"127.0.0.1:54", "127.0.0.1:53", true},
+		{"198.51.100.1:53", "127.0.0.1:53", true},
+		{"127.0.0.2:53", "127.0.0.1:53", true}, // only a redirect delivers it
+		{"127.0.0.1:53", "0.0.0.0:53", false},
+		{"127.0.0.9:53", "0.0.0.0:53", false},
+		{"198.51.100.1:53", "0.0.0.0:53", true},
+		{"198.51.100.1:54", "0.0.0.0:53", true},
+		// Broadcast and multicast reach the socket directly.
+		{"255.255.255.255:53", "0.0.0.0:53", false},
+		{"255.255.255.255:54", "0.0.0.0:53", false},
+		{"224.0.0.251:5353", "0.0.0.0:53", false},
+		{"[ff02::fb]:5353", "[::]:53", false},
+	} {
+		got, err := datagramRedirected(c, netip.MustParseAddrPort(tt.dst), netip.MustParseAddrPort(tt.bound))
+		if err != nil || got != tt.redirected {
+			t.Errorf("datagramRedirected(%s, bound %s) = %v, %v; want %v", tt.dst, tt.bound, got, err, tt.redirected)
+		}
+	}
+}
+
+// Only local answers are remembered, so that an address added later is not
+// taken for another host's.
+func TestIsLocalAddrCached(t *testing.T) {
+	local, remote := netip.MustParseAddr("127.0.0.7"), netip.MustParseAddr("198.51.100.7")
+	for range 2 {
+		if got, err := isLocalAddrCached(nil, local); err != nil || !got {
+			t.Fatalf("isLocalAddrCached(%v) = %v, %v; want true", local, got, err)
+		}
+		if got, err := isLocalAddrCached(nil, remote); err != nil || got {
+			t.Fatalf("isLocalAddrCached(%v) = %v, %v; want false", remote, got, err)
+		}
+	}
+	localAddrs.Lock()
+	_, cachedLocal := localAddrs.set[localAddrKey{ip: local}]
+	_, cachedRemote := localAddrs.set[localAddrKey{ip: remote}]
+	localAddrs.Unlock()
+	if !cachedLocal || cachedRemote {
+		t.Fatalf("cached local %v remote %v; want true, false", cachedLocal, cachedRemote)
 	}
 }

@@ -9,7 +9,7 @@ import (
 
 // TestPackageDependencies checks what the README promises: every package
 // depends on the standard library and this module alone, crypto/tls is
-// linked only by tlsconn and proxy, and proxyproto and tlsconn depend on the
+// linked only by tlsconn and proxydial, and proxyproto and tlsconn depend on the
 // standard library alone.
 func TestPackageDependencies(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
@@ -30,7 +30,7 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/transparent", false, false},
 		{module + "/socks5", false, false},
 		{module + "/tlsconn", true, true},
-		{module + "/proxy", true, false},
+		{module + "/proxydial", true, false},
 	} {
 		out, err := exec.Command(goCmd, "list", "-deps", "-f", "{{.ImportPath}} {{.Standard}}", tt.pkg).Output()
 		if err != nil {

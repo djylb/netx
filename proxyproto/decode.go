@@ -1,7 +1,6 @@
 package proxyproto
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -13,75 +12,27 @@ import (
 	"strings"
 )
 
-// Parse parses the PROXY protocol header at the start of b and returns it
+// Decode decodes the PROXY protocol header at the start of b and returns it
 // with its length in bytes. TLV values are copied, so the header does not
 // alias b.
 //
-// Parse accepts the deviations of non-standard senders described in the
+// Decode accepts the deviations of non-standard senders described in the
 // package documentation. It returns ErrNoHeader if b does not start with a
 // header, io.ErrUnexpectedEOF if b holds only the start of one, so that a
 // caller sniffing a stream can read more and try again, and an error wrapping
-// ErrMalformed for a header that cannot be parsed.
-func Parse(b []byte) (*Header, int, error) {
-	h, n, _, err := parse(b)
+// ErrMalformed for a header that cannot be decoded. To read the header of a
+// connection, use NewConn, which keeps the bytes that follow it.
+func Decode(b []byte) (*Header, int, error) {
+	h, n, _, err := decode(b)
 	if err != nil {
 		return nil, 0, err
 	}
 	return h, n, nil
 }
 
-// Read reads a PROXY protocol header from r. Its buffer must hold the whole
-// of a version 1 header, at most 107 bytes or, with the padding some senders
-// add, 256; the default 4096 does. Version 2 headers of any size are read.
-//
-// If the stream does not start with a header, Read returns ErrNoHeader and
-// consumes nothing, so the bytes can still be read from r. A valid header is
-// consumed. After an error wrapping ErrMalformed, and after any error while
-// reading a version 2 header larger than r's buffer, the stream position is
-// unspecified. Read only blocks while the bytes received so far are the start
-// of a header.
-func Read(r *bufio.Reader) (*Header, error) {
-	for need := 1; ; {
-		// Parse everything already buffered, so a header that has arrived
-		// whole is parsed once instead of once per byte.
-		data, err := r.Peek(max(need, r.Buffered()))
-		if errors.Is(err, bufio.ErrBufferFull) {
-			if data[0] != v2Signature[0] {
-				return nil, malformed("version 1 header longer than the %d-byte read buffer", r.Size())
-			}
-			// A version 2 header larger than r's buffer; its length is known.
-			// It is read as it arrives rather than into a buffer of the
-			// length it claims, so that a few bytes cannot hold 64 KiB.
-			buf, err := io.ReadAll(io.LimitReader(r, int64(need)))
-			if err == nil && len(buf) < need {
-				err = io.ErrUnexpectedEOF
-			}
-			if err != nil {
-				return nil, unexpectedEOF(err)
-			}
-			h, _, _, err := parse(buf)
-			return h, err
-		}
-		h, n, more, perr := parse(data)
-		switch {
-		case perr == nil:
-			_, _ = r.Discard(n)
-			return h, nil
-		case !errors.Is(perr, io.ErrUnexpectedEOF):
-			return nil, perr
-		case err != nil:
-			if len(data) == 0 {
-				return nil, err
-			}
-			return nil, unexpectedEOF(err)
-		}
-		need = more
-	}
-}
-
-// parse is Parse that also returns, for an incomplete header, the number of
+// decode is Decode that also returns, for an incomplete header, the number of
 // bytes needed before it can make progress.
-func parse(b []byte) (h *Header, n, need int, err error) {
+func decode(b []byte) (h *Header, n, need int, err error) {
 	if len(b) == 0 {
 		return nil, 0, 1, io.ErrUnexpectedEOF
 	}
@@ -96,22 +47,22 @@ func parse(b []byte) (h *Header, n, need int, err error) {
 		return nil, 0, len(b) + 1, io.ErrUnexpectedEOF
 	}
 	if sig == v2Signature {
-		return parseV2(b)
+		return decodeV2(b)
 	}
-	return parseV1(b)
+	return decodeV1(b)
 }
 
 func malformed(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrMalformed}, args...)...)
 }
 
-// parseV1 goes beyond the specification for non-standard senders. It accepts
+// decodeV1 goes beyond the specification for non-standard senders. It accepts
 // a line ending in a bare LF, runs of spaces and any letter case. Tokens
 // starting with TCP or UDP, such as UDP4 and UDP6, carry addresses, which may
 // differ in family from the token, have IPv6 zones and ports with leading
 // zeros, and be followed by extra fields. Lines may be up to maxV1Line bytes.
 // Other tokens are treated as UNKNOWN.
-func parseV1(b []byte) (*Header, int, int, error) {
+func decodeV1(b []byte) (*Header, int, int, error) {
 	end := bytes.IndexByte(b[:min(len(b), maxV1Line)], '\n')
 	if end < 0 {
 		if len(b) >= maxV1Line {
@@ -167,12 +118,12 @@ func parseV1Addr(ip, port string) (netip.AddrPort, bool) {
 	return netip.AddrPortFrom(addr, uint16(p)), true
 }
 
-// parseV2 ignores the version nibble and, so that the connection's own
+// decodeV2 ignores the version nibble and, so that the connection's own
 // addresses apply, treats commands other than PROXY as LOCAL and leaves the
 // addresses unset for unknown families and transports and for an address
 // block too short for its family. TLVs end at the first truncated one, and
 // NOOP padding is dropped.
-func parseV2(b []byte) (*Header, int, int, error) {
+func decodeV2(b []byte) (*Header, int, int, error) {
 	if len(b) < v2HeadLen {
 		return nil, 0, v2HeadLen, io.ErrUnexpectedEOF
 	}
@@ -193,13 +144,13 @@ func parseV2(b []byte) (*Header, int, int, error) {
 	if !h.Local && (proto == 1 || proto == 2) {
 		h.Source, h.Destination = v2Addrs(af, proto, payload[:addrLen])
 	}
-	h.TLVs = parseTLVs(payload[addrLen:])
+	h.TLVs = decodeTLVs(payload[addrLen:])
 	return h, n, 0, nil
 }
 
-// parseTLVs returns a copy of the fields in b without NOOP padding, up to
+// decodeTLVs returns a copy of the fields in b without NOOP padding, up to
 // the first truncated one, in one allocation.
-func parseTLVs(b []byte) TLVs {
+func decodeTLVs(b []byte) TLVs {
 	size := 0
 	for _, v := range TLVs(b).All() {
 		size += 3 + len(v)
@@ -209,7 +160,7 @@ func parseTLVs(b []byte) TLVs {
 	}
 	f := make(TLVs, 0, size)
 	for t, v := range TLVs(b).All() {
-		f, _ = f.Append(t, v) // a parsed value fits
+		f, _ = f.Append(t, v) // a decoded value fits
 	}
 	return f
 }

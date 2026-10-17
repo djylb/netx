@@ -13,15 +13,15 @@ func TestPublicConnectionHelpers(t *testing.T) {
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1234}
 	local := &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 8080}
 	baseConn := &countedCloseConn{}
-	overridden := NewAddrOverrideConn(baseConn, remote, local)
-	if got := RawConnOf(overridden); got != baseConn {
-		t.Fatalf("RawConnOf() = %v, want base conn", got)
+	overridden := NewAddrOverrideConn(baseConn, local, remote)
+	if got := InnermostConn(overridden); got != baseConn {
+		t.Fatalf("InnermostConn() = %v, want base conn", got)
 	}
 	if overridden.RemoteAddr() != remote || overridden.LocalAddr() != local {
 		t.Fatalf("addresses = %v -> %v, want %v -> %v", overridden.LocalAddr(), overridden.RemoteAddr(), local, remote)
 	}
 
-	remoteOnly := NewAddrOverrideConn(&countedCloseConn{}, net.TCPAddrFromAddrPort(netip.MustParseAddrPort("203.0.113.10:443")), nil)
+	remoteOnly := NewAddrOverrideConn(&countedCloseConn{}, nil, net.TCPAddrFromAddrPort(netip.MustParseAddrPort("203.0.113.10:443")))
 	if remoteOnly.RemoteAddr().String() != "203.0.113.10:443" {
 		t.Fatalf("RemoteAddr() = %q", remoteOnly.RemoteAddr().String())
 	}
@@ -30,9 +30,9 @@ func TestPublicConnectionHelpers(t *testing.T) {
 	}
 
 	base := &countedCloseConn{}
-	chain := NewFramedConn(NewTimeoutConn(NewTeeConn(base, 0), time.Second))
-	if got := RawConnOf(chain); got != base {
-		t.Fatalf("RawConnOf(wrapper chain) = %v, want base conn", got)
+	chain := NewFramedConn(NewTimeoutConn(NewRecordingConn(base, 0), time.Second))
+	if got := InnermostConn(chain); got != base {
+		t.Fatalf("InnermostConn(wrapper chain) = %v, want base conn", got)
 	}
 
 	wrapped := WrapConn(base, base)
@@ -43,11 +43,11 @@ func TestPublicConnectionHelpers(t *testing.T) {
 		t.Fatalf("base Close() calls = %d, want 1", calls)
 	}
 
-	tee := NewTeeConn(&teeTestConn{readBuf: bytes.NewBufferString("xy")}, 1)
+	tee := NewRecordingConn(&teeTestConn{readBuf: bytes.NewBufferString("xy")}, 1)
 	buf := make([]byte, 2)
 	n, err := tee.Read(buf)
 	if err != nil && err != io.EOF {
-		t.Fatalf("NewTeeConn Read() error = %v", err)
+		t.Fatalf("NewRecordingConn Read() error = %v", err)
 	}
 	if n != 2 || string(tee.Buffered()) != "x" {
 		t.Fatalf("tee read = %d buffered=%q, want 2 and %q", n, string(tee.Buffered()), "x")

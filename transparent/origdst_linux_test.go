@@ -4,10 +4,11 @@ package transparent
 
 import (
 	"errors"
-	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -16,50 +17,35 @@ import (
 	"github.com/djylb/netx"
 )
 
-type stubTransparentConn struct {
-	local net.Addr
-}
-
-func (c stubTransparentConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (c stubTransparentConn) Write([]byte) (int, error)        { return 0, io.EOF }
-func (c stubTransparentConn) Close() error                     { return nil }
-func (c stubTransparentConn) LocalAddr() net.Addr              { return c.local }
-func (c stubTransparentConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
-func (c stubTransparentConn) SetDeadline(time.Time) error      { return nil }
-func (c stubTransparentConn) SetReadDeadline(time.Time) error  { return nil }
-func (c stubTransparentConn) SetWriteDeadline(time.Time) error { return nil }
-
 func TestDestinationFromLocalAddr(t *testing.T) {
-	addr, err := destinationFromLocalAddr(&net.TCPAddr{
-		IP:   net.ParseIP("203.0.113.10"),
-		Port: 8443,
-	})
-	if err != nil {
-		t.Fatalf("destinationFromLocalAddr error = %v", err)
-	}
-	if addr.String() != "203.0.113.10:8443" {
-		t.Fatalf("destinationFromLocalAddr = %q, want %q", addr.String(), "203.0.113.10:8443")
-	}
-}
-
-func TestOriginalDestinationFallsBackToLocalAddrForTransparentConn(t *testing.T) {
-	addr, err := OriginalDestination(stubTransparentConn{
-		local: &net.TCPAddr{
-			IP:   net.ParseIP("198.51.100.25"),
-			Port: 443,
-		},
-	})
-	if err != nil {
-		t.Fatalf("OriginalDestination error = %v", err)
-	}
-	if addr.String() != "198.51.100.25:443" {
-		t.Fatalf("OriginalDestination = %q, want %q", addr.String(), "198.51.100.25:443")
+	for _, tt := range []struct {
+		addr net.Addr
+		want string
+	}{
+		{&net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8443}, "203.0.113.10:8443"},
+		{&net.TCPAddr{IP: net.ParseIP("::ffff:203.0.113.10"), Port: 8443}, "203.0.113.10:8443"},
+		{&net.TCPAddr{IP: net.ParseIP("2001:db8::25"), Port: 9443}, "[2001:db8::25]:9443"},
+		{&net.TCPAddr{IP: net.ParseIP("fe80::25"), Port: 9443, Zone: "eth0"}, "[fe80::25%eth0]:9443"},
+	} {
+		addr, err := destinationFromLocalAddr(tt.addr)
+		if err != nil || addr.String() != tt.want {
+			t.Errorf("destinationFromLocalAddr(%v) = %v, %v; want %s", tt.addr, addr, err, tt.want)
+		}
 	}
 }
 
 func TestDestinationFromLocalAddrRejectsInvalidAddr(t *testing.T) {
-	if _, err := destinationFromLocalAddr(&net.TCPAddr{}); err == nil {
-		t.Fatal("expected error for empty local address")
+	for _, addr := range []net.Addr{
+		&net.TCPAddr{},
+		&net.TCPAddr{IP: net.IPv4zero, Port: 80},
+		&net.TCPAddr{IP: net.IPv4(192, 0, 2, 1)},
+		&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 80},
+		(*net.TCPAddr)(nil),
+		nil,
+	} {
+		if dst, err := destinationFromLocalAddr(addr); err == nil {
+			t.Errorf("destinationFromLocalAddr(%v) = %v, want an error", addr, dst)
+		}
 	}
 }
 
@@ -81,25 +67,24 @@ func TestSockaddrPortIsNetworkByteOrder(t *testing.T) {
 	}
 }
 
-func TestTCPAddrFromSockaddrInet4(t *testing.T) {
+func TestAddrPortFromSockaddrInet4(t *testing.T) {
 	sa := syscall.RawSockaddrInet4{Family: syscall.AF_INET, Addr: [4]byte{203, 0, 113, 10}}
 	setSockaddrPort(&sa.Port, 8080)
-	if got := tcpAddrFromSockaddrInet4(&sa).String(); got != "203.0.113.10:8080" {
-		t.Fatalf("tcpAddrFromSockaddrInet4 = %q, want %q", got, "203.0.113.10:8080")
+	if got := addrPortFromSockaddrInet4(&sa).String(); got != "203.0.113.10:8080" {
+		t.Fatalf("addrPortFromSockaddrInet4 = %q, want %q", got, "203.0.113.10:8080")
 	}
 }
 
-func TestTCPAddrFromSockaddrInet6(t *testing.T) {
+func TestAddrPortFromSockaddrInet6(t *testing.T) {
 	sa := syscall.RawSockaddrInet6{Family: syscall.AF_INET6}
 	copy(sa.Addr[:], net.ParseIP("2001:db8::25"))
 	setSockaddrPort(&sa.Port, 443)
-	addr := tcpAddrFromSockaddrInet6(&sa)
-	if got := addr.String(); got != "[2001:db8::25]:443" {
-		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, "[2001:db8::25]:443")
+	if got := addrPortFromSockaddrInet6(&sa).String(); got != "[2001:db8::25]:443" {
+		t.Fatalf("addrPortFromSockaddrInet6 = %q, want %q", got, "[2001:db8::25]:443")
 	}
-	sa.Addr[15] = 0x26
-	if addr.IP[15] != 0x25 {
-		t.Fatal("tcpAddrFromSockaddrInet6 aliases the sockaddr buffer")
+	copy(sa.Addr[:], net.ParseIP("::ffff:192.0.2.1"))
+	if got := addrPortFromSockaddrInet6(&sa).String(); got != "192.0.2.1:443" {
+		t.Fatalf("addrPortFromSockaddrInet6(mapped) = %q, want %q", got, "192.0.2.1:443")
 	}
 }
 
@@ -113,21 +98,21 @@ func testInterface(t *testing.T) (string, uint32) {
 	return ifs[0].Name, uint32(ifs[0].Index)
 }
 
-func TestTCPAddrFromSockaddrInet6Zone(t *testing.T) {
+func TestAddrPortFromSockaddrInet6Zone(t *testing.T) {
 	name, index := testInterface(t)
 	sa := syscall.RawSockaddrInet6{Family: syscall.AF_INET6, Scope_id: index}
 	copy(sa.Addr[:], net.ParseIP("fe80::25"))
 	setSockaddrPort(&sa.Port, 443)
-	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[fe80::25%"+name+"]:443"; got != want {
-		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	if got, want := addrPortFromSockaddrInet6(&sa).String(), "[fe80::25%"+name+"]:443"; got != want {
+		t.Fatalf("addrPortFromSockaddrInet6 = %q, want %q", got, want)
 	}
 	sa.Scope_id = 0x7ffffff0 // no such interface
-	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[fe80::25%2147483632]:443"; got != want {
-		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	if got, want := addrPortFromSockaddrInet6(&sa).String(), "[fe80::25%2147483632]:443"; got != want {
+		t.Fatalf("addrPortFromSockaddrInet6 = %q, want %q", got, want)
 	}
 	copy(sa.Addr[:], net.ParseIP("2001:db8::25"))
-	if got, want := tcpAddrFromSockaddrInet6(&sa).String(), "[2001:db8::25]:443"; got != want {
-		t.Fatalf("tcpAddrFromSockaddrInet6 = %q, want %q", got, want)
+	if got, want := addrPortFromSockaddrInet6(&sa).String(), "[2001:db8::25]:443"; got != want {
+		t.Fatalf("addrPortFromSockaddrInet6 = %q, want %q", got, want)
 	}
 }
 
@@ -161,7 +146,7 @@ func TestOriginalDestinationOfDirectConn(t *testing.T) {
 	for _, tt := range []struct {
 		network string
 		address string
-		lookup  func(fd int) (*net.TCPAddr, error)
+		lookup  func(fd int) (netip.AddrPort, error)
 	}{
 		{network: "tcp4", address: "127.0.0.1:0", lookup: originalDestinationIPv4},
 		{network: "tcp6", address: "[::1]:0", lookup: originalDestinationIPv6},
@@ -176,20 +161,21 @@ func TestOriginalDestinationOfDirectConn(t *testing.T) {
 
 			// A connection that conntrack tracks without NAT reports its own
 			// destination; without a conntrack entry the lookup fails and the
-			// local address is used. Either way the result is the listener.
-			dst, err := OriginalDestination(server)
+			// local address is used. Either way the result is the listener,
+			// an address of this host, so not redirected.
+			dst, redirected, err := OriginalDestination(server)
 			if err != nil {
 				t.Fatalf("OriginalDestination error = %v", err)
 			}
-			if dst.String() != ln.Addr().String() {
-				t.Fatalf("OriginalDestination = %v, want %v", dst, ln.Addr())
+			if dst.String() != ln.Addr().String() || redirected {
+				t.Fatalf("OriginalDestination = %v, %v; want %v, false", dst, redirected, ln.Addr())
 			}
 
 			raw, err := server.(syscall.Conn).SyscallConn()
 			if err != nil {
 				t.Fatalf("SyscallConn error = %v", err)
 			}
-			var lookupDst *net.TCPAddr
+			var lookupDst netip.AddrPort
 			var lookupErr error
 			if err := raw.Control(func(fd uintptr) {
 				lookupDst, lookupErr = tt.lookup(int(fd))
@@ -209,6 +195,36 @@ func TestOriginalDestinationOfDirectConn(t *testing.T) {
 	}
 }
 
+// An IPv4 connection to a dual-stack socket reports an IPv4-mapped local
+// address and is looked up with SO_ORIGINAL_DST.
+func TestOriginalDestinationOfDualStackConn(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::]:0")
+	if err != nil {
+		t.Skipf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		accepted <- c
+	}()
+	client, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server := <-accepted
+	if server == nil {
+		t.Fatal("Accept failed")
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	dst, redirected, err := OriginalDestination(server)
+	if want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port)); err != nil || dst != want || redirected {
+		t.Fatalf("OriginalDestination = %v, %v, %v; want %v, false", dst, redirected, err, want)
+	}
+}
+
 func TestOriginalDestinationUnwrapsConn(t *testing.T) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -220,13 +236,13 @@ func TestOriginalDestinationUnwrapsConn(t *testing.T) {
 	// The wrapper is not a syscall.Conn and reports another local address;
 	// the lookup must still use the socket beneath it.
 	fake := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1}
-	wrapped := netx.NewTimeoutConn(netx.NewAddrOverrideConn(server, nil, fake), time.Minute)
-	dst, err := OriginalDestination(wrapped)
+	wrapped := netx.NewTimeoutConn(netx.NewAddrOverrideConn(server, fake, nil), time.Minute)
+	dst, redirected, err := OriginalDestination(wrapped)
 	if err != nil {
 		t.Fatalf("OriginalDestination error = %v", err)
 	}
-	if dst.String() != ln.Addr().String() {
-		t.Fatalf("OriginalDestination = %v, want %v", dst, ln.Addr())
+	if dst.String() != ln.Addr().String() || redirected {
+		t.Fatalf("OriginalDestination = %v, %v; want %v, false", dst, redirected, ln.Addr())
 	}
 }
 
@@ -239,7 +255,7 @@ func TestOriginalDestinationOfClosedConn(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	_, server := dialAccepted(t, ln)
 	_ = server.Close()
-	if dst, err := OriginalDestination(server); err == nil {
+	if dst, _, err := OriginalDestination(server); err == nil {
 		t.Fatalf("OriginalDestination(closed) = %v, want an error", dst)
 	}
 }
@@ -288,13 +304,54 @@ func TestOriginalDestinationOfRedirectedConn(t *testing.T) {
 				t.Fatal("Accept failed")
 			}
 			t.Cleanup(func() { _ = server.Close() })
-			dst, err := OriginalDestination(server)
+			dst, redirected, err := OriginalDestination(server)
 			if err != nil {
 				t.Fatalf("OriginalDestination error = %v", err)
 			}
-			if want, _ := net.ResolveTCPAddr("tcp", tt.target); !dst.IP.Equal(want.IP) || dst.Port != want.Port {
-				t.Fatalf("OriginalDestination = %v, want %v", dst, tt.target)
+			if dst != netip.MustParseAddrPort(tt.target) || !redirected {
+				t.Fatalf("OriginalDestination = %v, %v; want %v, true", dst, redirected, tt.target)
 			}
 		})
+	}
+}
+
+// TestOriginalDestinationOfNATToOwnPort maps another address of this host to
+// a listener on the same port, as a port mapping does: forwarding to the
+// original destination would reach the listener again, so it is direct. Like
+// TestOriginalDestinationOfRedirectedConn it changes the firewall.
+func TestOriginalDestinationOfNATToOwnPort(t *testing.T) {
+	if os.Getenv("NETX_TEST_IPTABLES") != "1" || os.Geteuid() != 0 {
+		t.Skip("needs root and NETX_TEST_IPTABLES=1")
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	rule := []string{"OUTPUT", "-t", "nat", "-p", "tcp", "-d", "127.0.0.2", "--dport", port, "-j", "DNAT", "--to-destination", ln.Addr().String()}
+	if out, err := exec.Command("iptables", append([]string{"-A"}, rule...)...).CombinedOutput(); err != nil {
+		t.Fatalf("iptables: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("iptables", append([]string{"-D"}, rule...)...).Run() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		accepted <- c
+	}()
+	target := net.JoinHostPort("127.0.0.2", port)
+	client, err := net.DialTimeout("tcp4", target, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server := <-accepted
+	if server == nil {
+		t.Fatal("Accept failed")
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	dst, redirected, err := OriginalDestination(server)
+	if err != nil || dst != netip.MustParseAddrPort(target) || redirected {
+		t.Fatalf("OriginalDestination = %v, %v, %v; want %v, false", dst, redirected, err, target)
 	}
 }

@@ -4,10 +4,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -16,7 +19,7 @@ const (
 	v2HeadLen   = 16
 	// maxV1Len is the longest version 1 header, CRLF included.
 	maxV1Len = 107
-	// maxV1Line is the longest version 1 header the parser accepts, leaving
+	// maxV1Line is the longest version 1 header Decode accepts, leaving
 	// room for the padding of non-standard senders.
 	maxV1Line = 256
 	// unixPathLen is the size of each AF_UNIX address in a version 2 header.
@@ -24,11 +27,11 @@ const (
 )
 
 var (
-	// ErrNoHeader is returned by Parse and Read for data that does not start
-	// with a PROXY protocol header.
+	// ErrNoHeader is returned by Decode for data that does not start with a
+	// PROXY protocol header, and by a Conn whose policy requires one.
 	ErrNoHeader = errors.New("proxyproto: no PROXY protocol header")
 	// ErrMalformed reports a header that starts with a PROXY protocol
-	// signature but cannot be parsed even leniently: a version 1 TCP or UDP
+	// signature but cannot be decoded even leniently: a version 1 TCP or UDP
 	// line whose addresses do not parse, or one longer than 256 bytes.
 	ErrMalformed = errors.New("proxyproto: malformed PROXY protocol header")
 )
@@ -46,6 +49,23 @@ const (
 	TLVSSL       TLVType = 0x20 // TLS information of the client connection
 	TLVNetNS     TLVType = 0x30 // network namespace name
 )
+
+// TLV type ranges that the specification leaves to applications: custom
+// types for an application's own fields, such as who a connection belongs
+// to, and experimental ones. A receiver must accept fields only from peers
+// it trusts, as for the addresses; see Listener.PolicyFor and TrustPrefixes.
+const (
+	TLVCustomMin       TLVType = 0xE0
+	TLVCustomMax       TLVType = 0xEF
+	TLVExperimentalMin TLVType = 0xF0
+	TLVExperimentalMax TLVType = 0xF7
+)
+
+// IsCustom reports whether t is in the range for application fields.
+func (t TLVType) IsCustom() bool { return t >= TLVCustomMin && t <= TLVCustomMax }
+
+// IsExperimental reports whether t is in the range for experimental fields.
+func (t TLVType) IsExperimental() bool { return t >= TLVExperimentalMin && t <= TLVExperimentalMax }
 
 func (t TLVType) String() string {
 	switch t {
@@ -70,7 +90,7 @@ func (t TLVType) String() string {
 
 // TLVs holds version 2 type-length-value fields in their wire encoding: a
 // type byte, a 2-byte big-endian length and the value, for each in header
-// order. Build them with Append; a parsed header keeps a copy of its fields
+// order. Build them with Append; a decoded header keeps a copy of its fields
 // without NOOP padding and ends them at the first truncated one, so it takes
 // no more memory than the header did however many fields it has.
 type TLVs []byte
@@ -129,14 +149,15 @@ func (f TLVs) wellFormed() bool {
 	return true
 }
 
-// Header is a PROXY protocol header.
+// Header is a PROXY protocol header. Build one to send with NewHeader or
+// HeaderFromConn, or as a literal for a Local header.
 type Header struct {
 	// Version is V1 for the text format and V2 for the binary format.
 	Version Version
 	// Local marks a version 2 LOCAL command, which a proxy sends for its own
 	// connections such as health checks, and a version 1 UNKNOWN header.
-	// Unknown version 2 commands and version 1 protocols are parsed as Local.
-	// The connection's own addresses apply.
+	// Unknown version 2 commands and version 1 protocols are decoded as
+	// Local. The connection's own addresses apply.
 	Local bool
 	// Source and Destination are the client and server addresses of the
 	// proxied connection: *net.TCPAddr, *net.UDPAddr or *net.UnixAddr. They
@@ -170,94 +191,171 @@ func udpAddr(a net.Addr) net.Addr {
 
 // AppendBinary appends the encoded header to b.
 //
-// Source and Destination must be both *net.TCPAddr, both *net.UDPAddr or,
-// for version 2, both *net.UnixAddr; other pairs and Local are encoded as
-// "PROXY UNKNOWN" (version 1) or a LOCAL command (version 2). Version 1 cannot
-// carry UDP or TLVs: UDP pairs use the TCP4 and TCP6 tokens, and TLVs are an
-// error. Version 2 also fails when TLVs is not a sequence of whole fields or
-// the address and TLV block exceeds 65535 bytes. The address rules otherwise
-// match V1Header and V2Header.
+// A Local header is encoded without addresses, as "PROXY UNKNOWN" (version
+// 1) or a LOCAL command (version 2). Otherwise Source and Destination must be
+// as NewHeader returns them, without its rewriting of the destination: both
+// *net.TCPAddr or both *net.UDPAddr with IP addresses, or, for version 2,
+// both *net.UnixAddr of the same kind with names of at most 108 bytes. Both
+// nil, as decoded from a header of an unknown family, is encoded as "PROXY
+// UNKNOWN" or a PROXY command of the AF_UNSPEC family. Version 1 has no UDP
+// token, so UDP pairs use the TCP4 and TCP6 tokens. AppendBinary fails for
+// other addresses, for TLVs in version 1, and in version 2 for TLVs that are
+// not a sequence of whole fields or an address and TLV block of more than
+// 65535 bytes. On failure b is returned unchanged.
 func (h *Header) AppendBinary(b []byte) ([]byte, error) {
+	a, err := h.addrs()
+	if err != nil {
+		return b, err
+	}
 	switch h.Version {
 	case V1:
 		if len(h.TLVs) > 0 {
-			return b, fmt.Errorf("proxyproto: version 1 cannot carry TLVs")
+			return b, errors.New("proxyproto: version 1 cannot carry TLVs")
 		}
-		if h.Local {
+		if a.kind == addrNone {
 			return append(b, "PROXY UNKNOWN\r\n"...), nil
 		}
-		return appendV1(b, h.Source, h.Destination), nil
-	case V2:
-		return appendV2(b, h)
+		return appendV1(slices.Grow(b, maxV1Len), a.ip), nil
 	default:
-		return b, fmt.Errorf("proxyproto: unknown version %d", h.Version)
+		return appendV2(b, h, a)
 	}
 }
 
-func appendV1(b []byte, src, dst net.Addr) []byte {
-	meta, ok := buildProxyAddrMeta(src, dst)
-	if !ok {
-		return append(b, "PROXY UNKNOWN\r\n"...)
+// WriteTo writes the encoded header to w with one Write, so that it goes out
+// in one segment ahead of the proxied stream or as a datagram of its own. It
+// fails as AppendBinary does, without writing, and with io.ErrShortWrite for
+// a Write that writes less without an error.
+func (h *Header) WriteTo(w io.Writer) (int64, error) {
+	bp := headerPool.Get().(*[]byte)
+	defer headerPool.Put(bp)
+	b, err := h.AppendBinary((*bp)[:0])
+	if err != nil {
+		return 0, err
 	}
+	n, err := w.Write(b)
+	if err == nil && n < len(b) {
+		err = io.ErrShortWrite
+	}
+	return int64(n), err
+}
+
+// headerPool holds the buffers that WriteTo encodes into; a larger header,
+// with many TLVs, takes a buffer of its own.
+var headerPool = sync.Pool{New: func() any {
+	b := make([]byte, 0, 256)
+	return &b
+}}
+
+// Kinds of address blocks.
+const (
+	addrNone = iota
+	addrIP
+	addrUnix
+)
+
+// headerAddrs is the address block of an encoded header.
+type headerAddrs struct {
+	ip               ipPair
+	unixSrc, unixDst *net.UnixAddr
+	kind             uint8
+}
+
+// addrs checks h's version and returns the address block it encodes.
+func (h *Header) addrs() (headerAddrs, error) {
+	if h.Version != V1 && h.Version != V2 {
+		return headerAddrs{}, fmt.Errorf("proxyproto: unknown version %d", h.Version)
+	}
+	if h.Local || (h.Source == nil && h.Destination == nil) {
+		return headerAddrs{}, nil
+	}
+	if p, ok, err := newIPPair(h.Source, h.Destination); ok || err != nil {
+		return headerAddrs{ip: p, kind: addrIP}, err
+	}
+	s, ok1 := h.Source.(*net.UnixAddr)
+	d, ok2 := h.Destination.(*net.UnixAddr)
+	switch {
+	case !ok1 || !ok2:
+		return headerAddrs{}, fmt.Errorf("proxyproto: unsupported address pair %T and %T", h.Source, h.Destination)
+	case s == nil || d == nil:
+		return headerAddrs{}, errNilAddr
+	case h.Version == V1:
+		return headerAddrs{}, errors.New("proxyproto: version 1 cannot carry Unix addresses")
+	case (s.Net == "unixgram") != (d.Net == "unixgram"):
+		return headerAddrs{}, fmt.Errorf("proxyproto: Unix addresses of networks %q and %q", s.Net, d.Net)
+	case len(s.Name) > unixPathLen || len(d.Name) > unixPathLen:
+		return headerAddrs{}, fmt.Errorf("proxyproto: Unix address name longer than %d bytes", unixPathLen)
+	}
+	return headerAddrs{unixSrc: s, unixDst: d, kind: addrUnix}, nil
+}
+
+func appendV1(b []byte, p ipPair) []byte {
 	b = append(b, v1Prefix...)
-	b = append(b, meta.v1Protocol...)
+	if p.is4() {
+		b = append(b, "TCP4 "...)
+	} else {
+		b = append(b, "TCP6 "...)
+	}
+	b = p.src.Addr().AppendTo(b)
 	b = append(b, ' ')
-	b = appendIPText(b, meta.srcIP)
+	b = p.dst.Addr().AppendTo(b)
 	b = append(b, ' ')
-	b = appendIPText(b, meta.dstIP)
+	b = strconv.AppendUint(b, uint64(p.src.Port()), 10)
 	b = append(b, ' ')
-	b = strconv.AppendUint(b, uint64(meta.srcPort), 10)
-	b = append(b, ' ')
-	b = strconv.AppendUint(b, uint64(meta.dstPort), 10)
+	b = strconv.AppendUint(b, uint64(p.dst.Port()), 10)
 	return append(b, '\r', '\n')
 }
 
-func appendV2(b []byte, h *Header) ([]byte, error) {
-	start := len(b)
-	b = append(b, v2Signature...)
-	b = append(b, 0x20, 0, 0, 0) // version and command, family, length
-
-	if !h.Local {
-		if meta, ok := buildProxyAddrMeta(h.Source, h.Destination); ok {
-			b[start+12] = 0x21
-			b[start+13] = meta.famProto
-			b = appendV2IPs(b, meta)
-		} else if src, dst, ok := unixPair(h.Source, h.Destination); ok {
-			b[start+12] = 0x21
-			b[start+13] = 0x31
-			if src.Net == "unixgram" {
-				b[start+13] = 0x32
-			}
-			b = appendUnixPath(b, src.Name)
-			b = appendUnixPath(b, dst.Name)
-		}
-	}
+func appendV2(b []byte, h *Header, a headerAddrs) ([]byte, error) {
 	if !h.TLVs.wellFormed() {
-		return b[:start], fmt.Errorf("proxyproto: TLVs cut short")
+		return b, errors.New("proxyproto: TLVs cut short")
 	}
-	b = append(b, h.TLVs...)
-	n := len(b) - start - v2HeadLen
+	var cmd, famProto byte = 0x20, 0x00 // LOCAL, AF_UNSPEC
+	size := 0
+	if !h.Local {
+		cmd = 0x21
+	}
+	switch a.kind {
+	case addrIP:
+		famProto, size = 0x11, 12
+		if !a.ip.is4() {
+			famProto, size = 0x21, 36
+		}
+		if a.ip.udp {
+			famProto++
+		}
+	case addrUnix:
+		famProto, size = 0x31, 2*unixPathLen
+		if a.unixSrc.Net == "unixgram" {
+			famProto = 0x32
+		}
+	case addrNone:
+		// AF_UNSPEC, without addresses.
+	}
+	n := size + len(h.TLVs)
 	if n > 0xffff {
-		return b[:start], fmt.Errorf("proxyproto: header of %d bytes", v2HeadLen+n)
+		return b, fmt.Errorf("proxyproto: header of %d bytes", v2HeadLen+n)
 	}
-	binary.BigEndian.PutUint16(b[start+14:], uint16(n))
-	return b, nil
+	b = slices.Grow(b, v2HeadLen+n)
+	b = append(b, v2Signature...)
+	b = append(b, cmd, famProto)
+	b = binary.BigEndian.AppendUint16(b, uint16(n))
+	switch a.kind {
+	case addrIP:
+		b = appendV2IPs(b, a.ip)
+	case addrUnix:
+		b = appendUnixPath(b, a.unixSrc.Name)
+		b = appendUnixPath(b, a.unixDst.Name)
+	case addrNone:
+		// No address block.
+	}
+	return append(b, h.TLVs...), nil
 }
 
-func appendV2IPs(b []byte, meta proxyAddrMeta) []byte {
-	b = append(b, meta.srcIP...)
-	b = append(b, meta.dstIP...)
-	b = binary.BigEndian.AppendUint16(b, meta.srcPort)
-	return binary.BigEndian.AppendUint16(b, meta.dstPort)
-}
-
-func unixPair(src, dst net.Addr) (*net.UnixAddr, *net.UnixAddr, bool) {
-	s, ok1 := src.(*net.UnixAddr)
-	d, ok2 := dst.(*net.UnixAddr)
-	if !ok1 || !ok2 || s == nil || d == nil || len(s.Name) > unixPathLen || len(d.Name) > unixPathLen {
-		return nil, nil, false
-	}
-	return s, d, true
+func appendV2IPs(b []byte, p ipPair) []byte {
+	b = append(b, p.src.Addr().AsSlice()...)
+	b = append(b, p.dst.Addr().AsSlice()...)
+	b = binary.BigEndian.AppendUint16(b, p.src.Port())
+	return binary.BigEndian.AppendUint16(b, p.dst.Port())
 }
 
 // appendUnixPath appends name as a sun_path field, with a Linux abstract

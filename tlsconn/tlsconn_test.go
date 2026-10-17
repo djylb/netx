@@ -36,10 +36,10 @@ func TestTLSClientClearsHandshakeDeadline(t *testing.T) {
 		errCh <- err
 	}()
 
-	tlsClient, err := Client(context.Background(), clientConn, &tls.Config{
+	tlsClient, err := Client(timeoutContext(t, 300*time.Millisecond), clientConn, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
-	}, 300*time.Millisecond)
+	})
 	if err != nil {
 		t.Fatalf("Client() error = %v", err)
 	}
@@ -61,7 +61,16 @@ func TestTLSClientClearsHandshakeDeadline(t *testing.T) {
 	}
 }
 
-func TestTLSClientNormalizesNonPositiveTimeout(t *testing.T) {
+// timeoutContext returns a context that ends after d, canceled when the test
+// ends.
+func timeoutContext(t *testing.T, d time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func TestTLSClientWithoutContextDeadline(t *testing.T) {
 	cert := testSelfSignedCert(t)
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -81,7 +90,7 @@ func TestTLSClientNormalizesNonPositiveTimeout(t *testing.T) {
 	tlsClient, err := Client(context.Background(), clientConn, &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "example.com",
-	}, 0)
+	})
 	if err != nil {
 		t.Fatalf("Client() error = %v", err)
 	}
@@ -121,9 +130,9 @@ func TestTLSClientBoundsHandshakeWhenDeadlinesIgnored(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, serverConn) }()
 
 	started := time.Now()
-	tlsClient, err := Client(context.Background(), &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
+	tlsClient, err := Client(timeoutContext(t, 200*time.Millisecond), &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
 		InsecureSkipVerify: true,
-	}, 200*time.Millisecond)
+	})
 	elapsed := time.Since(started)
 	if err == nil {
 		_ = tlsClient.Close()
@@ -159,7 +168,7 @@ func TestTLSHandshakeWithoutDeadlineSupport(t *testing.T) {
 	go func() {
 		tc, err := Server(context.Background(), &deadlineUnsupportedConn{Conn: serverConn}, &tls.Config{
 			Certificates: []tls.Certificate{cert},
-		}, time.Second)
+		})
 		if err == nil {
 			_, err = tc.Write([]byte("ok"))
 		}
@@ -167,7 +176,7 @@ func TestTLSHandshakeWithoutDeadlineSupport(t *testing.T) {
 	}()
 	tlsClient, err := Client(context.Background(), &deadlineUnsupportedConn{Conn: clientConn}, &tls.Config{
 		InsecureSkipVerify: true,
-	}, time.Second)
+	})
 	if err != nil {
 		t.Fatalf("Client() error = %v", err)
 	}
@@ -184,9 +193,9 @@ func TestTLSHandshakeWithoutDeadlineSupport(t *testing.T) {
 	defer func() { _ = serverConn2.Close() }()
 	go func() { _, _ = io.Copy(io.Discard, serverConn2) }()
 	started := time.Now()
-	_, err = Client(context.Background(), &deadlineUnsupportedConn{Conn: clientConn2}, &tls.Config{
+	_, err = Client(timeoutContext(t, 200*time.Millisecond), &deadlineUnsupportedConn{Conn: clientConn2}, &tls.Config{
 		InsecureSkipVerify: true,
-	}, 200*time.Millisecond)
+	})
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
 		t.Fatalf("Client() error = %v after %v, want %v", err, time.Since(started), context.DeadlineExceeded)
 	}
@@ -202,7 +211,7 @@ func TestTLSClientHonorsCanceledContext(t *testing.T) {
 	cancel()
 	_, err := Client(ctx, &deadlineIgnoringConn{Conn: clientConn}, &tls.Config{
 		InsecureSkipVerify: true,
-	}, time.Minute)
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Client() error = %v, want %v", err, context.Canceled)
 	}
@@ -215,7 +224,7 @@ func TestTLSServerAndClient(t *testing.T) {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		tc, err := Server(context.Background(), serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}}, time.Second)
+		tc, err := Server(context.Background(), serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}})
 		if err != nil {
 			serverErr <- err
 			return
@@ -229,7 +238,7 @@ func TestTLSServerAndClient(t *testing.T) {
 		serverErr <- err
 	}()
 
-	tc, err := Client(context.Background(), spy, &tls.Config{InsecureSkipVerify: true}, time.Second)
+	tc, err := Client(context.Background(), spy, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("Client() error = %v", err)
 	}
@@ -263,7 +272,7 @@ func TestTLSClientFailureClosesRaw(t *testing.T) {
 	}()
 
 	// The self-signed certificate does not verify.
-	conn, err := Client(context.Background(), spy, &tls.Config{ServerName: "example.com"}, 2*time.Second)
+	conn, err := Client(context.Background(), spy, &tls.Config{ServerName: "example.com"})
 	if err == nil || conn != nil {
 		t.Fatalf("Client() = %v, %v; want nil and a verification error", conn, err)
 	}
@@ -272,7 +281,7 @@ func TestTLSClientFailureClosesRaw(t *testing.T) {
 	}
 	<-done
 
-	if conn, err := Server(context.Background(), nil, nil, time.Second); !errors.Is(err, net.ErrClosed) || conn != nil {
+	if conn, err := Server(context.Background(), nil, nil); !errors.Is(err, net.ErrClosed) || conn != nil {
 		t.Fatalf("Server(nil) = %v, %v; want nil, %v", conn, err, net.ErrClosed)
 	}
 }
@@ -346,4 +355,99 @@ func testSelfSignedCert(t *testing.T) tls.Certificate {
 		testCert = generateSelfSignedCert(t)
 	})
 	return testCert
+}
+
+// deadlineRecordingConn records the first deadline set on it.
+type deadlineRecordingConn struct {
+	net.Conn
+	mu    sync.Mutex
+	first time.Time
+	set   bool
+}
+
+func (c *deadlineRecordingConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	if !c.set {
+		c.first, c.set = t, true
+	}
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *deadlineRecordingConn) firstDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.first
+}
+
+// pipeToServer returns the client end of a pipe whose other end serves a TLS
+// handshake, recording the deadline that the handshake sets.
+func pipeToServer(t *testing.T) *deadlineRecordingConn {
+	t.Helper()
+	cert := testSelfSignedCert(t)
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() { _ = serverConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close() })
+	go func() {
+		_ = tls.Server(serverConn, &tls.Config{Certificates: []tls.Certificate{cert}}).Handshake()
+	}()
+	return &deadlineRecordingConn{Conn: clientConn}
+}
+
+// The handshake is bounded by the context's deadline, however far, and only
+// a context without one gets DefaultHandshakeTimeout.
+func TestHandshakeDeadlineFromContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	raw := pipeToServer(t)
+	if _, err := Client(ctx, raw, &tls.Config{InsecureSkipVerify: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := raw.firstDeadline(); !got.Equal(want) {
+		t.Fatalf("handshake deadline = %v, want the context's %v", got, want)
+	}
+
+	raw = pipeToServer(t)
+	before := time.Now()
+	if _, err := Client(context.Background(), raw, &tls.Config{InsecureSkipVerify: true}); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	if got := raw.firstDeadline(); got.Before(before.Add(DefaultHandshakeTimeout)) || got.After(after.Add(DefaultHandshakeTimeout)) {
+		t.Fatalf("handshake deadline without a context deadline = %v, want DefaultHandshakeTimeout ahead", time.Until(got))
+	}
+}
+
+// Dialer.HandshakeTimeout bounds the handshake within the context's deadline, and
+// without it the context alone does.
+func TestDialerHandshakeDeadline(t *testing.T) {
+	var raw *deadlineRecordingConn
+	dial := func(ctx context.Context, timeout time.Duration) time.Time {
+		t.Helper()
+		raw = pipeToServer(t)
+		d := &Dialer{
+			Config:           &tls.Config{InsecureSkipVerify: true},
+			HandshakeTimeout: timeout,
+			Forward:          forwardFunc(func(context.Context, string, string) (net.Conn, error) { return raw, nil }),
+		}
+		if _, err := d.DialContext(ctx, "tcp", "localhost:443"); err != nil {
+			t.Fatal(err)
+		}
+		return raw.firstDeadline()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	ctxDeadline, _ := ctx.Deadline()
+	if got := dial(ctx, 0); !got.Equal(ctxDeadline) {
+		t.Fatalf("without HandshakeTimeout: deadline = %v, want the context's %v", got, ctxDeadline)
+	}
+	if got := dial(ctx, 2*time.Hour); !got.Equal(ctxDeadline) {
+		t.Fatalf("with a longer HandshakeTimeout: deadline = %v, want the context's %v", got, ctxDeadline)
+	}
+	before := time.Now()
+	got := dial(ctx, time.Minute)
+	if got.Before(before.Add(time.Minute)) || got.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("with HandshakeTimeout: deadline %v ahead, want a minute", time.Until(got))
+	}
 }

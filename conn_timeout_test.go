@@ -144,67 +144,44 @@ func TestTimeoutConnRefreshDeadlineDoesNotMoveBackward(t *testing.T) {
 	}
 }
 
-func TestNewTimeoutConnNormalizesNonPositiveIdle(t *testing.T) {
-	tests := []struct {
-		name string
-		idle time.Duration
-	}{
-		{name: "zero", idle: 0},
-		{name: "negative", idle: -time.Second},
+// A non-positive idle timeout sets none, so the connection does not time
+// out, and SetIdleTimeout turns one on and off, also for a Read already
+// blocked.
+func TestTimeoutConnIdleTimeoutSettings(t *testing.T) {
+	for _, idle := range []time.Duration{0, -time.Second} {
+		client, server := net.Pipe()
+		spy := &deadlineSpyConn{Conn: client}
+		conn := NewTimeoutConn(spy, idle)
+		go func() { _, _ = server.Write([]byte("x")) }()
+		if _, err := conn.Read(make([]byte, 1)); err != nil {
+			t.Fatalf("idle %v: Read() error = %v", idle, err)
+		}
+		if _, calls := spy.snapshot(); calls != 0 {
+			t.Fatalf("idle %v: SetDeadline called %d times, want none", idle, calls)
+		}
+		_ = conn.Close()
+		_ = server.Close()
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client, server := net.Pipe()
-			defer func() { _ = server.Close() }()
-			spy := &deadlineSpyConn{Conn: client}
-			conn := NewTimeoutConn(spy, tt.idle)
-			defer func() { _ = conn.Close() }()
-
-			started := time.Now()
-			go func() {
-				_, _ = server.Write([]byte("x"))
-			}()
-
-			buf := make([]byte, 1)
-			if _, err := conn.Read(buf); err != nil {
-				t.Fatalf("Read() error = %v", err)
-			}
-
-			firstDeadline, calls := spy.snapshot()
-			if calls == 0 {
-				t.Fatal("expected SetDeadline to be called")
-			}
-			if firstDeadline.Before(started.Add(DefaultTimeout - 250*time.Millisecond)) {
-				t.Fatalf("deadline = %v, want normalized idle near now+%s", firstDeadline, DefaultTimeout)
-			}
-		})
-	}
-}
-
-func TestTimeoutConnStructLiteralUsesDefaultTimeout(t *testing.T) {
-	client, server := net.Pipe()
+	client, server := tcpPair(t)
 	defer func() { _ = server.Close() }()
-	spy := &deadlineSpyConn{Conn: client}
-	conn := &TimeoutConn{Conn: spy}
-	defer func() { _ = conn.Close() }()
-
-	started := time.Now()
+	conn := NewTimeoutConn(client, 0)
+	errc := make(chan error, 1)
 	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_, _ = server.Write([]byte("x"))
+		_, err := conn.Read(make([]byte, 1))
+		errc <- err
 	}()
-
-	buf := make([]byte, 1)
-	if _, err := conn.Read(buf); err != nil {
-		t.Fatalf("Read() error = %v, want data despite zero idle timeout", err)
+	time.Sleep(20 * time.Millisecond) // let Read block without a deadline
+	if err := conn.SetIdleTimeout(50 * time.Millisecond); err != nil || conn.IdleTimeout() != 50*time.Millisecond {
+		t.Fatalf("SetIdleTimeout() = %v, IdleTimeout() = %v", err, conn.IdleTimeout())
 	}
-	deadline, calls := spy.snapshot()
-	if calls == 0 {
-		t.Fatal("expected SetDeadline to be called")
-	}
-	if deadline.Before(started.Add(DefaultTimeout - 250*time.Millisecond)) {
-		t.Fatalf("deadline = %v, want near now+%s", deadline, DefaultTimeout)
+	select {
+	case err := <-errc:
+		if !IsTimeout(err) {
+			t.Fatalf("Read() error = %v, want the new idle timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked Read did not get the idle timeout set after it began")
 	}
 }
 

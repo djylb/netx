@@ -1,8 +1,6 @@
 package proxyproto
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -67,26 +65,26 @@ func TestHeaderRoundTrip(t *testing.T) {
 				t.Fatalf("AppendBinary() error = %v", err)
 			}
 			wire = append(wire, "payload"...)
-			got, n, err := Parse(wire[len("prefix"):])
+			got, n, err := Decode(wire[len("prefix"):])
 			if err != nil {
-				t.Fatalf("Parse(%q) error = %v", wire, err)
+				t.Fatalf("Decode(%q) error = %v", wire, err)
 			}
 			if rest := string(wire[len("prefix")+n:]); rest != "payload" {
-				t.Fatalf("Parse() length leaves %q, want payload", rest)
+				t.Fatalf("Decode() length leaves %q, want payload", rest)
 			}
 			if got.Version != tt.h.Version || got.Local != tt.h.Local {
-				t.Fatalf("Parse() = version %d local %v", got.Version, got.Local)
+				t.Fatalf("Decode() = version %d local %v", got.Version, got.Local)
 			}
 			if addrString(got.Source) != tt.src || addrString(got.Destination) != tt.dst {
-				t.Fatalf("Parse() addresses = %v -> %v, want %s -> %s", got.Source, got.Destination, tt.src, tt.dst)
+				t.Fatalf("Decode() addresses = %v -> %v, want %s -> %s", got.Source, got.Destination, tt.src, tt.dst)
 			}
-			// NOOP padding is dropped, from the parsed bytes too.
+			// NOOP padding is dropped, from the decoded bytes too.
 			if got, want := fieldsOf(got.TLVs), fieldsOf(tt.h.TLVs); !slices.Equal(got, want) {
-				t.Fatalf("Parse() TLVs = %v, want %v", got, want)
+				t.Fatalf("Decode() TLVs = %v, want %v", got, want)
 			}
 			for typ := range got.TLVs.All() {
 				if typ == TLVNoop {
-					t.Fatal("Parse() kept NOOP padding")
+					t.Fatal("Decode() kept NOOP padding")
 				}
 			}
 		})
@@ -124,8 +122,8 @@ func TestHeaderTLVAndErrors(t *testing.T) {
 	if _, err := (&Header{Version: 7}).AppendBinary(nil); err == nil {
 		t.Fatal("unknown version encoded")
 	}
-	// Mismatched families become UNKNOWN or LOCAL.
-	if got, _ := (&Header{Version: V1, Source: tcp("192.0.2.1", 1), Destination: udp("192.0.2.2", 2)}).AppendBinary(nil); string(got) != "PROXY UNKNOWN\r\n" {
+	// Mismatched kinds are an error, not UNKNOWN or LOCAL.
+	if got, err := (&Header{Version: V1, Source: tcp("192.0.2.1", 1), Destination: udp("192.0.2.2", 2)}).AppendBinary(nil); err == nil {
 		t.Fatalf("mixed v1 = %q", got)
 	}
 }
@@ -135,7 +133,7 @@ func v2Wire(verCmd, fam byte, body ...byte) []byte {
 	return append(b, body...)
 }
 
-func TestParseErrors(t *testing.T) {
+func TestDecodeErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		in   []byte
@@ -151,28 +149,28 @@ func TestParseErrors(t *testing.T) {
 		{"v1 too long", []byte("PROXY TCP4 " + strings.Repeat("1", 300)), ErrMalformed},
 	}
 	for _, tt := range tests {
-		if h, n, err := Parse(tt.in); !errors.Is(err, tt.want) || h != nil || n != 0 {
-			t.Errorf("%s: Parse() = %v, %d, %v; want %v", tt.name, h, n, err, tt.want)
+		if h, n, err := Decode(tt.in); !errors.Is(err, tt.want) || h != nil || n != 0 {
+			t.Errorf("%s: Decode() = %v, %d, %v; want %v", tt.name, h, n, err, tt.want)
 		}
 	}
 
 	valid := [][]byte{
 		[]byte("PROXY TCP4 192.0.2.1 198.51.100.1 5000 443\r\n"),
-		V2Header(tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)),
+		wireOf(V2, tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)),
 	}
 	for _, wire := range valid {
 		for i := range len(wire) {
-			if _, _, err := Parse(wire[:i]); !errors.Is(err, io.ErrUnexpectedEOF) {
-				t.Fatalf("Parse(%q) error = %v, want %v", wire[:i], err, io.ErrUnexpectedEOF)
+			if _, _, err := Decode(wire[:i]); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("Decode(%q) error = %v, want %v", wire[:i], err, io.ErrUnexpectedEOF)
 			}
 		}
 	}
 }
 
-// TestParseLenient covers headers from non-standard senders that are
+// TestDecodeLenient covers headers from non-standard senders that are
 // accepted because they leave no doubt about the addresses, or fall back to
 // the connection's own.
-func TestParseLenient(t *testing.T) {
+func TestDecodeLenient(t *testing.T) {
 	addrs := append(net.ParseIP("192.0.2.1").To4(), 198, 51, 100, 1, 0x13, 0x88, 0x01, 0xbb)
 	tlv := []byte{byte(TLVAuthority), 0, 1, 'a'}
 	tests := []struct {
@@ -203,13 +201,13 @@ func TestParseLenient(t *testing.T) {
 		{"v2 tlv header", v2Wire(0x21, 0x11, append(addrs, 1, 0)...), "192.0.2.1:5000", "198.51.100.1:443", false, false, 0},
 	}
 	for _, tt := range tests {
-		h, n, err := Parse(append(tt.in, "rest"...))
+		h, n, err := Decode(append(tt.in, "rest"...))
 		if err != nil || n != len(tt.in) {
-			t.Errorf("%s: Parse() = %d, %v; want %d bytes", tt.name, n, err, len(tt.in))
+			t.Errorf("%s: Decode() = %d, %v; want %d bytes", tt.name, n, err, len(tt.in))
 			continue
 		}
 		if h.Local != tt.local || addrString(h.Source) != tt.src || addrString(h.Destination) != tt.dst || len(fieldsOf(h.TLVs)) != tt.tlvs {
-			t.Errorf("%s: Parse() = local %v, %v -> %v, %d TLVs; want local %v, %s -> %s, %d TLVs",
+			t.Errorf("%s: Decode() = local %v, %v -> %v, %d TLVs; want local %v, %s -> %s, %d TLVs",
 				tt.name, h.Local, h.Source, h.Destination, len(fieldsOf(h.TLVs)), tt.local, tt.src, tt.dst, tt.tlvs)
 		}
 		if _, isUDP := h.Source.(*net.UDPAddr); tt.src != "" && isUDP != tt.udp {
@@ -219,7 +217,7 @@ func TestParseLenient(t *testing.T) {
 }
 
 func TestHeaderUDPAddrs(t *testing.T) {
-	h, _, err := Parse(V1Header(udp("192.0.2.1", 5000), udp("198.51.100.1", 19132)))
+	h, _, err := Decode(wireOf(V1, udp("192.0.2.1", 5000), udp("198.51.100.1", 19132)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,52 +237,6 @@ func TestHeaderUDPAddrs(t *testing.T) {
 	}
 }
 
-func TestRead(t *testing.T) {
-	header := V1Header(tcp("192.0.2.1", 5000), tcp("198.51.100.1", 443))
-	r := bufio.NewReader(bytes.NewReader(append(header, "hello"...)))
-	h, err := Read(r)
-	if err != nil || h.Source.String() != "192.0.2.1:5000" {
-		t.Fatalf("Read() = %v, %v", h, err)
-	}
-	if rest, _ := io.ReadAll(r); string(rest) != "hello" {
-		t.Fatalf("rest = %q", rest)
-	}
-
-	// Without a header nothing is consumed.
-	r = bufio.NewReader(strings.NewReader("SSH-2.0-test\r\n"))
-	if _, err := Read(r); !errors.Is(err, ErrNoHeader) {
-		t.Fatalf("Read(ssh) error = %v", err)
-	}
-	if rest, _ := io.ReadAll(r); string(rest) != "SSH-2.0-test\r\n" {
-		t.Fatalf("rest = %q", rest)
-	}
-
-	// A version 2 header larger than the reader's buffer.
-	big := &Header{Version: V2, Source: tcp("192.0.2.1", 1), Destination: tcp("192.0.2.2", 2), TLVs: mkTLVs(t, field{TLVUniqueID, strings.Repeat("u", 1000)})}
-	wire, _ := big.AppendBinary(nil)
-	r = bufio.NewReaderSize(bytes.NewReader(append(wire, "x"...)), 64)
-	if h, err := Read(r); err != nil || len(fieldsOf(h.TLVs)) != 1 || len(fieldsOf(h.TLVs)[0].v) != 1000 {
-		t.Fatalf("Read(big) = %v, %v", h, err)
-	}
-	if rest, _ := io.ReadAll(r); string(rest) != "x" {
-		t.Fatalf("rest = %q", rest)
-	}
-
-	for in, want := range map[string]error{
-		"":                  io.EOF,
-		"PROX":              io.ErrUnexpectedEOF,
-		"PROXY TCP4 1.1.1.": io.ErrUnexpectedEOF,
-		"PROXY TCP4 x\r\n":  ErrMalformed,
-	} {
-		if _, err := Read(bufio.NewReader(strings.NewReader(in))); !errors.Is(err, want) {
-			t.Errorf("Read(%q) error = %v, want %v", in, err, want)
-		}
-	}
-	if _, err := Read(bufio.NewReaderSize(strings.NewReader("PROXY UNKNOWN"+strings.Repeat(" ", 50)+"\r\n"), 16)); err == nil {
-		t.Fatal("Read() with a 16-byte buffer parsed a long version 1 header")
-	}
-}
-
 // tlvHeader returns a version 2 LOCAL header whose payload is the TLVs that
 // fill fills in, given the payload size.
 func tlvHeader(size int, fill func(payload []byte)) []byte {
@@ -293,9 +245,9 @@ func tlvHeader(size int, fill func(payload []byte)) []byte {
 	return b
 }
 
-// TestParseTLVsWithoutAmplification parses headers full of TLVs: every field
-// is kept, and the parsed header takes no more memory than the header did.
-func TestParseTLVsWithoutAmplification(t *testing.T) {
+// TestDecodeTLVsWithoutAmplification decodes headers full of TLVs: every field
+// is kept, and the decoded header takes no more memory than the header did.
+func TestDecodeTLVsWithoutAmplification(t *testing.T) {
 	const size = 65535 / 3 * 3
 	emptyTLVs := func(typ TLVType) func([]byte) {
 		return func(p []byte) {
@@ -323,21 +275,21 @@ func TestParseTLVsWithoutAmplification(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, n, err := Parse(tt.b)
+			h, n, err := Decode(tt.b)
 			if err != nil || n != len(tt.b) {
-				t.Fatalf("Parse() = %d, %v", n, err)
+				t.Fatalf("Decode() = %d, %v", n, err)
 			}
 			fs := fieldsOf(h.TLVs)
 			if len(fs) != tt.tlvs || cap(h.TLVs) != len(h.TLVs) {
-				t.Fatalf("Parse() kept %d TLVs in %d bytes (cap %d), want %d", len(fs), len(h.TLVs), cap(h.TLVs), tt.tlvs)
+				t.Fatalf("Decode() kept %d TLVs in %d bytes (cap %d), want %d", len(fs), len(h.TLVs), cap(h.TLVs), tt.tlvs)
 			}
 			if tt.tlvs > 0 && fs[0].v != string(tt.value) {
 				t.Fatalf("TLV value = %q, want %q", fs[0].v, tt.value)
 			}
-			// The parsed header retains no more than the TLV bytes it keeps.
-			allocs := allocatedBytes(func() { _, _, _ = Parse(tt.b) })
+			// The decoded header retains no more than the TLV bytes it keeps.
+			allocs := allocatedBytes(func() { _, _, _ = Decode(tt.b) })
 			if limit := uint64(len(h.TLVs) + 4096); allocs > limit {
-				t.Fatalf("Parse() of %d bytes allocates %d bytes, want at most %d", len(tt.b), allocs, limit)
+				t.Fatalf("Decode() of %d bytes allocates %d bytes, want at most %d", len(tt.b), allocs, limit)
 			}
 		})
 	}
@@ -355,21 +307,21 @@ func allocatedBytes(f func()) uint64 {
 	return (after.TotalAlloc - before.TotalAlloc) / runs
 }
 
-func FuzzParse(f *testing.F) {
+func FuzzDecode(f *testing.F) {
 	f.Add([]byte("PROXY TCP4 192.0.2.1 198.51.100.1 5000 443\r\n"))
 	f.Add([]byte("PROXY UNKNOWN\r\n"))
 	f.Add([]byte("PROXY udp6 fe80::1%eth0 ::ffff:1.2.3.4 01 2\n"))
 	f.Add(v2Wire(0x21, 0x12, append(make([]byte, 12), 1, 0, 5, 'x')...))
 	f.Add([]byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"))
-	f.Add(V2Header(tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)))
-	f.Add(V2Header(&net.UnixAddr{Name: "/a", Net: "unix"}, &net.UnixAddr{Name: "/b", Net: "unix"}))
+	f.Add(wireOf(V2, tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)))
+	f.Add(wireOf(V2, &net.UnixAddr{Name: "/a", Net: "unix"}, &net.UnixAddr{Name: "/b", Net: "unix"}))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		h, n, err := Parse(b)
+		h, n, err := Decode(b)
 		if err != nil {
 			return
 		}
 		if n <= 0 || n > len(b) {
-			t.Fatalf("Parse() length %d of %d bytes", n, len(b))
+			t.Fatalf("Decode() length %d of %d bytes", n, len(b))
 		}
 		if h.Version == V1 && len(h.TLVs) > 0 {
 			t.Fatal("version 1 header with TLVs")
@@ -378,7 +330,7 @@ func FuzzParse(f *testing.F) {
 		if err != nil {
 			t.Fatalf("AppendBinary() error = %v", err)
 		}
-		h2, _, err := Parse(wire)
+		h2, _, err := Decode(wire)
 		// A PROXY command without addresses is re-encoded as LOCAL; both mean
 		// that the connection's own addresses apply. Zones are not encoded.
 		sameLocal := h2.Local == h.Local || h.Source == nil
@@ -413,15 +365,11 @@ func TestTLVTypeString(t *testing.T) {
 	}
 }
 
-func BenchmarkReadV1(b *testing.B) {
+func BenchmarkDecodeV1(b *testing.B) {
 	wire := []byte("PROXY TCP6 2001:db8::10 2001:db8::20 54321 443\r\nGET / HTTP/1.1\r\n\r\n")
-	src := bytes.NewReader(wire)
-	br := bufio.NewReader(src)
 	b.ReportAllocs()
 	for b.Loop() {
-		src.Reset(wire)
-		br.Reset(src)
-		if _, err := Read(br); err != nil {
+		if _, _, err := Decode(wire); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -429,8 +377,8 @@ func BenchmarkReadV1(b *testing.B) {
 
 // A zone in a version 1 address, which names an interface of the sender, is
 // dropped, so that its bytes do not reach the address's String.
-func TestParseV1DropsZone(t *testing.T) {
-	h, _, err := Parse([]byte("PROXY TCP6 fe80::1%\x1b[31m ::1 1 2\r\n"))
+func TestDecodeV1DropsZone(t *testing.T) {
+	h, _, err := Decode([]byte("PROXY TCP6 fe80::1%\x1b[31m ::1 1 2\r\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,11 +398,11 @@ func TestHeaderAbstractUnixAddr(t *testing.T) {
 	if wire[v2HeadLen] != 0 {
 		t.Fatalf("abstract name encoded starting with %q, want a NUL", wire[v2HeadLen])
 	}
-	got, _, err := Parse(wire)
+	got, _, err := Decode(wire)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if addrString(got.Source) != "@client" || addrString(got.Destination) != "/run/server.sock" {
-		t.Fatalf("Parse() = %v -> %v", got.Source, got.Destination)
+		t.Fatalf("Decode() = %v -> %v", got.Source, got.Destination)
 	}
 }

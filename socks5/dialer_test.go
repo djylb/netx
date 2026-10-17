@@ -310,7 +310,7 @@ func TestHandshakeTimeoutKeepsBorrowedParent(t *testing.T) {
 		client, server := net.Pipe()
 		defer func() { _ = client.Close() }()
 		s := &socks5.Server{HandshakeTimeout: 50 * time.Millisecond}
-		if err := s.ServeConn(netx.WrapConn(server, parent)); err == nil {
+		if err := s.ServeConn(context.Background(), netx.WrapConn(server, parent)); err == nil {
 			t.Fatal("ServeConn() succeeded without a handshake")
 		}
 		if parent.closed.Load() {

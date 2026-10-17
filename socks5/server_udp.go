@@ -146,18 +146,18 @@ func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
 	r := &udpRelay{pending: make(map[netip.Addr][]*association)}
 	queue := s.UDPQueue
 	if queue <= 0 {
-		queue = 128
+		queue = DefaultUDPQueue
 	}
 	r.l = netx.NewPacketListener(pc,
-		netx.WithAcceptFilter(r.expects),
+		netx.WithPacketAcceptFilter(r.expects),
 		netx.WithPacketQueue(queue),
-		netx.WithIdleTimeout(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
+		netx.WithPacketIdleTimeout(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
 	)
 	go r.acceptLoop()
 	return r
 }
 
-// sharedRelay returns the relay of PacketConn, starting it on first use.
+// sharedRelay returns the relay of UDPSocket, starting it on first use.
 func (s *Server) sharedRelay() (*udpRelay, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,7 +165,7 @@ func (s *Server) sharedRelay() (*udpRelay, error) {
 		return nil, ErrServerClosed
 	}
 	if s.shared == nil {
-		s.shared = s.newUDPRelay(s.PacketConn)
+		s.shared = s.newUDPRelay(s.UDPSocket)
 	}
 	if s.shared.stopped() {
 		return nil, errUDPRelayStopped
@@ -182,7 +182,7 @@ var errUDPRelayStopped = errors.New("socks5: UDP ASSOCIATE: the UDP socket is cl
 var errUDPIdleBeforeStart = errors.New("socks5: UDP ASSOCIATE: idle timeout before the association started")
 
 // expects reports whether an association waits for datagrams from peer's IP.
-func (r *udpRelay) expects(peer net.Addr) bool {
+func (r *udpRelay) expects(peer net.Addr, _ []byte) bool {
 	ap := peerAddrPort(peer)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -323,6 +323,9 @@ func peerAddrPort(addr net.Addr) netip.AddrPort {
 		ap = a.AddrPort()
 	case nil:
 	default:
+		if isNilPointer(addr) {
+			break
+		}
 		if parsed, err := netip.ParseAddrPort(addr.String()); err == nil {
 			ap = parsed
 		}
@@ -335,37 +338,36 @@ type association struct {
 	s         *Server
 	req       *Request
 	relay     *udpRelay
-	ownsRelay bool
 	out       PacketConn
 	announced netip.AddrPort // the client's announced source, if specific
-	exact     bool           // announced is the control connection's address: only it matches
 	key       netip.Addr     // the client IP address it is pending under, if known
+	exact     bool           // announced is the control connection's address: only it matches
+	ownsRelay bool
 
 	mu      sync.Mutex
+	once    sync.Once   // closes done
 	pending *time.Timer // ends an association that never receives a datagram
 	conn    net.Conn    // the client's datagram stream once bound
 	done    chan struct{}
-	once    sync.Once
 }
 
 func (s *Server) associate(ctx context.Context, req *Request) error {
 	key, announced, exact := clientSource(req)
-	if !key.IsValid() && s.PacketConn != nil {
-		_ = s.reply(req, ReplyGeneralFailure, Addr{})
-		return errNoClientIP
+	if !key.IsValid() && s.UDPSocket != nil {
+		return refuse(req, ReplyGeneralFailure, errNoClientIP)
 	}
 	relay, owns, err := s.relayFor(ctx, req)
 	if err != nil {
-		_ = s.reply(req, ReplyFor(err), Addr{})
-		return err
+		return refuse(req, ReplyFor(err), err)
 	}
-	out, err := s.dialPacket(ctx, req)
+	dialCtx, cancel := context.WithTimeout(ctx, positive(s.DialTimeout, DefaultDialTimeout))
+	out, err := s.dialPacket(dialCtx, req)
+	cancel()
 	if err != nil {
 		if owns {
 			_ = relay.close()
 		}
-		_ = s.reply(req, ReplyFor(err), Addr{})
-		return err
+		return refuse(req, ReplyFor(err), err)
 	}
 	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, exact: exact, done: make(chan struct{})}
 	a.mu.Lock()
@@ -381,13 +383,12 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 			err = errUDPRelayStopped
 		}
 		a.close()
-		_ = s.reply(req, ReplyGeneralFailure, Addr{})
-		return err
+		return refuse(req, ReplyGeneralFailure, err)
 	}
 	defer a.close()
 
 	bound := s.udpAddr(req, relay.l.Addr())
-	if err := s.reply(req, ReplySucceeded, bound); err != nil {
+	if err := req.Reply(ReplySucceeded, bound); err != nil {
 		return err
 	}
 	// The association lasts while the control connection is open; it ending
@@ -449,7 +450,7 @@ func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort, exact
 // relayFor returns the relay serving req: the shared one, or a new one that
 // the association owns.
 func (s *Server) relayFor(ctx context.Context, req *Request) (*udpRelay, bool, error) {
-	if s.PacketConn != nil {
+	if s.UDPSocket != nil {
 		r, err := s.sharedRelay()
 		return r, false, err
 	}
@@ -464,7 +465,7 @@ func (s *Server) dialPacket(ctx context.Context, req *Request) (PacketConn, erro
 	if s.DialPacket != nil {
 		return s.DialPacket(ctx, req)
 	}
-	c, err := netx.ListenEphemeralUDP()
+	c, err := netx.ListenEphemeralUDP(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -528,11 +529,11 @@ func (a *association) clientToTarget(c net.Conn) {
 		if err != nil {
 			return
 		}
-		dst, payload, err := ParseDatagram(buf[:n])
+		dst, h, err := DecodeDatagram(buf[:n])
 		if err != nil || a.s.AllowPacket != nil && !a.s.AllowPacket(a.req, dst) {
 			continue
 		}
-		if _, err := a.out.WriteTo(payload, dst); err != nil {
+		if _, err := a.out.WriteTo(buf[h:n], dst); err != nil {
 			if netx.IsClosed(err) {
 				return
 			}

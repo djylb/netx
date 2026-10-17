@@ -29,8 +29,8 @@ func TestPrefixConnReplaysPrefix(t *testing.T) {
 	if string(got) != "hello world" {
 		t.Fatalf("read %q, want %q", got, "hello world")
 	}
-	if RawConnOf(c) != client {
-		t.Fatalf("RawConnOf() = %v, want the wrapped conn", RawConnOf(c))
+	if InnermostConn(c) != client {
+		t.Fatalf("InnermostConn() = %v, want the wrapped conn", InnermostConn(c))
 	}
 	if !errors.Is(c.CloseWrite(), errors.ErrUnsupported) {
 		t.Fatal("CloseWrite() on a pipe should be unsupported")
@@ -61,10 +61,10 @@ func TestWrappersForwardCloseWrite(t *testing.T) {
 		"TimeoutConn":      func(c net.Conn) net.Conn { return NewTimeoutConn(c, 0) },
 		"AddrOverrideConn": func(c net.Conn) net.Conn { return NewAddrOverrideConn(c, nil, nil) },
 		"FramedConn":       func(c net.Conn) net.Conn { return NewFramedConn(c) },
-		"TeeConn":          func(c net.Conn) net.Conn { return NewTeeConn(c, 0) },
+		"RecordingConn":    func(c net.Conn) net.Conn { return NewRecordingConn(c, 0) },
 		"PrefixConn":       func(c net.Conn) net.Conn { return NewPrefixConn(c, []byte("x")) },
 		"ObserveConn": func(c net.Conn) net.Conn {
-			return ObserveConn(c, TrafficObserver{OnWrite: func(int64) error { return nil }})
+			return ObserveConn(c, nil, func(int64) error { return nil })
 		},
 		"WrapConn": func(c net.Conn) net.Conn { return WrapConn(c, c) },
 	} {
@@ -95,7 +95,7 @@ func TestIsClosed(t *testing.T) {
 		io.ErrClosedPipe,
 		errors.New("read tcp 127.0.0.1:1: use of closed network connection"),
 	} {
-		if !IsClosed(err) || NetErrorKind(err) != "closed" {
+		if !IsClosed(err) || NetErrorKind(err) != KindClosed {
 			t.Errorf("IsClosed(%v) = false or kind %q", err, NetErrorKind(err))
 		}
 	}

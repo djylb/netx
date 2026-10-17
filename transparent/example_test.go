@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net"
+	"syscall"
+	"time"
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/transparent"
@@ -12,20 +14,10 @@ import (
 
 // Accept redirected connections and forward each to its original destination.
 func ExampleListen() {
-	ln, err := transparent.Listen(context.Background(), "0.0.0.0:8080")
+	ctx := context.Background()
+	ln, err := transparent.Listen(ctx, "tcp", "0.0.0.0:8080")
 	if err != nil {
 		log.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	// local reports whether ip is an address of this host.
-	local := func(ip net.IP) bool {
-		addrs, _ := net.InterfaceAddrs()
-		for _, a := range addrs {
-			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
-				return true
-			}
-		}
-		return ip.IsLoopback() || ip.IsUnspecified()
 	}
 	for {
 		c, err := ln.Accept()
@@ -33,45 +25,92 @@ func ExampleListen() {
 			log.Fatal(err)
 		}
 		go func() {
-			dst, err := transparent.OriginalDestination(c)
-			// A connection made to the listener directly, not redirected,
-			// reports the listener's own address: forwarding it would
-			// connect the proxy to itself, again and again.
-			if err != nil || dst.Port == port && local(dst.IP) {
+			dst, redirected, err := transparent.OriginalDestination(c)
+			// A connection made to the listener directly would connect the
+			// proxy to itself, again and again.
+			if err != nil || !redirected {
 				_ = c.Close()
 				return
 			}
-			upstream, err := net.DialTCP("tcp", nil, dst)
+			var d net.Dialer
+			upstream, err := d.DialContext(ctx, "tcp", dst.String())
 			if err != nil {
 				_ = c.Close()
 				return
 			}
-			_, _, _ = netx.Relay(c, upstream)
+			_, _, _ = netx.Relay(ctx, c, upstream)
 		}()
 	}
+}
+
+// Combine the transparent socket options with others of one's own.
+func ExampleControl() {
+	lc := net.ListenConfig{
+		KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: 30 * time.Second},
+		Control: func(network, address string, c syscall.RawConn) error {
+			if err := transparent.Control(network, address, c); err != nil {
+				return err
+			}
+			// Set further options here, such as SO_REUSEPORT or SO_MARK.
+			return nil
+		},
+	}
+	ln, err := lc.Listen(context.Background(), "tcp", "0.0.0.0:8080")
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = ln.Close()
 }
 
 // Answer UDP datagrams redirected by a TPROXY rule from the address they were
 // sent to.
 func ExampleListenPacket() {
-	ln, err := transparent.ListenPacket(context.Background(), "0.0.0.0:5353")
+	ctx := context.Background()
+	ln, err := transparent.ListenPacket(ctx, "udp", "0.0.0.0:5353")
 	if err != nil {
 		log.Fatal(err)
 	}
 	buf := make([]byte, 65535)
 	for {
-		n, src, dst, err := transparent.ReadFromUDP(ln, buf)
+		n, info, err := transparent.ReadFromUDP(ln, buf)
 		if errors.Is(err, transparent.ErrControlTruncated) {
 			continue // this datagram's destination is unknown
 		}
 		if err != nil {
 			log.Fatal(err)
 		}
-		reply, err := transparent.DialUDP(context.Background(), dst, src)
+		if !info.Redirected {
+			continue // sent to the listener itself
+		}
+		reply, err := transparent.DialUDP(ctx, info.Dst, info.Src)
 		if err != nil {
 			continue
 		}
 		_, _ = reply.Write(buf[:n])
 		_ = reply.Close()
+	}
+}
+
+// Forward each redirected UDP flow to its original destination.
+func ExampleListenUDPFlows() {
+	ctx := context.Background()
+	l, err := transparent.ListenUDPFlows(ctx, "udp", "0.0.0.0:5353", transparent.WithFlowIdleTimeout(time.Minute))
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			log.Fatal(err)
+		}
+		go func() {
+			var d net.Dialer
+			upstream, err := d.DialContext(ctx, "udp", c.LocalAddr().String())
+			if err != nil {
+				_ = c.Close()
+				return
+			}
+			_, _, _ = netx.Relay(ctx, c, upstream)
+		}()
 	}
 }

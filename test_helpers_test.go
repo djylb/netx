@@ -35,7 +35,7 @@ type connStateProbe interface {
 
 type rawConnStateProbe interface {
 	connStateProbe
-	RawConn() net.Conn
+	NetConn() net.Conn
 }
 
 func assertClosedConnState(t *testing.T, label string, c connStateProbe) {
@@ -68,7 +68,7 @@ func assertClosedConnState(t *testing.T, label string, c connStateProbe) {
 
 func assertClosedRawConnState(t *testing.T, label string, c rawConnStateProbe) {
 	t.Helper()
-	if got := c.RawConn(); got != nil {
+	if got := c.NetConn(); got != nil {
 		t.Fatalf("%s RawConn() = %v, want nil", label, got)
 	}
 	assertClosedConnState(t, label, c)

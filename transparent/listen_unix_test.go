@@ -10,7 +10,7 @@ import (
 )
 
 func TestListenSetsTransparentOption(t *testing.T) {
-	ln, err := Listen(context.Background(), "127.0.0.1:0")
+	ln, err := Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 		t.Skipf("transparent listening needs elevated privileges: %v", err)
 	}

@@ -5,21 +5,23 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
+
+	"github.com/djylb/netx"
 )
 
 var errSOCKS4Auth = errors.New("socks5: SOCKS4 request while authentication is required")
 
 // handshake4 reads a SOCKS4 or SOCKS4a request whose version byte was read
 // and runs the NoAuth authenticator, since SOCKS4 has no authentication.
+// Every command is returned; ServeRequest refuses those it does not serve.
 func (s *Server) handshake4(ctx context.Context, c net.Conn, first []byte) (*Request, error) {
 	// Buffered, so that the user ID and name are not read one byte per
 	// read of the connection. Bytes the client sent after the request are
 	// replayed before the rest of the connection.
 	br := bufio.NewReaderSize(io.MultiReader(bytes.NewReader(first), c), 512)
-	cmd, dst, _, err := ReadRequest4(br)
+	cmd, dst, userID, err := ReadRequest4(br)
 	var early []byte
 	if n := br.Buffered(); n > 0 && err == nil {
 		buffered, _ := br.Peek(n)
@@ -41,9 +43,9 @@ func (s *Server) handshake4(ctx context.Context, c net.Conn, first []byte) (*Req
 		_ = WriteReply4(c, Reply4Rejected, Addr{})
 		return nil, err
 	}
-	if cmd != CmdConnect {
-		_ = WriteReply4(c, Reply4Rejected, Addr{})
-		return nil, fmt.Errorf("socks5: unsupported SOCKS4 %v", cmd)
+	req := &Request{Version: Version4, Command: cmd, Dst: dst, User: user, UserID4: userID, Conn: c}
+	if len(early) > 0 {
+		req.Conn = netx.NewPrefixConn(c, early)
 	}
-	return &Request{Version: 4, Command: CmdConnect, Dst: dst, User: user, Conn: c, early: early}, nil
+	return req, nil
 }

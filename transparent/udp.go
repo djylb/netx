@@ -14,18 +14,53 @@ var ErrControlTruncated = errors.New("transparent: control messages truncated be
 
 // ListenPacket listens on a UDP address for datagrams that a TPROXY rule
 // redirects to it, and asks the kernel to report each datagram's original
-// destination, which ReadFromUDP returns. It needs CAP_NET_ADMIN. It is
-// available on Linux and Android; elsewhere it returns ErrListenUnsupported.
-func ListenPacket(ctx context.Context, address string) (*net.UDPConn, error) {
-	return listenPacket(ctx, address)
+// destination, which ReadFromUDP returns. network must be "udp", "udp4" or
+// "udp6". It is net.ListenConfig.ListenPacket with ControlPacket as the
+// Control function, and needs CAP_NET_ADMIN. It is available on Linux and
+// Android; elsewhere it returns ErrListenUnsupported.
+func ListenPacket(ctx context.Context, network, address string) (*net.UDPConn, error) {
+	if err := checkNetwork("listen", network, "udp"); err != nil {
+		return nil, err
+	}
+	if err := packetErr(); err != nil {
+		return nil, err
+	}
+	lc := net.ListenConfig{Control: ControlPacket}
+	pc, err := lc.ListenPacket(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return pc.(*net.UDPConn), nil
+}
+
+// PacketInfo describes a datagram that ReadFromUDP read.
+type PacketInfo struct {
+	// Src is the datagram's source.
+	Src netip.AddrPort
+	// Dst is the destination the datagram was originally sent to.
+	Dst netip.AddrPort
+	// Redirected reports whether a redirect brought the datagram to the
+	// socket. A datagram sent to the socket directly reports false:
+	// forwarding it would send it to the socket again.
+	Redirected bool
 }
 
 // ReadFromUDP reads one datagram from c, a socket from ListenPacket, into b
-// and returns its source and the destination it was originally sent to. A
-// datagram sent to the socket's own address reports that address. If the
-// datagram's control messages were cut short before the original
-// destination, it returns the datagram with ErrControlTruncated.
-func ReadFromUDP(c *net.UDPConn, b []byte) (n int, src, dst netip.AddrPort, err error) {
+// and returns its length and what is known of it.
+//
+// A datagram for a port other than c's, or, when c is bound to one address,
+// for another address, was redirected. One for c's port on a wildcard socket
+// was redirected unless its destination is an address of this host, which is
+// looked up as for OriginalDestination; addresses found local are remembered
+// for a minute, so a datagram to an address removed meanwhile may be reported
+// as direct. Listening on a port that redirected traffic does not use, as
+// DialUDP needs anyway, avoids the lookup.
+//
+// A datagram without the original destination, as on a socket not from
+// ListenPacket, reports c's own address as Dst. If the datagram's control
+// messages were cut short before the original destination, it returns the
+// datagram and its source with ErrControlTruncated.
+func ReadFromUDP(c *net.UDPConn, b []byte) (n int, info PacketInfo, err error) {
 	return readFromUDP(c, b)
 }
 

@@ -54,8 +54,8 @@ func TestChanListenerDeliverWaitsForContext(t *testing.T) {
 	if err := l.Deliver(ctx, c); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Deliver() error = %v, want %v", err, context.DeadlineExceeded)
 	}
-	if c.Calls() != 1 {
-		t.Fatalf("Close calls = %d, want 1", c.Calls())
+	if c.Calls() != 0 {
+		t.Fatalf("Close calls = %d, want 0: a failed Deliver leaves c to the caller", c.Calls())
 	}
 }
 
@@ -96,8 +96,8 @@ func TestChanListenerCloseClosesQueuedAndUnblocks(t *testing.T) {
 	if err := l.Deliver(context.Background(), late); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Deliver() after Close error = %v", err)
 	}
-	if late.Calls() != 1 {
-		t.Fatalf("late conn Close calls = %d, want 1", late.Calls())
+	if late.Calls() != 0 {
+		t.Fatalf("late conn Close calls = %d, want 0", late.Calls())
 	}
 	if _, err := l.Dial(context.Background(), nil); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Dial() after Close error = %v", err)
@@ -122,8 +122,8 @@ func TestChanListenerCloseClosesQueuedAndUnblocks(t *testing.T) {
 	if err := <-deliverErr; !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("blocked Deliver() error = %v", err)
 	}
-	if waiting.Calls() != 1 {
-		t.Fatalf("blocked conn Close calls = %d, want 1", waiting.Calls())
+	if waiting.Calls() != 0 {
+		t.Fatalf("blocked conn Close calls = %d, want 0", waiting.Calls())
 	}
 }
 
@@ -137,7 +137,12 @@ func TestChanListenerCloseRaceLeaksNothing(t *testing.T) {
 		var accepted atomic.Int32
 		for i := range conns {
 			conns[i] = &countedCloseConn{}
-			wg.Go(func() { _ = l.Deliver(context.Background(), conns[i]) })
+			wg.Go(func() {
+				// A failed delivery leaves the connection to its caller.
+				if l.Deliver(context.Background(), conns[i]) != nil {
+					_ = conns[i].Close()
+				}
+			})
 		}
 		wg.Go(func() {
 			for {
@@ -218,8 +223,8 @@ func TestSingleConnListenerEndsWhenConnCloses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept() error = %v", err)
 	}
-	if RawConnOf(c) != base {
-		t.Fatalf("RawConnOf(accepted) = %v, want base", RawConnOf(c))
+	if InnermostConn(c) != base {
+		t.Fatalf("InnermostConn(accepted) = %v, want base", InnermostConn(c))
 	}
 
 	next := make(chan error, 1)
@@ -316,5 +321,23 @@ func TestChanListenerDoneContextFails(t *testing.T) {
 	}
 	if n := len(l.conns); n != 0 {
 		t.Fatalf("%d connections queued, want none", n)
+	}
+}
+
+func TestChanListenerTryDeliver(t *testing.T) {
+	l := NewChanListener(nil, 1)
+	a, b := &countedCloseConn{}, &countedCloseConn{}
+	if !l.TryDeliver(a) {
+		t.Fatal("TryDeliver() into a free queue failed")
+	}
+	if l.TryDeliver(b) || b.Calls() != 0 {
+		t.Fatal("TryDeliver() into a full queue succeeded or closed the connection")
+	}
+	if c, err := l.Accept(); err != nil || c != a {
+		t.Fatalf("Accept() = %v, %v", c, err)
+	}
+	_ = l.Close()
+	if l.TryDeliver(b) || b.Calls() != 0 {
+		t.Fatal("TryDeliver() on a closed listener succeeded or closed the connection")
 	}
 }

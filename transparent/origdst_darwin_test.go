@@ -59,18 +59,18 @@ func TestDarwinPfiocNatlookPortsAreNetworkByteOrder(t *testing.T) {
 }
 
 func TestOriginalDestinationOfDirectConnOnDarwin(t *testing.T) {
-	ln, err := Listen(context.Background(), "127.0.0.1:0")
+	ln, err := Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	_, server := dialAccepted(t, ln)
 
-	// Without root /dev/pf cannot be opened, and a direct connection has no
-	// rdr state; if pf does keep plain state for it, the lookup reports the
-	// connection's own destination.
-	dst, err := OriginalDestination(server)
-	if err == nil && dst.String() != ln.Addr().String() {
-		t.Fatalf("OriginalDestination = %v, want error or %v", dst, ln.Addr())
+	// Without root /dev/pf cannot be opened. As root, a direct connection
+	// has no rdr state, or plain state that reports its own destination:
+	// either way it is not redirected.
+	dst, redirected, err := OriginalDestination(server)
+	if err == nil && (dst.String() != ln.Addr().String() || redirected) {
+		t.Fatalf("OriginalDestination = %v, %v; want error or %v, false", dst, redirected, ln.Addr())
 	}
 }

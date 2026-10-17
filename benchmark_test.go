@@ -70,7 +70,7 @@ func benchmarkFramedConnReadSmallBuffer(b *testing.B, opts ...FramedOption) {
 func BenchmarkFramedConnReadSmallBuffer(b *testing.B) { benchmarkFramedConnReadSmallBuffer(b) }
 
 func BenchmarkFramedConnReadSmallBufferBuffered(b *testing.B) {
-	benchmarkFramedConnReadSmallBuffer(b, WithReadBuffer(64<<10))
+	benchmarkFramedConnReadSmallBuffer(b, WithFramedReadBuffer(64<<10))
 }
 
 type loopReadConn struct {

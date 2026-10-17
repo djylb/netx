@@ -19,10 +19,8 @@ func newDatagramListener(t *testing.T, policy Policy, opts ...netx.PacketListene
 	pl := netx.NewPacketListener(pc, opts...)
 	t.Cleanup(func() { _ = pl.Close() })
 	return &Listener{
-		Listener:      pl,
-		Policy:        func(net.Addr) Policy { return policy },
-		HeaderTimeout: time.Second,
-		Datagram:      true,
+		Listener: pl,
+		Config:   Config{Policy: policy, HeaderTimeout: time.Second, Datagram: true},
 	}
 }
 
@@ -62,9 +60,9 @@ func TestListenerDatagramHeaderWithPayload(t *testing.T) {
 	l := newDatagramListener(t, Required)
 	// Version 1 has no UDP token: UDP senders use TCP4 and send the header in
 	// the first datagram only.
-	header := V1Header(udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
+	header := wireOf(V1, udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
 	if string(header[:10]) != "PROXY TCP4" {
-		t.Fatalf("V1Header(udp) = %q", header)
+		t.Fatalf("wireOf(V1, udp) = %q", header)
 	}
 	server, client := sendDatagrams(t, l, append(header, "ping"...), []byte("second"), header)
 
@@ -100,7 +98,7 @@ func TestListenerDatagramHeaderWithPayload(t *testing.T) {
 
 func TestListenerDatagramHeaderAlone(t *testing.T) {
 	l := newDatagramListener(t, Required)
-	header := V2Header(udp("2001:db8::7", 40000), udp("2001:db8::1", 53))
+	header := wireOf(V2, udp("2001:db8::7", 40000), udp("2001:db8::1", 53))
 	server, _ := sendDatagrams(t, l, header, []byte("query"))
 	if got := server.RemoteAddr().String(); got != "[2001:db8::7]:40000" {
 		t.Fatalf("RemoteAddr() = %s", got)
@@ -159,7 +157,7 @@ func TestListenerDatagramOptionalEmptyFirstDatagram(t *testing.T) {
 // A datagram with a whole signature but too short for its header is a
 // malformed header under any policy, as a stream that ends inside one fails.
 func TestListenerDatagramTruncatedHeader(t *testing.T) {
-	v2 := V2Header(udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
+	v2 := wireOf(V2, udp("203.0.113.7", 40000), udp("198.51.100.1", 19132))
 	for _, policy := range []Policy{Required, Optional} {
 		for _, d := range [][]byte{[]byte("PROXY TCP4 203.0.113.7"), v2[:20]} {
 			l := newDatagramListener(t, policy)
@@ -180,8 +178,8 @@ func (r *datagramRecorder) Write(p []byte) (int, error) {
 }
 
 func TestListenerDatagramWriteTo(t *testing.T) {
-	l := newDatagramListener(t, Required, netx.WithIdleTimeout(200*time.Millisecond))
-	header := V1Header(udp("192.0.2.1", 1), udp("192.0.2.2", 2))
+	l := newDatagramListener(t, Required, netx.WithPacketIdleTimeout(200*time.Millisecond))
+	header := wireOf(V1, udp("192.0.2.1", 1), udp("192.0.2.2", 2))
 	server, _ := sendDatagrams(t, l, append(header, "a"...), []byte("bb"), []byte("ccc"))
 	var out datagramRecorder
 	n, err := io.Copy(&out, server)

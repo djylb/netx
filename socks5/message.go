@@ -9,7 +9,7 @@ func ReadMethods(r io.Reader) ([]Method, error) {
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
-	if hdr[0] != Version {
+	if hdr[0] != Version5 {
 		return nil, ErrVersion
 	}
 	var buf [255]byte
@@ -30,7 +30,7 @@ func WriteMethods(w io.Writer, methods ...Method) error {
 		return ErrMalformed
 	}
 	msg := make([]byte, 0, 2+len(methods))
-	msg = append(msg, Version, byte(len(methods)))
+	msg = append(msg, Version5, byte(len(methods)))
 	for _, m := range methods {
 		msg = append(msg, byte(m))
 	}
@@ -41,7 +41,7 @@ func WriteMethods(w io.Writer, methods ...Method) error {
 // the client that none of its methods were accepted; the server then closes
 // the connection.
 func WriteMethod(w io.Writer, m Method) error {
-	return write(w, []byte{Version, byte(m)})
+	return write(w, []byte{Version5, byte(m)})
 }
 
 // ReadMethod reads the server's method selection. It returns
@@ -52,7 +52,7 @@ func ReadMethod(r io.Reader) (Method, error) {
 	if _, err := io.ReadFull(r, msg[:]); err != nil {
 		return 0, err
 	}
-	if msg[0] != Version {
+	if msg[0] != Version5 {
 		return 0, ErrVersion
 	}
 	if Method(msg[1]) == MethodNoAcceptable {
@@ -129,7 +129,7 @@ func ReadRequest(r io.Reader) (Command, Addr, error) {
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return 0, Addr{}, err
 	}
-	if hdr[0] != Version {
+	if hdr[0] != Version5 {
 		return 0, Addr{}, ErrVersion
 	}
 	addr, err := ReadAddr(r)
@@ -159,7 +159,7 @@ func ReadReply(r io.Reader) (Addr, error) {
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return Addr{}, err
 	}
-	if hdr[0] != Version {
+	if hdr[0] != Version5 {
 		return Addr{}, ErrVersion
 	}
 	addr, err := ReadAddr(r)
@@ -176,7 +176,7 @@ func ReadReply(r io.Reader) (Addr, error) {
 // address.
 func writeMessage(w io.Writer, code byte, addr Addr) error {
 	var buf [3 + MaxAddrLen]byte
-	msg, err := addr.AppendBinary(append(buf[:0], Version, code, 0))
+	msg, err := addr.AppendBinary(append(buf[:0], Version5, code, 0))
 	if err != nil {
 		return err
 	}

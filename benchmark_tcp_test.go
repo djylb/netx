@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"context"
 	"io"
 	"net"
 	"testing"
@@ -61,7 +62,7 @@ func benchmarkFramedReadTCP(b *testing.B, opts ...FramedOption) {
 			}
 		}
 	}()
-	fc := NewFramedConn(client, append(opts, WithDatagramReads())...)
+	fc := NewFramedConn(client, append(opts, WithFramedDatagrams())...)
 	buf := make([]byte, 2048)
 	b.SetBytes(int64(len(payload)))
 	b.ReportAllocs()
@@ -75,7 +76,7 @@ func benchmarkFramedReadTCP(b *testing.B, opts ...FramedOption) {
 func BenchmarkFramedConnReadTCP(b *testing.B) { benchmarkFramedReadTCP(b) }
 
 func BenchmarkFramedConnReadTCPBuffered(b *testing.B) {
-	benchmarkFramedReadTCP(b, WithReadBuffer(64<<10))
+	benchmarkFramedReadTCP(b, WithFramedReadBuffer(64<<10))
 }
 
 func BenchmarkFramedConnWriteTCP(b *testing.B) {
@@ -89,5 +90,46 @@ func BenchmarkFramedConnWriteTCP(b *testing.B) {
 		if err := fc.WriteFrame(msg); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// BenchmarkRelayTCP moves data between two TCP connections, which splice
+// copies on Linux, without and with a counting flow, against io.Copy.
+func BenchmarkRelayTCP(b *testing.B) {
+	const chunk = 64 << 10
+	for _, mode := range []string{"io.Copy", "Relay", "RelayFlow"} {
+		b.Run(mode, func(b *testing.B) {
+			src, srcPeer := benchTCPPair(b)
+			dstPeer, dst := benchTCPPair(b)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				switch mode {
+				case "io.Copy":
+					_, _ = io.Copy(dst, srcPeer)
+				case "Relay":
+					_, _, _ = Relay(context.Background(), srcPeer, dst)
+				default:
+					var counted int64
+					_, _, _ = Relay(context.Background(), srcPeer, dst, WithRelayFlows(RelayFlow{Done: func(n int64) error {
+						counted += n
+						return nil
+					}}, RelayFlow{}))
+				}
+			}()
+			go func() { _, _ = io.Copy(io.Discard, dstPeer) }()
+			buf := make([]byte, chunk)
+			b.SetBytes(chunk)
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := src.Write(buf); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			_ = src.Close()
+			_ = dst.Close()
+			<-done
+		})
 	}
 }
