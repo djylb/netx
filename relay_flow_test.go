@@ -503,15 +503,17 @@ func TestRelayFlowFirst(t *testing.T) {
 	record := func() (*RelayFlow, func() []string) {
 		var mu sync.Mutex
 		var seen []string
-		return &RelayFlow{First: func(b []byte) {
+		flow := &RelayFlow{First: func(b []byte) {
 			mu.Lock()
 			seen = append(seen, string(b))
 			mu.Unlock()
-		}}, func() []string {
+		}}
+		got := func() []string {
 			mu.Lock()
 			defer mu.Unlock()
 			return append([]string(nil), seen...)
 		}
+		return flow, got
 	}
 	t.Run("TCP", func(t *testing.T) {
 		for _, prefix := range []string{"", "pre:"} {

@@ -178,9 +178,24 @@ func pipesOpen(t *testing.T) int {
 	return n
 }
 
+// settledPipes collects pooled pipes until no more than want are open, or
+// for at most 3s, and returns how many are open then.
+func settledPipes(t *testing.T, want int) int {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); pipesOpen(t) > want && time.Now().Before(deadline); {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+	return pipesOpen(t)
+}
+
 // Splicing relays hold no pipe while their Waits block after a full piece.
 func TestRelaySpliceBlockedWaitHoldsNoPipe(t *testing.T) {
 	const n = 20
+	// Pipes that the process holds already, such as those that splices of
+	// the standard library or of tests before keep pooled, are not these
+	// relays'.
+	before := settledPipes(t, 0)
 	release := make(chan struct{})
 	var blocked atomic.Int64
 	var wg sync.WaitGroup
@@ -206,11 +221,7 @@ func TestRelaySpliceBlockedWaitHoldsNoPipe(t *testing.T) {
 	}
 	waitUntil(t, func() bool { return blocked.Load() == n })
 	// Pipes put back stay pooled until collected; held ones stay open.
-	for deadline := time.Now().Add(3 * time.Second); pipesOpen(t) > 0 && time.Now().Before(deadline); {
-		runtime.GC()
-		time.Sleep(10 * time.Millisecond)
-	}
-	held := pipesOpen(t)
+	held := settledPipes(t, before) - before
 	close(release)
 	for _, p := range peers {
 		_ = p.Close()
