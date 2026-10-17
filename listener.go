@@ -162,8 +162,14 @@ func (l *ChanListener) drain() {
 //
 // Accept returns c wrapped so that its Close can be observed; InnermostConn
 // unwraps it. The wrapper hides c's concrete type, so to serve TLS pass the
-// plain connection and wrap the listener with tls.NewListener. Close closes c
-// only if Accept has not returned it yet.
+// plain connection and wrap the listener with tls.NewListener.
+//
+// The connection belongs to the server once Accept has returned it: Close
+// closes c only if Accept has not returned it yet, and otherwise only ends a
+// blocked Accept, so closing the listener does not cut off the connection
+// being served. To stop serving it, close the connection, or shut the server
+// down, as http.Server.Shutdown does for its connections; Serve returns once
+// the connection is closed.
 func NewSingleConnListener(c net.Conn) *SingleConnListener {
 	l := &SingleConnListener{conn: c, done: make(chan struct{})}
 	if c != nil {

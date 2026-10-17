@@ -261,7 +261,7 @@ func TestTimeoutConnKeepsUserDeadlines(t *testing.T) {
 	// Generous, so that a loaded host does not fail it.
 	near := func(got time.Time) bool {
 		d := time.Until(got)
-		return d > idle-time.Second && d <= idle
+		return d > idle-time.Second && d <= idle+idle/16
 	}
 	waitSlack := func() { time.Sleep(150 * time.Millisecond) }
 
@@ -356,8 +356,9 @@ func TestTimeoutConnIdleClockIsMonotonic(t *testing.T) {
 	}
 	// The stored deadline is an offset on the monotonic clock, not a wall
 	// clock reading that a clock step would move.
-	if d := time.Duration(conn.deadline.Load() - clockOffset(time.Now())); d <= idle-time.Second || d > idle {
-		t.Fatalf("stored idle deadline is %v ahead of the monotonic clock, want about %v", d, idle)
+	// It is idle plus the refresh slack of one second ahead.
+	if d := time.Duration(conn.deadline.Load() - clockOffset(time.Now())); d <= idle || d > idle+time.Second {
+		t.Fatalf("stored idle deadline is %v ahead of the monotonic clock, want about %v", d, idle+time.Second)
 	}
 	// The socket deadline keeps the monotonic reading too.
 	if rd, _ := raw.snapshot(); !strings.Contains(rd.String(), " m=") {
@@ -414,4 +415,21 @@ type readStartConn struct {
 func (c *readStartConn) Read(b []byte) (int, error) {
 	c.once.Do(func() { close(c.started) })
 	return c.Conn.Read(b)
+}
+
+// A connection never times out before it has been idle for the idle
+// timeout: the deadline is moved on once less than that is left.
+func TestTimeoutConnNeverEarly(t *testing.T) {
+	raw := &dirDeadlineConn{}
+	const idle = 1600 * time.Millisecond // slack 100ms
+	conn := NewTimeoutConn(raw, idle)
+	for range 5 {
+		if _, err := conn.Write([]byte("x")); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+		if _, wd := raw.snapshot(); time.Until(wd) < idle-10*time.Millisecond {
+			t.Fatalf("after a write the deadline is %v away, want at least %v", time.Until(wd), idle)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
 }

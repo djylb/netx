@@ -57,8 +57,12 @@ const (
 // pairs, such as a nil src, address types of other packages, or a TCP and a
 // UDP address. The header holds copies of the addresses.
 //
-// For a header without addresses, such as for a proxy's own health checks,
-// use Header{Version: v, Local: true}.
+// When the pair cannot be sent and the backend should still get a header,
+// send one without addresses explicitly: Header{Version: v} is PROXY
+// UNKNOWN in version 1 and a PROXY command with AF_UNSPEC in version 2, which
+// can still carry TLVs, so that the backend uses the connection's own
+// addresses. For a proxy's own connections, such as health checks, use
+// Header{Version: v, Local: true}, the LOCAL command.
 func NewHeader(v Version, src, dst net.Addr) (*Header, error) {
 	if v != V1 && v != V2 {
 		return nil, fmt.Errorf("proxyproto: unknown version %d", v)

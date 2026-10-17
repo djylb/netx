@@ -29,7 +29,11 @@ var ErrFrameDesync = errors.New("netx: framed stream desynchronized by a partial
 
 // FramedConn reads and writes length-prefixed messages over a reliable stream.
 //
-// Each frame is a 2-byte big-endian length followed by the payload.
+// Each frame is a 2-byte big-endian length followed by the payload. A frame
+// is sent with one write of the connection, header and payload together (a
+// vectored write on a *net.TCPConn), so a layer beneath, such as one that
+// compresses or encrypts each write, sees whole frames; the bytes on the
+// wire are the same however they are written.
 //
 // By default the connection is a stream: Write sends p as one frame, or as
 // several when it is longer than MaxFramePayload, which Reads join up again.

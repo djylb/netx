@@ -69,9 +69,11 @@ func main() {
 
 - A non-positive idle timeout sets none; `SetIdleTimeout` changes it later,
   such as from a short one during a handshake to a longer one after it.
-- `TimeoutConn` moves the deadline only once it lags by more than idle/16 (at
-  most 1s), so the per-call cost is an atomic load; a connection may time out
-  up to that slack early. Idle tracking uses the monotonic clock.
+- `TimeoutConn` moves the deadline only once less than the idle timeout is
+  left, and then to the idle timeout plus a slack of idle/16 (at most 1s), so
+  the per-call cost is an atomic load. A connection never times out before
+  it has been idle for the idle timeout, and at most that slack later. Idle
+  tracking uses the monotonic clock.
 - Deadlines set with `SetDeadline`, `SetReadDeadline` or `SetWriteDeadline`
   stay in effect until changed: setting them and each read or write set a
   direction's deadline to the earlier of that deadline and now plus the idle
@@ -228,7 +230,9 @@ srv := &http.Server{TLSConfig: &tls.Config{GetCertificate: store.GetCertificate}
 ### Framed messages
 
 `FramedConn` sends each message as a 2-byte big-endian length followed by up to
-`MaxFramePayload` (65535) bytes.
+`MaxFramePayload` (65535) bytes. Each frame goes out with one write of the
+connection, header and payload together (a vectored write on TCP), so a
+layer beneath that compresses or encrypts each write sees whole frames.
 
 ```go
 func exchange(conn net.Conn, packet []byte) ([]byte, error) {
@@ -505,8 +509,12 @@ func serveOne(c net.Conn, h http.Handler) error {
   reverse.
 - `NewSingleConnListener` returns the connection once. Later `Accept` calls
   return `net.ErrClosed` after the connection or the listener is closed. The
-  accepted connection is a wrapper (unwrap it with `InnermostConn`), so for TLS
-  wrap the listener with `tls.NewListener` instead of passing a `*tls.Conn`.
+  connection belongs to the server once accepted: closing the listener then
+  only ends a blocked `Accept` and leaves the connection being served, so stop
+  an `http.Server` on it with `Shutdown` or `Close`, or close the connection.
+  The accepted connection is a wrapper (unwrap it with `InnermostConn`), so
+  for TLS wrap the listener with `tls.NewListener` instead of passing a
+  `*tls.Conn`.
 
 ### UDP peers
 
@@ -655,7 +663,10 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
   TCP/UDP mix, rather than a header that would attribute the connection to
   the proxy. `Header.WriteTo` sends a `Header` with one `Write`, and
   `Header.AppendBinary` encodes it into a buffer, including version 2 TLVs
-  and AF_UNIX addresses; `Header{Local: true}` gives `LOCAL`.
+  and AF_UNIX addresses. When a pair cannot be sent, `Header{Version: v}`
+  sends a header without addresses (v1 `PROXY UNKNOWN`, v2 `AF_UNSPEC`, TLVs
+  allowed), and `Header{Version: v, Local: true}` gives `LOCAL` for a proxy's
+  own connections.
 - Version 2 TLVs carry an application's own fields in the custom types
   `TLVCustomMin` to `TLVCustomMax` (0xE0–0xEF), such as who a connection
   belongs to: `h.TLVs, err = h.TLVs.Append(proxyproto.TLVCustomMin, id)`, and

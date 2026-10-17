@@ -64,6 +64,24 @@ func ExampleNewSingleConnListener() {
 	// true
 }
 
+// Serve one connection with an http.Server and stop it from outside:
+// closing the listener would leave the connection being served alone, so
+// Shutdown, which closes the server's connections once idle, or Close ends
+// it.
+func ExampleNewSingleConnListener_shutdown() {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(netx.NewSingleConnListener(server)) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+	fmt.Println(errors.Is(<-served, http.ErrServerClosed))
+	// Output: true
+}
+
 // Forward a client to an echo backend.
 func ExampleRelay() {
 	client, front := net.Pipe()

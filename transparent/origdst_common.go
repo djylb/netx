@@ -37,8 +37,9 @@ var ErrOriginalDestinationUnsupported = fmt.Errorf("transparent: original destin
 // so the lookup and the local address are the accepted socket's rather than
 // an address that a wrapper reports, such as the destination of a PROXY
 // header, which conn.LocalAddr returns. A connection beneath which no socket
-// can be reached is an error. IPv4-mapped addresses are unmapped. A nil conn
-// returns net.ErrClosed.
+// can be reached is an error. IPv4-mapped addresses are unmapped, and a
+// link-local IPv6 address keeps its zone, such as [fe80::1%eth0]:80, which a
+// dialer needs to reach it. A nil conn returns net.ErrClosed.
 func OriginalDestination(conn net.Conn) (dst netip.AddrPort, redirected bool, err error) {
 	if conn == nil {
 		return netip.AddrPort{}, false, net.ErrClosed

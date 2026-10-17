@@ -14,9 +14,11 @@ import (
 // a short one for a handshake to a longer one once it is done. A
 // non-positive idle timeout sets none.
 //
-// To keep the per-call cost to an atomic load, the deadline is only moved once
-// it lags behind by more than a small slack (idle/16, at most one second), so
-// a connection may time out up to that slack early.
+// To keep the per-call cost to an atomic load, a read or write moves the
+// deadline only once less than the idle timeout is left, and then to now plus
+// the idle timeout and a small slack (idle/16, at most one second). A
+// connection therefore never times out before it has been idle for the idle
+// timeout, and at most that slack later.
 //
 // SetDeadline, SetReadDeadline and SetWriteDeadline are remembered until they
 // are changed again. Setting them and every read and write keep each
@@ -106,9 +108,8 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle <= 0 {
 		return nil
 	}
-	slack := int64(min(idle/16, time.Second))
-	if clockOffset(time.Now())+int64(idle)-c.deadline.Load() < slack {
-		return nil
+	if clockOffset(time.Now())+int64(idle) <= c.deadline.Load() {
+		return nil // at least idle left
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -117,15 +118,15 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle = time.Duration(c.idleTimeout.Load()); idle <= 0 {
 		return nil
 	}
-	slack = int64(min(idle/16, time.Second))
 	now := time.Now()
-	want := clockOffset(now) + int64(idle)
-	if want-c.deadline.Load() < slack {
+	if clockOffset(now)+int64(idle) <= c.deadline.Load() {
 		return nil
 	}
+	ahead := idle + min(idle/16, time.Second)
+	want := clockOffset(now) + int64(ahead)
 	// now.Add keeps the monotonic reading, so the socket deadline does not
 	// follow wall-clock steps either.
-	rd := now.Add(idle)
+	rd := now.Add(ahead)
 	wd := rd
 	if !c.userRead.IsZero() && c.userRead.Before(rd) {
 		rd = c.userRead
