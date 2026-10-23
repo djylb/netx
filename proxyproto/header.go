@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"iter"
 	"net"
@@ -34,6 +35,10 @@ var (
 	// signature but cannot be decoded even leniently: a version 1 TCP or UDP
 	// line whose addresses do not parse, or one longer than 256 bytes.
 	ErrMalformed = errors.New("proxyproto: malformed PROXY protocol header")
+	// ErrChecksum reports a version 2 header whose CRC32C field does not
+	// match its checksum, or that has more than one CRC32C field or one
+	// whose value is not 4 bytes. It matches ErrMalformed.
+	ErrChecksum = fmt.Errorf("%w: CRC32C checksum mismatch", ErrMalformed)
 )
 
 // TLVType is the type of a version 2 type-length-value field.
@@ -43,11 +48,20 @@ type TLVType byte
 const (
 	TLVALPN      TLVType = 0x01 // application protocol, as in TLS ALPN
 	TLVAuthority TLVType = 0x02 // host name the client asked for, as in TLS SNI
-	TLVCRC32C    TLVType = 0x03 // CRC32c checksum of the header
+	TLVCRC32C    TLVType = 0x03 // CRC32c checksum of the header; see TLVs.AppendCRC32C
 	TLVNoop      TLVType = 0x04 // padding
 	TLVUniqueID  TLVType = 0x05 // opaque connection identifier
-	TLVSSL       TLVType = 0x20 // TLS information of the client connection
+	TLVSSL       TLVType = 0x20 // TLS information of the client connection; see SSL
 	TLVNetNS     TLVType = 0x30 // network namespace name
+)
+
+// Types of the sub-fields of an SSL field (PP2_SUBTYPE_SSL_*); see SSL.
+const (
+	TLVSSLVersion TLVType = 0x21 // TLS version, such as "TLSv1.3"
+	TLVSSLCN      TLVType = 0x22 // Common Name of the client certificate's subject
+	TLVSSLCipher  TLVType = 0x23 // cipher suite, such as "ECDHE-RSA-AES128-GCM-SHA256"
+	TLVSSLSigAlg  TLVType = 0x24 // signature algorithm of the client certificate
+	TLVSSLKeyAlg  TLVType = 0x25 // key algorithm of the client certificate, such as "RSA2048"
 )
 
 // TLV type ranges that the specification leaves to applications: custom
@@ -83,6 +97,16 @@ func (t TLVType) String() string {
 		return "SSL"
 	case TLVNetNS:
 		return "NETNS"
+	case TLVSSLVersion:
+		return "SSL_VERSION"
+	case TLVSSLCN:
+		return "SSL_CN"
+	case TLVSSLCipher:
+		return "SSL_CIPHER"
+	case TLVSSLSigAlg:
+		return "SSL_SIG_ALG"
+	case TLVSSLKeyAlg:
+		return "SSL_KEY_ALG"
 	default:
 		return fmt.Sprintf("0x%02x", byte(t))
 	}
@@ -134,6 +158,48 @@ func (f TLVs) Get(t TLVType) ([]byte, bool) {
 	return nil, false
 }
 
+// AppendCRC32C appends a CRC32C field, whose value AppendBinary fills in
+// with the checksum of the encoded header, as the receiver then verifies.
+// The specification computes it over the whole header, so append it once,
+// in any place among the fields.
+func (f TLVs) AppendCRC32C() TLVs {
+	return append(f, byte(TLVCRC32C), 0, 4, 0, 0, 0, 0)
+}
+
+// crc32cField returns the offset in f of the value of its CRC32C field, or
+// -1 without one. Fields that are cut short end the search. It reports
+// false for a CRC32C value that is not 4 bytes or for a second CRC32C
+// field, which leave the checksum undefined.
+func (f TLVs) crc32cField() (int, bool) {
+	off := -1
+	for pos := 0; pos+3 <= len(f); {
+		n := int(binary.BigEndian.Uint16(f[pos+1 : pos+3]))
+		if pos+3+n > len(f) {
+			break
+		}
+		if TLVType(f[pos]) == TLVCRC32C {
+			if n != 4 || off >= 0 {
+				return -1, false
+			}
+			off = pos + 3
+		}
+		pos += 3 + n
+	}
+	return off, true
+}
+
+// headerCRC32C returns the CRC32c checksum of the version 2 header hdr, with
+// the 4 bytes of its CRC32C value at off counted as zero.
+func headerCRC32C(hdr []byte, off int) uint32 {
+	// MakeTable keeps the Castagnoli table after its first call, and uses
+	// the CPU's instructions where there are some.
+	tab := crc32.MakeTable(crc32.Castagnoli)
+	var zero [4]byte
+	crc := crc32.Update(0, tab, hdr[:off])
+	crc = crc32.Update(crc, tab, zero[:])
+	return crc32.Update(crc, tab, hdr[off+4:])
+}
+
 // wellFormed reports whether f is a sequence of whole fields.
 func (f TLVs) wellFormed() bool {
 	for rest := f; len(rest) > 0; {
@@ -169,11 +235,6 @@ type Header struct {
 	TLVs TLVs
 }
 
-// TLV returns the value of the first field of type t.
-func (h *Header) TLV(t TLVType) ([]byte, bool) {
-	return h.TLVs.Get(t)
-}
-
 // UDPAddrs returns Source and Destination with *net.TCPAddr converted to
 // *net.UDPAddr, for a header sent ahead of UDP traffic. Version 1 has no UDP
 // token, so UDP senders use TCP4 and TCP6, and some use a version 2 STREAM
@@ -200,8 +261,10 @@ func udpAddr(a net.Addr) net.Addr {
 // UNKNOWN" or a PROXY command of the AF_UNSPEC family. Version 1 has no UDP
 // token, so UDP pairs use the TCP4 and TCP6 tokens. AppendBinary fails for
 // other addresses, for TLVs in version 1, and in version 2 for TLVs that are
-// not a sequence of whole fields or an address and TLV block of more than
-// 65535 bytes. On failure b is returned unchanged.
+// not a sequence of whole fields, for more than one CRC32C field or one
+// whose value is not 4 bytes, and for an address and TLV block of more than
+// 65535 bytes. On failure b is returned unchanged. A CRC32C field gets the
+// checksum of the encoded header as its value; see TLVs.AppendCRC32C.
 func (h *Header) AppendBinary(b []byte) ([]byte, error) {
 	a, err := h.addrs()
 	if err != nil {
@@ -309,6 +372,10 @@ func appendV2(b []byte, h *Header, a headerAddrs) ([]byte, error) {
 	if !h.TLVs.wellFormed() {
 		return b, errors.New("proxyproto: TLVs cut short")
 	}
+	crcOff, ok := h.TLVs.crc32cField()
+	if !ok {
+		return b, errors.New("proxyproto: CRC32C field not a single 4-byte value")
+	}
 	var cmd, famProto byte = 0x20, 0x00 // LOCAL, AF_UNSPEC
 	size := 0
 	if !h.Local {
@@ -336,6 +403,7 @@ func appendV2(b []byte, h *Header, a headerAddrs) ([]byte, error) {
 		return b, fmt.Errorf("proxyproto: header of %d bytes", v2HeadLen+n)
 	}
 	b = slices.Grow(b, v2HeadLen+n)
+	start := len(b)
 	b = append(b, v2Signature...)
 	b = append(b, cmd, famProto)
 	b = binary.BigEndian.AppendUint16(b, uint16(n))
@@ -348,7 +416,12 @@ func appendV2(b []byte, h *Header, a headerAddrs) ([]byte, error) {
 	case addrNone:
 		// No address block.
 	}
-	return append(b, h.TLVs...), nil
+	b = append(b, h.TLVs...)
+	if crcOff >= 0 {
+		off := len(b) - len(h.TLVs) + crcOff - start
+		binary.BigEndian.PutUint32(b[start+off:], headerCRC32C(b[start:], off))
+	}
+	return b, nil
 }
 
 func appendV2IPs(b []byte, p ipPair) []byte {

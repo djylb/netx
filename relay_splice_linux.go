@@ -2,10 +2,8 @@ package netx
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
-	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -60,13 +58,12 @@ func closePipe(fds [2]int) {
 // returns false when splice cannot be used, before it moved anything but the
 // prefix, whose bytes it counts, so that the caller copies the rest
 // otherwise.
-func spliceCopy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int64, bool, error) {
-	srcConn, _ := unwrapPrefix(src).(net.Conn)
+func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow) (int64, bool, error) {
+	srcConn, _ := s.base.(net.Conn)
 	srcSys, ok1 := srcConn.(syscall.Conn)
-	dstConn, _ := unwrapConn(dst).(net.Conn)
+	dstConn, _ := d.base.(net.Conn)
 	dstSys, ok2 := dstConn.(syscall.Conn)
-	srcTimeouts, dstTimeouts := timeoutsOf(src), timeoutsOf(dst)
-	sock := socketSource(src)
+	sock := s.socket()
 	if !ok1 || !ok2 || dstConn == nil || sock == nil {
 		return 0, false, nil
 	}
@@ -78,9 +75,9 @@ func spliceCopy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow)
 	if err != nil {
 		return 0, false, nil
 	}
-	// The prefix is read through src, before the connection beneath.
-	written, err := copyPrefix(ctx, dst, src, f)
-	if err != nil {
+	// The prefix is read through the source, before the connection beneath.
+	written, over, err := copyPrefix(ctx, d.w, s, f)
+	if over {
 		return written, true, err
 	}
 
@@ -171,18 +168,18 @@ func spliceCopy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow)
 			}
 		}
 		want, noPipe, spliceErr = int(n), false, nil
-		if err := srcTimeouts.refresh(); err != nil {
+		if err := s.timeouts.refresh(); err != nil {
 			return written, true, err
 		}
 		if err := srcRaw.Read(fill); err != nil {
-			return written, true, asReadError(err)
+			return written, true, rawOpError(err, "read")
 		}
 		if noPipe {
 			// Through the wrappers, whose reads and writes refresh their
 			// deadlines.
-			m, done, err := copyPiece(dst, src, n, f)
+			m, over, err := copyOnce(d.w, s.r, n, f, nil)
 			written += m
-			if done || err != nil {
+			if over {
 				return written, true, err
 			}
 			full = false
@@ -192,20 +189,20 @@ func spliceCopy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow)
 			if !spliced && unsupportedSplice(spliceErr) {
 				return written, false, nil
 			}
-			return written, true, spliceOpError(srcConn, spliceErr)
+			return written, true, sockOpError(srcConn, "splice", "splice", spliceErr)
 		}
 		if inPipe == 0 {
 			return written, true, nil // EOF
 		}
 		full = inPipe == want
 		out = 0
-		writeErr := dstTimeouts.refresh()
+		writeErr := d.timeouts.refresh()
 		if writeErr == nil {
-			writeErr = asWriteError(dstRaw.Write(drain))
+			writeErr = rawOpError(dstRaw.Write(drain), "write")
 		}
 		written += out
 		if writeErr == nil && spliceErr != nil {
-			writeErr = spliceOpError(dstConn, spliceErr)
+			writeErr = sockOpError(dstConn, "splice", "splice", spliceErr)
 		}
 		if derr := f.done(out); writeErr == nil {
 			writeErr = derr
@@ -214,52 +211,6 @@ func spliceCopy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow)
 			return written, true, writeErr
 		}
 	}
-}
-
-// copyPiece copies one read of at most n bytes from src to dst through
-// Relay's buffer, and reports whether the copy is over.
-func copyPiece(dst io.Writer, src io.Reader, n int64, f *RelayFlow) (int64, bool, error) {
-	bp := relayBufPool.Get().(*[]byte)
-	defer relayBufPool.Put(bp)
-	r, rerr := src.Read((*bp)[:min(n, relayBufSize)])
-	var written int64
-	if r > 0 {
-		m, werr := dst.Write((*bp)[:r])
-		written = int64(m)
-		if werr == nil && m != r {
-			werr = io.ErrShortWrite
-		}
-		if derr := f.done(written); werr == nil {
-			werr = derr
-		}
-		if werr != nil {
-			return written, true, werr
-		}
-	}
-	if rerr == io.EOF {
-		return written, true, nil
-	}
-	return written, rerr != nil, rerr
-}
-
-// asWriteError reports an error of RawConn.Write as one of Write.
-func asWriteError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var oe *net.OpError
-	if errors.As(err, &oe) && oe.Op == "raw-write" {
-		e := *oe
-		e.Op = "write"
-		return &e
-	}
-	return err
-}
-
-// spliceOpError reports a splice error of c as its I/O errors are reported.
-func spliceOpError(c net.Conn, err error) error {
-	return &net.OpError{Op: "splice", Net: c.LocalAddr().Network(), Source: c.LocalAddr(),
-		Addr: c.RemoteAddr(), Err: os.NewSyscallError("splice", err)}
 }
 
 // unsupportedSplice reports whether err means that splice does not work for
@@ -272,39 +223,22 @@ func unsupportedSplice(err error) bool {
 	return false
 }
 
-// copyPrefix copies the prefix bytes that PrefixConns around src still hold
-// to dst, reading them through src, which returns them without reading the
-// connection beneath.
-func copyPrefix(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int64, error) {
+// copyPrefix copies the prefix bytes that PrefixConns around the source
+// still hold to dst, reading them through the source, which returns them
+// without reading the connection beneath, and reports whether the copy is
+// over.
+func copyPrefix(ctx context.Context, dst io.Writer, s *relaySource, f *RelayFlow) (int64, bool, error) {
 	var written int64
-	for prefixPending(src) {
+	for s.prefixPending() {
 		n, err := f.wait(ctx, relayBufSize)
 		if err != nil {
-			return written, err
+			return written, true, err
 		}
-		bp := relayBufPool.Get().(*[]byte)
-		r, rerr := src.Read((*bp)[:n])
-		if r == 0 {
-			// The source ended or failed: a PrefixConn whose prefix is gone
-			// reads the connection beneath.
-			relayBufPool.Put(bp)
-			if rerr == io.EOF {
-				rerr = nil
-			}
-			return written, rerr
-		}
-		m, werr := dst.Write((*bp)[:r])
-		relayBufPool.Put(bp)
-		written += int64(m)
-		if werr == nil && m != r {
-			werr = io.ErrShortWrite
-		}
-		if derr := f.done(int64(m)); werr == nil {
-			werr = derr
-		}
-		if werr != nil {
-			return written, werr
+		m, over, err := copyOnce(dst, s.r, n, f, nil)
+		written += m
+		if over {
+			return written, true, err
 		}
 	}
-	return written, nil
+	return written, false, nil
 }

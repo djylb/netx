@@ -100,10 +100,10 @@ func addrString(a net.Addr) string {
 
 func TestHeaderTLVAndErrors(t *testing.T) {
 	h := &Header{TLVs: mkTLVs(t, field{TLVALPN, "h2"}, field{TLVALPN, "http/1.1"})}
-	if v, ok := h.TLV(TLVALPN); !ok || string(v) != "h2" {
+	if v, ok := h.TLVs.Get(TLVALPN); !ok || string(v) != "h2" {
 		t.Fatalf("TLV(ALPN) = %q, %v", v, ok)
 	}
-	if _, ok := h.TLV(TLVAuthority); ok {
+	if _, ok := h.TLVs.Get(TLVAuthority); ok {
 		t.Fatal("TLV(Authority) found")
 	}
 	if _, err := (&Header{Version: V1, TLVs: h.TLVs}).AppendBinary(nil); err == nil {
@@ -315,6 +315,8 @@ func FuzzDecode(f *testing.F) {
 	f.Add([]byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"))
 	f.Add(wireOf(V2, tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)))
 	f.Add(wireOf(V2, &net.UnixAddr{Name: "/a", Net: "unix"}, &net.UnixAddr{Name: "/b", Net: "unix"}))
+	withCRC, _ := (&Header{Version: V2, Local: true, TLVs: TLVs(nil).AppendCRC32C()}).AppendBinary(nil)
+	f.Add(withCRC)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		h, n, err := Decode(b)
 		if err != nil {

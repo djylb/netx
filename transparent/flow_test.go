@@ -30,14 +30,19 @@ func redirectedInfo(src, dst string) PacketInfo {
 
 func acceptFlow(t *testing.T, l *FlowListener) *FlowConn {
 	t.Helper()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := l.Accept()
+		accepted <- c
+	}()
 	select {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Accept timed out")
-	case f := <-l.accept:
-		// As Accept does, without blocking past the timeout.
-		f.touch()
-		f.accepted.Store(true)
-		return f
+	case c := <-accepted:
+		if c == nil {
+			t.Fatal("Accept failed")
+		}
+		return c.(*FlowConn)
 	}
 	return nil
 }
@@ -58,7 +63,7 @@ func TestFlowKeying(t *testing.T) {
 	l.deliver([]byte("a2"), redirectedInfo("192.0.2.1:1000", "198.51.100.1:53"))
 	l.deliver([]byte("b"), redirectedInfo("192.0.2.1:1000", "198.51.100.2:53"))
 	l.deliver([]byte("c"), redirectedInfo("192.0.2.2:1000", "198.51.100.1:53"))
-	if n := len(l.accept); n != 3 {
+	if n := l.flows.Pending(); n != 3 {
 		t.Fatalf("%d flows started, want 3", n)
 	}
 	for _, want := range []struct{ src, dst, data string }{
@@ -82,7 +87,7 @@ func TestFlowDropsDirectDatagrams(t *testing.T) {
 	info := redirectedInfo("192.0.2.1:1000", "127.0.0.1:53")
 	info.Redirected = false
 	l.deliver([]byte("x"), info)
-	if n := len(l.accept); n != 0 {
+	if n := l.flows.Pending(); n != 0 {
 		t.Fatalf("%d direct flows started, want 0", n)
 	}
 }
@@ -118,15 +123,15 @@ func TestFlowAcceptBacklog(t *testing.T) {
 	for _, src := range []string{"192.0.2.1:1", "192.0.2.1:2", "192.0.2.1:3"} {
 		l.deliver([]byte(src), redirectedInfo(src, "198.51.100.1:53"))
 	}
-	if n := len(l.accept); n != 2 {
+	if n := l.flows.Pending(); n != 2 {
 		t.Fatalf("%d flows wait for Accept, want 2", n)
 	}
-	if _, ok := l.flows[flowKey{src: netip.MustParseAddrPort("192.0.2.1:3"), dst: netip.MustParseAddrPort("198.51.100.1:53")}]; ok {
+	if _, ok := l.flows.Get(flowKey{src: netip.MustParseAddrPort("192.0.2.1:3"), dst: netip.MustParseAddrPort("198.51.100.1:53")}); ok {
 		t.Fatal("a flow beyond the backlog was kept")
 	}
 	_ = acceptFlow(t, l)
 	l.deliver([]byte("4"), redirectedInfo("192.0.2.1:4", "198.51.100.1:53"))
-	if n := len(l.accept); n != 2 {
+	if n := l.flows.Pending(); n != 2 {
 		t.Fatalf("%d flows wait for Accept after one was accepted, want 2", n)
 	}
 }
@@ -245,8 +250,7 @@ func TestFlowListenerClose(t *testing.T) {
 	l.deliver([]byte("1"), redirectedInfo("192.0.2.1:1", "198.51.100.1:53"))
 	l.deliver([]byte("2"), redirectedInfo("192.0.2.1:2", "198.51.100.1:53"))
 	accepted := acceptFlow(t, l)
-	waiting := <-l.accept
-	l.accept <- waiting
+	waiting, _ := l.flows.Get(flowKey{src: netip.MustParseAddrPort("192.0.2.1:2"), dst: netip.MustParseAddrPort("198.51.100.1:53")})
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -262,7 +266,7 @@ func TestFlowListenerClose(t *testing.T) {
 		t.Fatalf("Accept() error = %v, want net.ErrClosed", err)
 	}
 	l.deliver([]byte("3"), redirectedInfo("192.0.2.1:3", "198.51.100.1:53"))
-	if len(l.accept) != 0 || len(l.flows) != 0 {
+	if l.flows.Pending() != 0 || l.flows.Len() != 0 {
 		t.Fatal("a closed listener started a flow")
 	}
 }
@@ -272,9 +276,8 @@ func TestFlowAcceptSkipsClosed(t *testing.T) {
 	l := testFlowListener(t)
 	l.deliver([]byte("1"), redirectedInfo("192.0.2.1:1", "198.51.100.1:53"))
 	l.deliver([]byte("2"), redirectedInfo("192.0.2.1:2", "198.51.100.1:53"))
-	first := <-l.accept
+	first, _ := l.flows.Get(flowKey{src: netip.MustParseAddrPort("192.0.2.1:1"), dst: netip.MustParseAddrPort("198.51.100.1:53")})
 	_ = first.Close()
-	l.accept <- first
 	c, err := l.Accept()
 	if err != nil || c.RemoteAddr().String() != "192.0.2.1:2" {
 		t.Fatalf("Accept() = %v, %v; want the open flow", c, err)
@@ -345,9 +348,15 @@ func TestFlowNoLeaks(t *testing.T) {
 	}
 }
 
-// openFDs counts the descriptors of this process.
+// openFDs counts the descriptors of this process. It first starts the
+// runtime's network poller, whose descriptors stay open for the life of the
+// process, so a count taken before the first socket is comparable to one
+// taken after.
 func openFDs(t *testing.T) int {
 	t.Helper()
+	if pc, err := net.ListenPacket("udp", "127.0.0.1:0"); err == nil {
+		_ = pc.Close()
+	}
 	entries, err := os.ReadDir("/dev/fd")
 	if err != nil {
 		t.Skipf("cannot count descriptors: %v", err)
@@ -365,7 +374,7 @@ func TestFlowShutdownRemovesFirst(t *testing.T) {
 	var open bool
 	testHookFlowShutdown = func(g *FlowConn) {
 		if g == f {
-			open = !isClosedChan(f.closed)
+			open = !f.q.Closed()
 			l.deliver([]byte("2"), info)
 		}
 	}
@@ -379,4 +388,47 @@ func TestFlowShutdownRemovesFirst(t *testing.T) {
 		t.Fatal("the datagram went to the closing flow")
 	}
 	readFlow(t, g, "2")
+}
+
+// A flood of spoofed sources takes no more than WithFlowMaxConns places;
+// the flows there keep receiving, and a place freed by Close goes to the
+// next new flow.
+func TestFlowMaxConnsSpoofedFlood(t *testing.T) {
+	const limit = 4
+	l := testFlowListener(t, WithFlowMaxConns(limit), WithFlowAcceptBacklog(1000))
+	src := func(i int) string {
+		return netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, byte(i >> 8), byte(i)}), 1000).String()
+	}
+	for i := range 500 {
+		l.deliver([]byte("x"), redirectedInfo(src(i), "198.51.100.1:53"))
+	}
+	if n := l.flows.Len(); n != limit {
+		t.Fatalf("%d flows after the flood, want %d", n, limit)
+	}
+	f := acceptFlow(t, l)
+	l.deliver([]byte("y"), redirectedInfo(src(0), "198.51.100.1:53"))
+	readFlow(t, f, "x")
+	readFlow(t, f, "y")
+	_ = f.Close()
+	l.deliver([]byte("z"), redirectedInfo(src(600), "198.51.100.1:53"))
+	if _, ok := l.flows.Get(flowKey{src: netip.MustParseAddrPort(src(600)), dst: netip.MustParseAddrPort("198.51.100.1:53")}); !ok || l.flows.Len() != limit {
+		t.Fatal("the freed place did not go to the next new flow")
+	}
+}
+
+// As on a socket, an expired read deadline fails Read even while datagrams
+// are queued.
+func TestFlowReadHonorsDeadlineBeforeQueue(t *testing.T) {
+	l := testFlowListener(t)
+	info := redirectedInfo("192.0.2.1:1000", "198.51.100.1:53")
+	l.deliver([]byte("1"), info)
+	f := acceptFlow(t, l)
+	_ = f.SetReadDeadline(time.Now().Add(-time.Second))
+	for range 3 {
+		if _, err := f.Read(make([]byte, 8)); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Read() past the deadline = %v, want ErrDeadlineExceeded", err)
+		}
+	}
+	_ = f.SetReadDeadline(time.Time{})
+	readFlow(t, f, "1")
 }

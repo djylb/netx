@@ -3,7 +3,6 @@ package proxydial
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -29,13 +28,11 @@ type HTTPDialer struct {
 	// another authentication scheme. Username cannot contain a colon.
 	Username string
 	Password string
-	// TLSConfig, when set, makes the dialer speak TLS to the proxy, as for an
-	// https proxy URL. An empty ServerName defaults to the proxy's host.
-	TLSConfig *tls.Config
 	// Header holds extra fields for the CONNECT request, such as
 	// User-Agent or Proxy-Authorization.
 	Header textproto.MIMEHeader
-	// Forward dials the proxy; nil means a zero net.Dialer.
+	// Forward dials the proxy; nil means a zero net.Dialer. For an https
+	// proxy, set it to a *tlsconn.Dialer, as FromURL does.
 	Forward netx.ContextDialer
 }
 
@@ -57,46 +54,39 @@ func (d *HTTPDialer) DialContext(ctx context.Context, network, address string) (
 	if err != nil {
 		return nil, err
 	}
-	forward := forwardOf(d.Forward)
-	if d.TLSConfig != nil {
-		forward = &tlsDialer{config: d.tlsConfig(), forward: d.Forward}
-	}
-	c, err := forward.DialContext(ctx, "tcp", d.ProxyAddr)
+	c, err := forwardOf(d.Forward).DialContext(ctx, "tcp", d.ProxyAddr)
 	if err != nil {
 		return nil, err
 	}
-	var tunnel net.Conn
-	if err := handshake(ctx, c, func() (err error) {
-		tunnel, err = connect(c, req)
-		return err
-	}); err != nil {
-		return nil, err
-	}
-	return tunnel, nil
+	return d.handshake(ctx, c, req)
 }
 
 // Handshake asks the proxy behind c, an established connection to it, for a
 // tunnel to address with a CONNECT request, as DialContext does after
-// dialing; ProxyAddr, TLSConfig and Forward are not used. ctx bounds the
-// handshake, as netx.DoWithContext does, and on success c has no deadline
+// dialing; ProxyAddr and Forward are not used. ctx bounds the
+// handshake, as netx.DoHandshake does, and on success c has no deadline
 // set. A reply other than 2xx is returned as a *ConnectError.
 //
 // The returned connection is c, or a *netx.PrefixConn over c when the proxy
-// sent tunnel bytes along with its reply. On failure c is left open for the
-// caller to close; after a timeout or the end of ctx it is unusable, and the
-// connection beneath a *tls.Conn is already closed, so that closing it sends
-// no close_notify the proxy cannot authenticate.
+// sent tunnel bytes along with its reply. On failure c is closed, as by
+// netx.DoHandshake.
 func (d *HTTPDialer) Handshake(ctx context.Context, c net.Conn, address string) (net.Conn, error) {
 	req, err := d.request(address)
 	if err != nil {
+		_ = c.Close()
 		return nil, err
 	}
+	return d.handshake(ctx, c, req)
+}
+
+// handshake sends the CONNECT request req over c and reads the reply,
+// closing c when it fails.
+func (d *HTTPDialer) handshake(ctx context.Context, c net.Conn, req []byte) (net.Conn, error) {
 	var tunnel net.Conn
-	if err := netx.DoWithContext(ctx, c, func() (err error) {
+	if err := netx.DoHandshake(ctx, c, func() (err error) {
 		tunnel, err = connect(c, req)
 		return err
 	}); err != nil {
-		closeBeneathTLS(ctx, c, err)
 		return nil, err
 	}
 	return tunnel, nil
@@ -138,14 +128,6 @@ func (d *HTTPDialer) request(address string) ([]byte, error) {
 		}
 	}
 	return append(b, "\r\n"...), nil
-}
-
-func (d *HTTPDialer) tlsConfig() *tls.Config {
-	host, _, err := net.SplitHostPort(d.ProxyAddr)
-	if err != nil {
-		host = d.ProxyAddr // no port, as for a Forward dialer of Unix sockets
-	}
-	return tlsConfigFor(d.TLSConfig, host)
 }
 
 // ConnectError is a proxy's reply other than 2xx to a CONNECT request, such

@@ -44,7 +44,7 @@ func TestCopy(t *testing.T) {
 		_ = peer.(*net.TCPConn).CloseWrite()
 	}()
 	var buf bytes.Buffer
-	n, err := Copy(context.Background(), &buf, c, f)
+	n, err := Copy(context.Background(), &buf, c, &f)
 	if n != 5 || err != nil || buf.String() != "hello" {
 		t.Fatalf("Copy() = %d, %v, %q", n, err, buf.String())
 	}
@@ -58,7 +58,7 @@ func TestCopy(t *testing.T) {
 	peer2, c2 := tcpPair(t)
 	go func() { _, _ = peer2.Write([]byte("abc")); _ = peer2.Close() }()
 	buf.Reset()
-	if n, err := Copy(context.Background(), &buf, c2, RelayFlow{}); n != 3 || err != nil {
+	if n, err := Copy(context.Background(), &buf, c2, nil); n != 3 || err != nil {
 		t.Fatalf("Copy(nil flow) = %d, %v", n, err)
 	}
 }
@@ -78,7 +78,7 @@ func TestCopyContextInterrupts(t *testing.T) {
 		f := rec.flow()
 		done := make(chan error, 1)
 		go func() {
-			_, err := Copy(ctx, io.Discard, src, f)
+			_, err := Copy(ctx, io.Discard, src, &f)
 			done <- err
 		}()
 		time.Sleep(20 * time.Millisecond)
@@ -101,7 +101,7 @@ func TestCopyContextInterrupts(t *testing.T) {
 			t.Fatalf("wrap %t: read after Copy() = %v", wrap, err)
 		}
 		// An already done context copies nothing.
-		if n, err := Copy(ctx, io.Discard, src, RelayFlow{}); n != 0 || !errors.Is(err, errStop) {
+		if n, err := Copy(ctx, io.Discard, src, nil); n != 0 || !errors.Is(err, errStop) {
 			t.Fatalf("wrap %t: Copy(done ctx) = %d, %v", wrap, n, err)
 		}
 	}
@@ -123,7 +123,7 @@ func TestRelayFlowEnd(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayHalfClose(), WithRelayFlows(upFlow, downFlow))
+			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayHalfClose(), WithRelayFlows(&upFlow, &downFlow))
 			done <- err
 		}()
 		_, _ = userA.Write([]byte("ab"))
@@ -155,7 +155,7 @@ func TestRelayFlowEnd(t *testing.T) {
 		var up, down endRecord
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayFlows(up.flow(), down.flow()))
+			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayFlows(new(up.flow()), new(down.flow())))
 			done <- err
 		}()
 		_ = userA.Close()
@@ -369,7 +369,7 @@ func TestRelayIdleTimeoutLeavesDeadlines(t *testing.T) {
 		}}
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayIdleTimeout(idle), WithRelayFlows(flow, RelayFlow{}))
+			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayIdleTimeout(idle), WithRelayFlows(&flow, nil))
 			done <- err
 		}()
 		_, _ = userA.Write([]byte("x"))

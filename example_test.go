@@ -121,7 +121,7 @@ func ExampleWithRelayFlows() {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error)
 	go func() {
-		_, _, err := netx.Relay(ctx, front, back, netx.WithRelayFlows(count, netx.RelayFlow{}))
+		_, _, err := netx.Relay(ctx, front, back, netx.WithRelayFlows(&count, nil))
 		done <- err
 	}()
 

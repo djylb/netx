@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // natlookAddr returns the redirect destination that a pf DIOCNATLOOK lookup
@@ -38,7 +40,7 @@ func natlookKeyOf(conn net.Conn, local netip.AddrPort) (natlookKey, error) {
 	if !ok || ra == nil {
 		return natlookKey{}, fmt.Errorf("remote address is not tcp: %T", conn.RemoteAddr())
 	}
-	remote := unmapAddrPort(ra.AddrPort())
+	remote := netutil.UnmapAddrPort(ra.AddrPort())
 	if remote.Addr().Is4() != local.Addr().Is4() {
 		return natlookKey{}, fmt.Errorf("remote address %v and local address %v differ in family", remote, local)
 	}

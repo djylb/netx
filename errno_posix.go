@@ -4,18 +4,21 @@ package netx
 
 import "syscall"
 
-// Errno tables used by the error classifiers in errors.go.
-var (
-	connResetErrnos    = []error{syscall.ECONNRESET}
-	connAbortedErrnos  = []error{syscall.ECONNABORTED}
-	brokenPipeErrnos   = []error{syscall.EPIPE}
-	connRefusedErrnos  = []error{syscall.ECONNREFUSED}
-	hostUnreachErrnos  = []error{syscall.EHOSTUNREACH}
-	netUnreachErrnos   = []error{syscall.ENETUNREACH}
-	accessErrnos       = []error{syscall.EACCES}
-	permErrnos         = []error{syscall.EPERM}
-	timedOutErrnos     = []error{syscall.ETIMEDOUT}
-	addrInUseErrnos    = []error{syscall.EADDRINUSE}
-	addrNotAvailErrnos = []error{syscall.EADDRNOTAVAIL}
-	msgSizeErrnos      = []error{syscall.EMSGSIZE}
-)
+// platformErrnos are the errnos of each errnoID; see errors.go.
+// errnoValue is the type of the errors in platformErrnos.
+type errnoValue = syscall.Errno
+
+var platformErrnos = [numErrnoIDs][]errnoValue{
+	eConnReset:    {syscall.ECONNRESET},
+	eConnAborted:  {syscall.ECONNABORTED},
+	ePipe:         {syscall.EPIPE},
+	eConnRefused:  {syscall.ECONNREFUSED},
+	eHostUnreach:  {syscall.EHOSTUNREACH},
+	eNetUnreach:   {syscall.ENETUNREACH},
+	eAccess:       {syscall.EACCES},
+	ePerm:         {syscall.EPERM},
+	eTimedOut:     {syscall.ETIMEDOUT},
+	eAddrInUse:    {syscall.EADDRINUSE},
+	eAddrNotAvail: {syscall.EADDRNOTAVAIL},
+	eMsgSize:      {syscall.EMSGSIZE},
+}

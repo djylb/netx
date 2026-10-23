@@ -3,13 +3,13 @@ package transparent
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/netip"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/djylb/netx/internal/dgram"
 )
 
 // FlowListener accepts one connection per flow of the datagrams that TPROXY
@@ -28,16 +28,17 @@ import (
 // closed, so a listener facing untrusted or spoofed sources should set
 // WithFlowIdleTimeout or read deadlines.
 type FlowListener struct {
-	c      *net.UDPConn
-	accept chan *FlowConn
-	done   chan struct{}
-	flows  map[flowKey]*FlowConn
+	c     *net.UDPConn
+	flows dgram.Table[flowKey, *FlowConn]
 	// closeErr is the error of closing c, set once.
 	closeErr  error
 	wg        sync.WaitGroup
 	opts      flowOptions
-	mu        sync.Mutex
 	closeOnce sync.Once
+	// mu orders the reply loops that wg counts before Close's wait: once
+	// closed is set, none starts.
+	mu     sync.Mutex
+	closed bool
 }
 
 type flowKey struct {
@@ -45,27 +46,51 @@ type flowKey struct {
 }
 
 type flowOptions struct {
-	queue   int
-	backlog int
-	idle    time.Duration
-	direct  bool
+	queue    int
+	backlog  int
+	maxConns int
+	idle     time.Duration
+	direct   bool
 }
+
+// Defaults of NewFlowListener.
+const (
+	// DefaultFlowQueue is how many datagrams a connection holds until they
+	// are read; see WithFlowQueue.
+	DefaultFlowQueue = 128
+	// DefaultFlowAcceptBacklog is how many new connections wait for Accept;
+	// see WithFlowAcceptBacklog.
+	DefaultFlowAcceptBacklog = 128
+)
 
 // FlowOption configures ListenUDPFlows and NewFlowListener.
 type FlowOption func(*flowOptions)
 
 // WithFlowQueue sets how many datagrams a connection holds until they are
-// read, 128 by default. A datagram larger than 2 KiB takes the room of
-// several in proportion to its size, so a connection holds at most n × 2 KiB
-// of queued datagrams, or a single larger one.
+// read, DefaultFlowQueue by default. A datagram larger than 2 KiB takes the
+// room of several in proportion to its size, so a connection holds at most
+// n × 2 KiB of queued datagrams, or a single larger one.
 func WithFlowQueue(n int) FlowOption {
 	return func(o *flowOptions) { o.queue = n }
 }
 
-// WithFlowAcceptBacklog sets how many new connections wait for Accept, 128
-// by default.
+// WithFlowAcceptBacklog sets how many new connections wait for Accept,
+// DefaultFlowAcceptBacklog by default.
 func WithFlowAcceptBacklog(n int) FlowOption {
 	return func(o *flowOptions) { o.backlog = n }
+}
+
+// WithFlowMaxConns sets how many connections the listener holds at once,
+// accepted or waiting for Accept; a non-positive n, the default, sets no
+// limit. While it holds n, a datagram of a new flow is dropped before
+// anything is allocated for it. Each connection holds its queued datagrams
+// and, once it has written, a socket, so the limit bounds the listener's
+// memory and descriptors with WithFlowQueue. Sources that spoof their
+// address can take every place, and keep it while they send, until an idle
+// timeout or the application closes their connections: pair the limit with
+// WithFlowIdleTimeout.
+func WithFlowMaxConns(n int) FlowOption {
+	return func(o *flowOptions) { o.maxConns = n }
 }
 
 // WithFlowIdleTimeout closes a connection that has neither received nor sent
@@ -117,7 +142,7 @@ func NewFlowListener(c *net.UDPConn, opts ...FlowOption) (*FlowListener, error) 
 
 // newFlowListener returns a listener on c that reads nothing yet.
 func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
-	cfg := flowOptions{queue: 128, backlog: 128}
+	cfg := flowOptions{queue: DefaultFlowQueue, backlog: DefaultFlowAcceptBacklog}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
@@ -125,15 +150,10 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 	}
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
-	l := &FlowListener{
-		c:      c,
-		opts:   cfg,
-		accept: make(chan *FlowConn, cfg.backlog),
-		done:   make(chan struct{}),
-		flows:  make(map[flowKey]*FlowConn),
-	}
+	l := &FlowListener{c: c, opts: cfg}
+	l.flows.Init(cfg.backlog, cfg.maxConns, (*FlowConn).queue, (*FlowConn).shutdown)
 	if cfg.idle > 0 {
-		l.wg.Go(l.sweepLoop)
+		l.wg.Go(func() { l.flows.Sweep(cfg.idle) })
 	}
 	return l
 }
@@ -142,24 +162,11 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 // net.ErrClosed once the listener is closed. The idle timeout of a
 // connection starts when it is accepted.
 func (l *FlowListener) Accept() (net.Conn, error) {
-	for {
-		select {
-		case <-l.done:
-			return nil, net.ErrClosed
-		default:
-		}
-		select {
-		case f := <-l.accept:
-			if isClosedChan(f.closed) {
-				continue
-			}
-			f.touch()
-			f.accepted.Store(true)
-			return f, nil
-		case <-l.done:
-			return nil, net.ErrClosed
-		}
+	f, err := l.flows.Accept()
+	if err != nil {
+		return nil, err
 	}
+	return f, nil
 }
 
 // Close closes the socket and every connection of the listener, and waits
@@ -167,25 +174,10 @@ func (l *FlowListener) Accept() (net.Conn, error) {
 func (l *FlowListener) Close() error {
 	l.closeOnce.Do(func() {
 		l.mu.Lock()
-		close(l.done)
-		flows := make([]*FlowConn, 0, len(l.flows))
-		for _, f := range l.flows {
-			flows = append(flows, f)
-		}
+		l.closed = true
 		l.mu.Unlock()
+		l.flows.Close(net.ErrClosed)
 		l.closeErr = l.c.Close()
-		for _, f := range flows {
-			f.shutdown(net.ErrClosed)
-		}
-		for {
-			select {
-			case f := <-l.accept:
-				f.shutdown(net.ErrClosed)
-				continue
-			default:
-			}
-			break
-		}
 	})
 	l.wg.Wait()
 	return l.closeErr
@@ -197,17 +189,17 @@ func (l *FlowListener) Addr() net.Addr {
 }
 
 func (l *FlowListener) readLoop() {
-	buf := make([]byte, maxDatagram)
-	var failures int
-	var delay time.Duration
+	buf := make([]byte, dgram.MaxDatagram)
+	done := l.flows.Done()
+	var backoff dgram.Backoff
 	for {
 		n, info, err := ReadFromUDP(l.c, buf)
 		if err == nil {
-			failures, delay = 0, 0
+			backoff.Reset()
 			l.deliver(buf[:n], info)
 			continue
 		}
-		if isClosedChan(l.done) {
+		if dgram.IsClosed(done) {
 			return
 		}
 		switch {
@@ -226,116 +218,46 @@ func (l *FlowListener) readLoop() {
 		}
 		// ICMP errors reported on the socket and the like do not end the
 		// loop; errors that persist are retried with a growing delay.
-		if failures++; failures > 1 {
-			delay = min(max(2*delay, time.Millisecond), time.Second)
-			if !l.sleep(delay) {
-				return
-			}
+		if !backoff.Wait(done) {
+			return
 		}
 	}
 }
 
-// sleep waits for d and reports false if the listener closed first.
-func (l *FlowListener) sleep(d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-l.done:
-		return false
-	}
-}
-
 // deliver queues a datagram for its flow, starting the flow if it is new and
-// the backlog has room. Only the read loop starts flows.
+// the backlog and the connection limit have room. Only the read loop starts
+// flows.
 func (l *FlowListener) deliver(p []byte, info PacketInfo) {
 	if !info.Redirected && !l.opts.direct {
 		return
 	}
 	key := flowKey{src: info.Src, dst: info.Dst}
-	l.mu.Lock()
-	f := l.flows[key]
-	if f == nil {
-		// Only this goroutine adds to the backlog, so it stays with room
-		// once it has some.
-		if isClosedChan(l.done) || len(l.accept) == cap(l.accept) {
-			l.mu.Unlock()
+	f, ok := l.flows.Get(key)
+	if !ok {
+		// Dropped before anything is allocated for it while Accept falls
+		// behind or the limit is reached.
+		if !l.flows.Room() {
 			return
 		}
-		f = l.newFlow(key, info.Redirected)
-		l.flows[key] = f
-		l.accept <- f
+		if f, _ = l.flows.Add(key, l.newFlow(key, info.Redirected), true); f == nil {
+			return
+		}
 	}
-	l.mu.Unlock()
-	f.enqueue(p)
+	f.q.Enqueue(p)
 }
 
 func (l *FlowListener) newFlow(key flowKey, redirected bool) *FlowConn {
-	return &FlowConn{
+	f := &FlowConn{
 		l:          l,
 		key:        key,
 		redirected: redirected,
 		local:      net.UDPAddrFromAddrPort(key.dst),
 		remote:     net.UDPAddrFromAddrPort(key.src),
-		queue:      make(chan *[]byte, l.opts.queue),
-		closed:     make(chan struct{}),
-		budget:     int64(l.opts.queue) * flowBufSize,
-		readWait:   makeDeadline(),
 	}
+	f.q.Init(l.opts.queue)
+	f.datagramSource = dgram.NewSource(f, &f.q)
+	return f
 }
-
-func (l *FlowListener) remove(f *FlowConn) {
-	l.mu.Lock()
-	if l.flows[f.key] == f {
-		delete(l.flows, f.key)
-	}
-	l.mu.Unlock()
-}
-
-func (l *FlowListener) sweepLoop() {
-	ticker := time.NewTicker(max(l.opts.idle/4, 10*time.Millisecond))
-	defer ticker.Stop()
-	var idle []*FlowConn
-	for {
-		select {
-		case <-l.done:
-			return
-		case now := <-ticker.C:
-			l.mu.Lock()
-			for _, f := range l.flows {
-				if f.accepted.Load() && now.Sub(time.Unix(0, f.active.Load())) >= l.opts.idle {
-					idle = append(idle, f)
-				}
-			}
-			l.mu.Unlock()
-			for i, f := range idle {
-				f.shutdown(io.EOF)
-				idle[i] = nil
-			}
-			idle = idle[:0]
-		}
-	}
-}
-
-const (
-	// maxDatagram holds the largest UDP datagram.
-	maxDatagram = 65535
-	// flowBufSize is the size of the pooled buffers of queued datagrams and
-	// the unit of a queue's room.
-	flowBufSize = 2048
-)
-
-var (
-	flowBufPool = sync.Pool{New: func() any {
-		b := make([]byte, flowBufSize)
-		return &b
-	}}
-	datagramPool = sync.Pool{New: func() any {
-		b := make([]byte, maxDatagram)
-		return &b
-	}}
-)
 
 // FlowConn is a flow that a FlowListener accepted: the datagrams from one
 // source to one original destination. Its RemoteAddr is the source and its
@@ -351,88 +273,32 @@ type FlowConn struct {
 	l      *FlowListener
 	local  net.Addr
 	remote net.Addr
-	queue  chan *[]byte
-	closed chan struct{}
+	q      dgram.Queue
+	datagramSource
 	// reply is the socket that answers the flow, once a Write opened it.
-	reply *net.UDPConn
-	// err is what Read returns once closed is closed.
-	err           error
+	reply         *net.UDPConn
 	writeDeadline time.Time
-	readWait      deadline
 	key           flowKey
-	budget        int64
-	queued        atomic.Int64
-	active        atomic.Int64 // unix nanoseconds of the last datagram
-	mu            sync.Mutex   // reply, writeDeadline
+	mu            sync.Mutex // reply, writeDeadline
 	closeOnce     sync.Once
-	accepted      atomic.Bool
 	redirected    bool
 }
+
+func (f *FlowConn) queue() *dgram.Queue { return &f.q }
+
+// datagramSource is embedded in FlowConn, so that netx.Relay and netx.Copy
+// take the flow's queued datagrams whole; see dgram.Source.
+type datagramSource = dgram.Source
 
 // Redirected reports whether the flow was redirected to the listener rather
 // than sent to it directly, which only WithFlowDirect accepts.
 func (f *FlowConn) Redirected() bool { return f.redirected }
 
-func (f *FlowConn) touch() { f.active.Store(time.Now().UnixNano()) }
-
-// enqueue copies p to the queue unless the queue is full or f is closed.
-func (f *FlowConn) enqueue(p []byte) {
-	if isClosedChan(f.closed) {
-		return
-	}
-	cost := int64(max(len(p), flowBufSize))
-	if q := f.queued.Load(); q > 0 && q+cost > f.budget {
-		return
-	}
-	var bp *[]byte
-	if len(p) <= flowBufSize {
-		bp = flowBufPool.Get().(*[]byte)
-		*bp = (*bp)[:len(p)]
-	} else {
-		b := make([]byte, len(p))
-		bp = &b
-	}
-	copy(*bp, p)
-	select {
-	case f.queue <- bp:
-		f.queued.Add(cost)
-		f.touch()
-	default:
-		putFlowBuf(bp)
-	}
-}
-
-func putFlowBuf(bp *[]byte) {
-	if cap(*bp) == flowBufSize {
-		*bp = (*bp)[:flowBufSize]
-		flowBufPool.Put(bp)
-	}
-}
-
-// Read reads the next datagram of the flow into b, truncated to b. It returns
-// io.EOF once an idle timeout closed f, and net.ErrClosed once f or the
-// listener is closed.
-func (f *FlowConn) Read(b []byte) (int, error) {
-	select {
-	case <-f.closed:
-		return 0, f.err
-	default:
-	}
-	select {
-	case bp := <-f.queue:
-		if isClosedChan(f.closed) {
-			return 0, f.err
-		}
-		n := copy(b, *bp)
-		f.queued.Add(-int64(max(len(*bp), flowBufSize)))
-		putFlowBuf(bp)
-		return n, nil
-	case <-f.closed:
-		return 0, f.err
-	case <-f.readWait.wait():
-		return 0, os.ErrDeadlineExceeded
-	}
-}
+// Read reads the next datagram of the flow into b, truncated to b. As on a
+// socket, an expired read deadline fails it even while datagrams are
+// queued. It returns io.EOF once an idle timeout closed f, and net.ErrClosed
+// once f or the listener is closed.
+func (f *FlowConn) Read(b []byte) (int, error) { return f.q.Read(b) }
 
 // Write sends b to the source as one datagram from the original destination.
 func (f *FlowConn) Write(b []byte) (int, error) {
@@ -440,7 +306,7 @@ func (f *FlowConn) Write(b []byte) (int, error) {
 		f.mu.Lock()
 		dl := f.writeDeadline
 		f.mu.Unlock()
-		if isClosedChan(f.closed) {
+		if f.q.Closed() {
 			return 0, net.ErrClosed
 		}
 		if !dl.IsZero() && !time.Now().Before(dl) {
@@ -448,7 +314,7 @@ func (f *FlowConn) Write(b []byte) (int, error) {
 		}
 		n, err := writeFrom(f.l.c, b, f.key.dst, f.key.src)
 		if err == nil {
-			f.touch()
+			f.q.Touch()
 		}
 		return n, err
 	}
@@ -458,7 +324,7 @@ func (f *FlowConn) Write(b []byte) (int, error) {
 	}
 	n, err := reply.Write(b)
 	if err == nil {
-		f.touch()
+		f.q.Touch()
 	}
 	return n, err
 }
@@ -468,7 +334,7 @@ func (f *FlowConn) Write(b []byte) (int, error) {
 func (f *FlowConn) replySocket() (*net.UDPConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if isClosedChan(f.closed) {
+	if f.q.Closed() {
 		return nil, net.ErrClosed
 	}
 	if f.reply != nil {
@@ -481,10 +347,21 @@ func (f *FlowConn) replySocket() (*net.UDPConn, error) {
 	if !f.writeDeadline.IsZero() {
 		_ = reply.SetWriteDeadline(f.writeDeadline)
 	}
+	// The reply loop is counted before Close waits for the listener's
+	// goroutines, or not started once Close has begun.
+	f.l.mu.Lock()
+	if f.l.closed {
+		f.l.mu.Unlock()
+		_ = reply.Close()
+		return nil, net.ErrClosed
+	}
+	f.l.wg.Add(1)
+	f.l.mu.Unlock()
 	f.reply = reply
-	// shutdown closes reply under mu before the listener waits for its
-	// goroutines, so this Go call happens before that wait.
-	f.l.wg.Go(func() { f.replyLoop(reply) })
+	go func() {
+		defer f.l.wg.Done()
+		f.replyLoop(reply)
+	}()
 	return reply, nil
 }
 
@@ -497,14 +374,14 @@ func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 	for {
 		bp, n, err := readDatagram(raw)
 		if err != nil {
-			if isClosedChan(f.closed) || errors.Is(err, net.ErrClosed) {
+			if f.q.Closed() || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			// ICMP errors, such as a refused port, concern earlier writes.
 			continue
 		}
-		f.enqueue((*bp)[:n])
-		datagramPool.Put(bp)
+		f.q.Enqueue((*bp)[:n])
+		dgram.Large.Put(bp)
 	}
 }
 
@@ -512,7 +389,7 @@ func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 // Reads and Writes return net.ErrClosed, and the next datagram of the flow
 // starts a new connection.
 func (f *FlowConn) Close() error {
-	if isClosedChan(f.closed) {
+	if f.q.Closed() {
 		return net.ErrClosed
 	}
 	f.shutdown(net.ErrClosed)
@@ -527,28 +404,17 @@ func (f *FlowConn) shutdown(err error) {
 	f.closeOnce.Do(func() {
 		// Removed first, so that a datagram arriving from here on starts a
 		// new flow rather than finding this one closed.
-		f.l.remove(f)
+		f.l.flows.Remove(f.key, f)
 		if testHookFlowShutdown != nil {
 			testHookFlowShutdown(f)
 		}
 		f.mu.Lock()
-		f.err = err
-		close(f.closed)
+		f.q.Close(err)
 		reply := f.reply
 		f.reply = nil
 		f.mu.Unlock()
 		if reply != nil {
 			_ = reply.Close()
-		}
-		f.readWait.stop()
-		for {
-			select {
-			case bp := <-f.queue:
-				putFlowBuf(bp)
-				continue
-			default:
-			}
-			break
 		}
 	})
 }
@@ -569,10 +435,10 @@ func (f *FlowConn) SetDeadline(t time.Time) error {
 
 // SetReadDeadline sets the deadline of pending and later Reads.
 func (f *FlowConn) SetReadDeadline(t time.Time) error {
-	if isClosedChan(f.closed) {
+	if f.q.Closed() {
 		return net.ErrClosed
 	}
-	f.readWait.set(t)
+	f.q.SetReadDeadline(t)
 	return nil
 }
 
@@ -580,7 +446,7 @@ func (f *FlowConn) SetReadDeadline(t time.Time) error {
 func (f *FlowConn) SetWriteDeadline(t time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if isClosedChan(f.closed) {
+	if f.q.Closed() {
 		return net.ErrClosed
 	}
 	f.writeDeadline = t
@@ -588,68 +454,4 @@ func (f *FlowConn) SetWriteDeadline(t time.Time) error {
 		return f.reply.SetWriteDeadline(t)
 	}
 	return nil
-}
-
-// deadline is a channel that is closed when a deadline passes.
-type deadline struct {
-	timer *time.Timer
-	ch    chan struct{}
-	mu    *sync.Mutex
-}
-
-func makeDeadline() deadline {
-	return deadline{ch: make(chan struct{}), mu: new(sync.Mutex)}
-}
-
-// set arms the deadline at t, or disarms it for a zero t. A Read waiting on
-// the channel keeps waiting on it unless t has passed.
-func (d *deadline) set(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.timer != nil {
-		d.timer.Stop()
-		d.timer = nil
-	}
-	if isClosedChan(d.ch) {
-		d.ch = make(chan struct{})
-	}
-	if t.IsZero() {
-		return
-	}
-	if dur := time.Until(t); dur > 0 {
-		ch := d.ch
-		d.timer = time.AfterFunc(dur, func() {
-			d.mu.Lock()
-			defer d.mu.Unlock()
-			if d.ch == ch && !isClosedChan(ch) {
-				close(ch)
-			}
-		})
-		return
-	}
-	close(d.ch)
-}
-
-func (d *deadline) stop() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.timer != nil {
-		d.timer.Stop()
-		d.timer = nil
-	}
-}
-
-func (d *deadline) wait() chan struct{} {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.ch
-}
-
-func isClosedChan(c chan struct{}) bool {
-	select {
-	case <-c:
-		return true
-	default:
-		return false
-	}
 }

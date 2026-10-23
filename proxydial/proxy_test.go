@@ -20,6 +20,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
+	"github.com/djylb/netx/tlsconn"
 )
 
 // serveOnce accepts one connection on a loopback listener and runs handle.
@@ -325,10 +326,14 @@ func TestFromURLErrors(t *testing.T) {
 	if _, err := FromURL(nil, nil, nil); err == nil {
 		t.Error("FromURL(nil) succeeded")
 	}
-	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks6://proxy", "https+tls://proxy", "ftp+tls://proxy"} {
+	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks6://proxy", "https+tls://proxy", "http+tls://proxy", "ftp+tls://proxy"} {
 		u, _ := url.Parse(raw)
-		if _, err := FromURL(u, nil, nil); err == nil {
+		_, err := FromURL(u, nil, nil)
+		if err == nil {
 			t.Errorf("FromURL(%s) succeeded", raw)
+		}
+		if unsupported := u.Host != "" && !strings.HasPrefix(u.Host, ":"); unsupported != errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("FromURL(%s) error = %v; matching errors.ErrUnsupported is %v, want %v", raw, err, !unsupported, unsupported)
 		}
 	}
 	d := mustDialer(t, "SOCKS5://proxy")
@@ -338,11 +343,13 @@ func TestFromURLErrors(t *testing.T) {
 	if sd := mustDialer(t, "socks5h://u:p@proxy:9").(*socks5.Dialer); sd.Username != "u" || sd.Password != "p" || sd.ProxyAddr != "proxy:9" {
 		t.Errorf("socks5h credentials = %#v", sd)
 	}
-	if hd := mustDialer(t, "http://proxy").(*HTTPDialer); hd.ProxyAddr != "proxy:80" || hd.TLSConfig != nil || hd.Header != nil {
+	if hd := mustDialer(t, "http://proxy").(*HTTPDialer); hd.ProxyAddr != "proxy:80" || hd.Forward != nil || hd.Header != nil {
 		t.Errorf("http defaults = %#v", hd)
 	}
-	if hd := mustDialer(t, "https://[2001:db8::1]").(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" || hd.TLSConfig.ServerName != "2001:db8::1" {
+	if hd := mustDialer(t, "https://[2001:db8::1]").(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" {
 		t.Errorf("https defaults = %#v", hd)
+	} else if td, ok := hd.Forward.(*tlsconn.Dialer); !ok || td.Config != nil || td.Forward != nil {
+		t.Errorf("https Forward = %#v", hd.Forward)
 	}
 	if _, err := d.DialContext(context.Background(), "udp", "example.com:53"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("udp dial error = %v", err)
@@ -512,7 +519,7 @@ func TestHTTPDialerConfig(t *testing.T) {
 	// A custom TLS config reaches the HTTPS proxy, and Header adds fields.
 	d := &HTTPDialer{
 		ProxyAddr: srv.Listener.Addr().String(),
-		TLSConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		Forward:   &tlsconn.Dialer{Config: srv.Client().Transport.(*http.Transport).TLSClientConfig},
 		Header:    textproto.MIMEHeader{"User-Agent": {"netx-test"}, "X-Trace": {"1", "2"}},
 	}
 	conn, err := d.Dial("tcp", "example.com:443")
@@ -554,8 +561,8 @@ func TestFromURLSOCKSVariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	d = dialer.(*socks5.Dialer)
-	td, ok := d.Forward.(*tlsDialer)
-	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.config.ServerName != "proxy" || td.forward != forward {
+	td, ok := d.Forward.(*tlsconn.Dialer)
+	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.Config != nil || td.Forward != forward {
 		t.Errorf("socks5h+tls = %#v, forward %#v", d, d.Forward)
 	}
 	if d := mustDialer(t, "socks4a+tls://proxy").(*socks5.Dialer); !d.SOCKS4 || d.Resolver != nil {
@@ -588,7 +595,7 @@ func TestSOCKSOverTLS(t *testing.T) {
 			t.Fatalf("%s with system roots error = %v, want a certificate error", scheme, err)
 		}
 
-		d.(*socks5.Dialer).Forward.(*tlsDialer).config.RootCAs = roots
+		d.(*socks5.Dialer).Forward.(*tlsconn.Dialer).Config = &tls.Config{RootCAs: roots}
 		conn, err := d.DialContext(context.Background(), "tcp", target)
 		if err != nil {
 			t.Fatalf("%s DialContext() error = %v", scheme, err)
@@ -730,7 +737,7 @@ func TestHTTPConnectTimeoutKeepsBorrowedParent(t *testing.T) {
 
 // Handshake runs CONNECT on a connection the caller made, returns that
 // connection when the proxy sent nothing after its reply and a PrefixConn
-// replaying those bytes otherwise, and leaves the connection open on failure.
+// replaying those bytes otherwise, and closes the connection on failure.
 func TestHTTPDialerHandshake(t *testing.T) {
 	for _, tt := range []struct {
 		name, reply string
@@ -757,8 +764,8 @@ func TestHTTPDialerHandshake(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s: Handshake() succeeded", tt.name)
 			}
-			if err := c.Close(); err != nil {
-				t.Fatalf("%s: Handshake() closed the connection: %v", tt.name, err)
+			if err := c.Close(); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("%s: Close() after a failed Handshake() = %v, want it closed already", tt.name, err)
 			}
 			continue
 		}
@@ -786,8 +793,8 @@ func TestHTTPDialerHandshake(t *testing.T) {
 	}
 }
 
-// A canceled context ends Handshake with its error and leaves the connection
-// open, with the deadline it poisoned.
+// A canceled context ends Handshake with its error and closes the
+// connection.
 func TestHTTPDialerHandshakeCanceled(t *testing.T) {
 	addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
 	c, err := net.Dial("tcp", addr)
@@ -799,8 +806,8 @@ func TestHTTPDialerHandshakeCanceled(t *testing.T) {
 	if _, err := (&HTTPDialer{}).Handshake(ctx, c, "example.com:443"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Handshake() error = %v, want context.Canceled", err)
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Handshake() closed the connection: %v", err)
+	if err := c.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Close() after a canceled Handshake() = %v, want it closed already", err)
 	}
 }
 
@@ -835,46 +842,40 @@ func TestHTTPConnectError(t *testing.T) {
 	}
 }
 
-// FromURL applies the caller's TLS config to https and +tls proxies, filling
-// in a missing ServerName on a clone and leaving the caller's config alone.
+// FromURL layers a tlsconn.Dialer with the caller's TLS config, which it
+// leaves alone, on forward for https and +tls proxies. The handshake is
+// bounded by the context alone, as the rest of the dial is.
 //
 //goland:noinspection HttpUrlsUsage
 func TestFromURLTLSConfig(t *testing.T) {
-	roots := x509.NewCertPool()
-	named := &tls.Config{ServerName: "front.example"}
-	unnamed := &tls.Config{RootCAs: roots}
-	configOf := func(raw string, cfg *tls.Config) *tls.Config {
+	cfg := &tls.Config{RootCAs: x509.NewCertPool()}
+	forward := &net.Dialer{}
+	tlsOf := func(raw string) *tlsconn.Dialer {
 		u, _ := url.Parse(raw)
-		d, err := FromURL(u, nil, cfg)
+		d, err := FromURL(u, forward, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
+		var f netx.ContextDialer
 		switch d := d.(type) {
 		case *HTTPDialer:
-			return d.TLSConfig
+			f = d.Forward
 		case *socks5.Dialer:
-			if td, ok := d.Forward.(*tlsDialer); ok {
-				return td.config
-			}
+			f = d.Forward
 		}
-		return nil
+		td, _ := f.(*tlsconn.Dialer)
+		return td
 	}
 	for _, raw := range []string{"https://proxy:8443", "socks5+tls://proxy", "socks4a+tls://proxy"} {
-		if got := configOf(raw, nil); got == nil || got.ServerName != "proxy" {
-			t.Errorf("%s with nil config = %#v", raw, got)
-		}
-		if got := configOf(raw, named); got != named {
-			t.Errorf("%s did not use the named config as is", raw)
-		}
-		if got := configOf(raw, unnamed); got == unnamed || got.ServerName != "proxy" || got.RootCAs != roots {
-			t.Errorf("%s with unnamed config = %#v", raw, got)
+		if td := tlsOf(raw); td == nil || td.Config != cfg || td.Forward != forward || td.HandshakeTimeout >= 0 {
+			t.Errorf("%s Forward = %#v", raw, td)
 		}
 	}
-	if unnamed.ServerName != "" {
+	if cfg.ServerName != "" {
 		t.Fatal("FromURL modified the caller's config")
 	}
 	for _, raw := range []string{"http://proxy", "socks5://proxy"} {
-		if got := configOf(raw, named); got != nil {
+		if td := tlsOf(raw); td != nil {
 			t.Errorf("%s uses TLS", raw)
 		}
 	}
@@ -953,8 +954,8 @@ func TestProxyURLErrorsHidePassword(t *testing.T) {
 	}
 }
 
-// After a timeout Handshake closes the connection beneath a *tls.Conn, so
-// that the caller's Close sends no close_notify.
+// After a timeout Handshake closes the connection beneath a TLS connection,
+// so that the caller's Close sends no close_notify.
 func TestHTTPDialerHandshakeTimeoutClosesBeneathTLS(t *testing.T) {
 	cert := httptest.NewUnstartedServer(nil)
 	cert.StartTLS()
@@ -1058,5 +1059,15 @@ func TestBypassDial(t *testing.T) {
 	}
 	if _, err := (&Bypass{}).DialContext(context.Background(), "tcp", "example.com:443"); !errors.Is(err, errNoProxyDialer) {
 		t.Fatalf("dial without Proxy error = %v", err)
+	}
+}
+
+func TestFromString(t *testing.T) {
+	d, err := FromString("proxy.example:3128", nil, nil)
+	if h, ok := d.(*HTTPDialer); err != nil || !ok || h.ProxyAddr != "proxy.example:3128" {
+		t.Fatalf("FromString() = %#v, %v; want an HTTPDialer", d, err)
+	}
+	if _, err := FromString("http://", nil, nil); err == nil {
+		t.Fatal("FromString() of a URL without host succeeded")
 	}
 }

@@ -77,26 +77,50 @@ type trackedConn struct {
 	remove func()
 }
 
-func (c *trackedConn) Read(b []byte) (int, error)  { return c.conn.Read(b) }
-func (c *trackedConn) Write(b []byte) (int, error) { return c.conn.Write(b) }
+func (c *trackedConn) Read(b []byte) (int, error)        { return c.inner().Read(b) }
+func (c *trackedConn) Write(b []byte) (int, error)       { return c.inner().Write(b) }
+func (c *trackedConn) CloseWrite() error                 { return closeWrite(c.inner()) }
+func (c *trackedConn) LocalAddr() net.Addr               { return c.inner().LocalAddr() }
+func (c *trackedConn) RemoteAddr() net.Addr              { return c.inner().RemoteAddr() }
+func (c *trackedConn) SetDeadline(t time.Time) error     { return c.inner().SetDeadline(t) }
+func (c *trackedConn) SetReadDeadline(t time.Time) error { return c.inner().SetReadDeadline(t) }
+func (c *trackedConn) SetWriteDeadline(t time.Time) error {
+	return c.inner().SetWriteDeadline(t)
+}
+
+// inner returns the connection that c forwards to; see orClosed.
+func (c *trackedConn) inner() net.Conn {
+	if c == nil {
+		return noConn
+	}
+	return orClosed(c.conn)
+}
 
 // Close closes the connection and removes it from its group.
 func (c *trackedConn) Close() error {
-	err := c.conn.Close()
+	if c == nil {
+		return nil
+	}
+	err := c.inner().Close()
 	c.remove()
 	return err
 }
 
-func (c *trackedConn) CloseWrite() error                  { return closeWrite(c.conn) }
-func (c *trackedConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
-func (c *trackedConn) RemoteAddr() net.Addr               { return c.conn.RemoteAddr() }
-func (c *trackedConn) SetDeadline(t time.Time) error      { return c.conn.SetDeadline(t) }
-func (c *trackedConn) SetReadDeadline(t time.Time) error  { return c.conn.SetReadDeadline(t) }
-func (c *trackedConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
-func (c *trackedConn) innerReader() io.Reader             { return c.conn }
-
 // NetConn returns the connection that c wraps; see InnermostConn.
-func (c *trackedConn) NetConn() net.Conn { return c.conn }
+func (c *trackedConn) NetConn() net.Conn {
+	if c == nil {
+		return nil
+	}
+	return c.conn
+}
+
+func (c *trackedConn) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads | layerPasses}
+	if c != nil {
+		info.conn = c.conn
+	}
+	return info
+}
 
 // Len returns the number of members in the group: connections, groups, and
 // relays that joined with WithRelayGroup.

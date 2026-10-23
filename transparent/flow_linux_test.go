@@ -37,9 +37,7 @@ func TestListenUDPFlowsDirect(t *testing.T) {
 			}
 			if !direct {
 				time.Sleep(100 * time.Millisecond)
-				l.mu.Lock()
-				n := len(l.flows)
-				l.mu.Unlock()
+				n := l.flows.Len()
 				if n != 0 {
 					t.Fatalf("%d direct flows started, want 0", n)
 				}

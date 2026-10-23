@@ -9,8 +9,9 @@ import (
 
 // TestPackageDependencies checks what the README promises: every package
 // depends on the standard library and this module alone, crypto/tls is
-// linked only by tlsconn and proxydial, and proxyproto and tlsconn depend on the
-// standard library alone.
+// linked only by tlsconn and proxydial, and proxyproto, tlsconn and
+// transparent depend on the standard library and this module's internal
+// packages alone, which depend on the standard library alone.
 func TestPackageDependencies(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
 		t.Skip("cannot run the go command")
@@ -20,18 +21,27 @@ func TestPackageDependencies(t *testing.T) {
 		t.Skip("no go command")
 	}
 	const module = "github.com/djylb/netx"
-	for _, tt := range []struct {
+	type pkgRule struct {
 		pkg  string
 		tls  bool
-		leaf bool // the standard library only
-	}{
+		leaf bool // the standard library and internal packages only
+	}
+	rules := []pkgRule{
 		{module, false, false},
 		{module + "/proxyproto", false, true},
-		{module + "/transparent", false, false},
+		{module + "/transparent", false, true},
 		{module + "/socks5", false, false},
 		{module + "/tlsconn", true, true},
 		{module + "/proxydial", true, false},
-	} {
+	}
+	internal, err := exec.Command(goCmd, "list", module+"/internal/...").Output()
+	if err != nil {
+		t.Fatalf("go list internal: %v", err)
+	}
+	for line := range strings.Lines(string(internal)) {
+		rules = append(rules, pkgRule{pkg: strings.TrimSpace(line), leaf: true})
+	}
+	for _, tt := range rules {
 		out, err := exec.Command(goCmd, "list", "-deps", "-f", "{{.ImportPath}} {{.Standard}}", tt.pkg).Output()
 		if err != nil {
 			t.Fatalf("go list %s: %v", tt.pkg, err)
@@ -43,7 +53,8 @@ func TestPackageDependencies(t *testing.T) {
 			case path == "crypto/tls" && !tt.tls:
 				t.Errorf("%s links crypto/tls", tt.pkg)
 			case path == module || strings.HasPrefix(path, module+"/"):
-				if tt.leaf {
+				internal := strings.HasPrefix(path, module+"/internal/")
+				if tt.leaf && (!internal || strings.HasPrefix(tt.pkg, module+"/internal/")) {
 					t.Errorf("%s depends on %s", tt.pkg, path)
 				}
 			case std != "true":

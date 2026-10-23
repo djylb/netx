@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // PacketConn is the outbound side of a UDP association: it sends the client's
@@ -132,6 +133,28 @@ func (u *udpPacketConn) Close() error {
 	return u.c.Close()
 }
 
+// ListenAssociationUDP opens a UDP socket of its own for the association of
+// req, on the IP address that the client reached the server at, the local
+// address of the control connection, and a port that the system picks. It
+// is a ListenUDP for a Server whose clients each get their own socket:
+//
+//	s := &socks5.Server{ListenUDP: socks5.ListenAssociationUDP}
+//
+// A control connection without a local IP address, or with an unspecified
+// one, gets a socket on all addresses, from netx.ListenEphemeralUDP.
+func ListenAssociationUDP(ctx context.Context, req *Request) (net.PacketConn, error) {
+	var ap netip.AddrPort
+	if a, ok := req.Conn.LocalAddr().(*net.TCPAddr); ok && a != nil {
+		ap = a.AddrPort()
+	}
+	ip := ap.Addr().Unmap()
+	if !ip.IsValid() || ip.IsUnspecified() {
+		return netx.ListenEphemeralUDP(ctx, nil)
+	}
+	var lc net.ListenConfig
+	return lc.ListenPacket(ctx, "udp", netip.AddrPortFrom(ip, 0).String())
+}
+
 // udpRelay routes the datagrams arriving on one socket to the associations of
 // their clients.
 type udpRelay struct {
@@ -183,7 +206,7 @@ var errUDPIdleBeforeStart = errors.New("socks5: UDP ASSOCIATE: idle timeout befo
 
 // expects reports whether an association waits for datagrams from peer's IP.
 func (r *udpRelay) expects(peer net.Addr, _ []byte) bool {
-	ap := peerAddrPort(peer)
+	ap := netutil.PeerAddrPort(peer)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.anyPeer != nil || len(r.pending[ap.Addr()]) > 0
@@ -196,7 +219,7 @@ func (r *udpRelay) acceptLoop() {
 			r.stop()
 			return
 		}
-		if a := r.match(peerAddrPort(c.RemoteAddr())); a != nil {
+		if a := r.match(netutil.PeerAddrPort(c.RemoteAddr())); a != nil {
 			a.bind(c)
 		} else {
 			_ = c.Close()
@@ -312,27 +335,6 @@ func (r *udpRelay) close() error {
 	return r.l.Close()
 }
 
-// peerAddrPort returns a peer's address with an unmapped IP, or the zero
-// AddrPort for addresses that are not IP addresses.
-func peerAddrPort(addr net.Addr) netip.AddrPort {
-	var ap netip.AddrPort
-	switch a := addr.(type) {
-	case *net.UDPAddr:
-		ap = a.AddrPort()
-	case *net.TCPAddr:
-		ap = a.AddrPort()
-	case nil:
-	default:
-		if isNilPointer(addr) {
-			break
-		}
-		if parsed, err := netip.ParseAddrPort(addr.String()); err == nil {
-			ap = parsed
-		}
-	}
-	return netip.AddrPortFrom(ap.Addr().Unmap().WithZone(""), ap.Port())
-}
-
 // association is one UDP ASSOCIATE request.
 type association struct {
 	s         *Server
@@ -420,7 +422,7 @@ var errNoClientIP = errors.New("socks5: UDP ASSOCIATE: client IP address neither
 // specific, and whether that source is the only one to accept: the client
 // announced the control connection's own IP address.
 func clientSource(req *Request) (key netip.Addr, announced netip.AddrPort, exact bool) {
-	client := peerAddrPort(req.Conn.RemoteAddr()).Addr()
+	client := netutil.PeerAddrPort(req.Conn.RemoteAddr()).Addr()
 	ip := req.Dst.IP.Unmap().WithZone("")
 	switch {
 	case client.IsValid():

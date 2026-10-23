@@ -165,7 +165,7 @@ func ExampleHeaderOf() {
 	srv := &http.Server{
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			if h, err := proxyproto.HeaderOf(c); err == nil && h != nil {
-				if v, ok := h.TLV(proxyproto.TLVAuthority); ok {
+				if v, ok := h.TLVs.Get(proxyproto.TLVAuthority); ok {
 					fmt.Printf("%s asked the load balancer for %s\n", h.Source, v)
 				}
 			}

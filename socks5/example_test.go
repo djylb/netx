@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"sync"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -74,7 +76,7 @@ func ExampleServer() {
 	}
 	s := &socks5.Server{
 		Auth: []socks5.Authenticator{
-			socks5.UserPassAuth{Check: socks5.Credentials(map[string]string{"alice": "secret"})},
+			socks5.Credentials(map[string]string{"alice": "secret"}),
 		},
 		Allow: func(_ context.Context, req *socks5.Request) error {
 			if req.Dst.Port == 25 {
@@ -83,6 +85,44 @@ func ExampleServer() {
 			return nil
 		},
 		UDPSocket: udp, // every association uses this port
+	}
+	ln, err := net.Listen("tcp", ":1080")
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(s.Serve(ln))
+}
+
+// Count the bytes each user sends, end idle connections, and report a
+// bound address of our choosing in CONNECT replies.
+func ExampleServer_hooks() {
+	var mu sync.Mutex
+	sent := map[string]int64{}
+	s := &socks5.Server{
+		Auth: []socks5.Authenticator{
+			socks5.Credentials(map[string]string{"alice": "secret", "bob": "hunter2"}),
+		},
+		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
+			var d net.Dialer
+			c, err := d.DialContext(ctx, "tcp", req.Dst.String())
+			if err != nil {
+				return nil, err
+			}
+			public := &net.TCPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 1080}
+			return netx.NewAddrOverrideConn(c, public, nil), nil
+		},
+		RelayOptions: func(req *socks5.Request) []netx.RelayOption {
+			count := netx.RelayFlow{Done: func(n int64) error {
+				mu.Lock()
+				sent[req.User] += n
+				mu.Unlock()
+				return nil
+			}}
+			return []netx.RelayOption{
+				netx.WithRelayFlows(&count, nil),
+				netx.WithRelayIdleTimeout(5 * time.Minute),
+			}
+		},
 	}
 	ln, err := net.Listen("tcp", ":1080")
 	if err != nil {

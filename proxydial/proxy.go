@@ -1,11 +1,11 @@
 // Package proxydial dials TCP connections through HTTP CONNECT, SOCKS5 and SOCKS4
 // proxies, in the clear or over TLS.
 //
-// FromURL builds a dialer for one proxy URL, and FromEnvironment builds one
-// from ALL_PROXY and NO_PROXY:
+// FromURL builds a dialer for one proxy URL, FromString for one in text, and
+// FromEnvironment builds one from ALL_PROXY and NO_PROXY:
 //
 //	forward := &net.Dialer{Timeout: 10 * time.Second}
-//	d, err := proxydial.FromURL(u, forward, nil)
+//	d, err := proxydial.FromString("socks5h://proxy.example:1080", forward, nil)
 //	if err != nil {
 //		return err
 //	}
@@ -13,6 +13,11 @@
 //
 // The context bounds the whole dial, including the proxy handshake. The
 // returned connection has no deadline set.
+//
+// The dialers are plain structs that can also be built directly. Both
+// HTTPDialer and socks5.Dialer reach a proxy over TLS through a Forward that
+// returns TLS connections, such as a tlsconn.Dialer, as FromURL sets up for
+// https and the +tls schemes.
 package proxydial
 
 import (
@@ -28,6 +33,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
+	"github.com/djylb/netx/tlsconn"
 )
 
 // FromURL returns a dialer that connects through the proxy at u:
@@ -41,12 +47,15 @@ import (
 //     port is 1080, and user information becomes the SOCKS5 username and
 //     password or the SOCKS4 user ID.
 //   - socks5+tls, socks5h+tls, socks4+tls and socks4a+tls reach the SOCKS
-//     proxy over TLS through the socks5.Dialer's Forward.
+//     proxy over TLS.
 //
-// Schemes are case-insensitive. forward dials the proxy; nil means a zero
-// net.Dialer. tlsConfig configures TLS to the proxy for https and the +tls
-// schemes: nil verifies the proxy's host name with the system roots, and a
-// config without ServerName is cloned with ServerName set to that host.
+// Schemes are case-insensitive, and others give an error matching
+// errors.ErrUnsupported. forward dials the proxy; nil means a zero
+// net.Dialer. For https and the +tls schemes the dialer's Forward is a
+// *tlsconn.Dialer over forward with tlsConfig, whose handshake the context
+// bounds with the rest of the dial (HandshakeTimeout -1): a nil tlsConfig
+// verifies the proxy's host name with the system roots, and one without
+// ServerName is used with ServerName set to that host.
 //
 // The result is an *HTTPDialer or a *socks5.Dialer, as the scheme selects;
 // type-assert it to adjust the dialer, such as to add CONNECT header fields.
@@ -57,45 +66,59 @@ func FromURL(u *url.URL, forward netx.ContextDialer, tlsConfig *tls.Config) (net
 	if err := checkURL(u); err != nil {
 		return nil, err
 	}
-	host := u.Hostname()
-	port := u.Port()
-	scheme := strings.ToLower(u.Scheme)
-	base, overTLS := strings.CutSuffix(scheme, "+tls")
+	base, overTLS := strings.CutSuffix(strings.ToLower(u.Scheme), "+tls")
+	defaultPort := "1080"
 	switch base {
 	case "http", "https":
 		if overTLS {
-			break
+			return nil, unsupportedScheme(u)
 		}
-		d := &HTTPDialer{Forward: forward}
+		defaultPort = "80"
 		if base == "https" {
-			d.TLSConfig = tlsConfigFor(tlsConfig, host)
-			port = cmp.Or(port, "443")
+			overTLS, defaultPort = true, "443"
 		}
-		d.ProxyAddr = net.JoinHostPort(host, cmp.Or(port, "80"))
-		if u.User != nil {
-			d.Username = u.User.Username()
-			d.Password, _ = u.User.Password()
-		}
-		return d, nil
 	case "socks5", "socks5h", "socks4", "socks4a":
-		d := &socks5.Dialer{
-			ProxyAddr: net.JoinHostPort(host, cmp.Or(port, "1080")),
-			SOCKS4:    base == "socks4" || base == "socks4a",
-			Forward:   forward,
-		}
-		if base == "socks4" {
-			d.Resolver = net.DefaultResolver
-		}
-		if overTLS {
-			d.Forward = &tlsDialer{config: tlsConfigFor(tlsConfig, host), forward: forward}
-		}
-		if u.User != nil {
-			d.Username = u.User.Username()
-			d.Password, _ = u.User.Password()
-		}
-		return d, nil
+	default:
+		return nil, unsupportedScheme(u)
 	}
-	return nil, fmt.Errorf("proxydial: unsupported scheme %q", u.Scheme)
+	if overTLS {
+		// The context bounds the handshake, as it does the rest of the dial.
+		forward = &tlsconn.Dialer{Config: tlsConfig, HandshakeTimeout: -1, Forward: forward}
+	}
+	addr := net.JoinHostPort(u.Hostname(), cmp.Or(u.Port(), defaultPort))
+	var user, password string
+	if u.User != nil {
+		user = u.User.Username()
+		password, _ = u.User.Password()
+	}
+	if base == "http" || base == "https" {
+		return &HTTPDialer{ProxyAddr: addr, Username: user, Password: password, Forward: forward}, nil
+	}
+	d := &socks5.Dialer{
+		ProxyAddr: addr,
+		SOCKS4:    base == "socks4" || base == "socks4a",
+		Username:  user,
+		Password:  password,
+		Forward:   forward,
+	}
+	if base == "socks4" {
+		d.Resolver = net.DefaultResolver
+	}
+	return d, nil
+}
+
+func unsupportedScheme(u *url.URL) error {
+	return fmt.Errorf("proxydial: scheme %q: %w", u.Scheme, errors.ErrUnsupported)
+}
+
+// FromString is FromURL for a proxy URL in text, parsed with ParseURL, such
+// as "socks5h://user:pass@proxy.example:1080" or "proxy.example:3128".
+func FromString(raw string, forward netx.ContextDialer, tlsConfig *tls.Config) (netx.ContextDialer, error) {
+	u, err := ParseURL(raw)
+	if err != nil {
+		return nil, err
+	}
+	return FromURL(u, forward, tlsConfig)
 }
 
 // ParseURL parses a proxy URL leniently: a value without a scheme, such as

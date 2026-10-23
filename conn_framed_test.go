@@ -351,14 +351,14 @@ func TestFramedConnStreamReadsKeepFrameTailAcrossFrames(t *testing.T) {
 // IsTimeout matches the ETIMEDOUT errno table before net.Error.Timeout, so a
 // desync caused by a kernel-reported timeout must hide that errno as well.
 func TestFramedConnMidFrameErrnoTimeoutIsNotTimeout(t *testing.T) {
-	cause := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", timedOutErrnos[0])}
+	cause := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", platformErrnos[eTimedOut][0])}
 	if !IsTimeout(cause) {
 		t.Fatalf("IsTimeout(%v) = false, want true", cause)
 	}
 	fc := NewFramedConn(&framedScriptConn{steps: []framedReadStep{{data: []byte{0, 10, 'x'}}, {err: cause}}})
 	_, err := fc.ReadFrame()
 	assertFrameDesync(t, err)
-	if errorIsAny(err, timedOutErrnos) {
+	if chainErrnos(err)&(1<<eTimedOut) != 0 {
 		t.Fatalf("error = %v matches the timeout errno, want it hidden", err)
 	}
 	if kind := NetErrorKind(err); kind == "timeout" {
@@ -372,15 +372,15 @@ func TestFramedConnMidFrameErrnoTimeoutIsNotTimeout(t *testing.T) {
 // A desync wraps a cause that is not a timeout, so errors.Is, errors.As and
 // the classifiers still see it.
 func TestFramedConnDesyncKeepsNonTimeoutCause(t *testing.T) {
-	if len(connResetErrnos) == 0 {
+	if len(platformErrnos[eConnReset]) == 0 {
 		t.Skip("no connection reset errno on this platform")
 	}
-	cause := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", connResetErrnos[0])}
+	cause := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", platformErrnos[eConnReset][0])}
 	check := func(t *testing.T, err error) {
 		t.Helper()
 		assertFrameDesync(t, err)
-		if !errors.Is(err, connResetErrnos[0]) {
-			t.Fatalf("errors.Is(%v, %v) = false, want the cause matched", err, connResetErrnos[0])
+		if !errors.Is(err, platformErrnos[eConnReset][0]) {
+			t.Fatalf("errors.Is(%v, %v) = false, want the cause matched", err, platformErrnos[eConnReset][0])
 		}
 		var opErr *net.OpError
 		// Unwrapping must preserve the original cause object.

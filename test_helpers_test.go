@@ -1,7 +1,9 @@
 package netx
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -72,4 +74,28 @@ func assertClosedRawConnState(t *testing.T, label string, c rawConnStateProbe) {
 		t.Fatalf("%s RawConn() = %v, want nil", label, got)
 	}
 	assertClosedConnState(t, label, c)
+}
+
+// copyPlain copies src to dst as Relay and Copy do without a flow.
+func copyPlain(dst io.Writer, src io.Reader) (int64, error) {
+	return relayDirection(context.Background(), dst, src, nil)
+}
+
+// spliceable reports whether a copy from src to dst would splice.
+func spliceable(dst io.Writer, src io.Reader) bool {
+	var d relaySink
+	d.init(dst)
+	return canSplice(&d, newRelaySource(src))
+}
+
+// copyDatagramsOf copies src to dst as datagrams, as a relay does.
+func copyDatagramsOf(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int64, error) {
+	return copyDatagrams(ctx, dst, newRelaySource(src), f)
+}
+
+// sinkWriter returns what a copy into dst writes.
+func sinkWriter(dst io.Writer) io.Writer {
+	var d relaySink
+	d.init(dst)
+	return d.w
 }

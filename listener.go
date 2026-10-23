@@ -3,7 +3,6 @@ package netx
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"sync"
 )
@@ -13,12 +12,26 @@ var errNilListenerConn = errors.New("netx: nil connection")
 // ChanListener is a net.Listener fed by the program instead of a socket.
 // Deliver hands it a connection accepted elsewhere, and Dial connects to it
 // through an in-memory pipe. Accept returns the connections in order. All
-// methods are safe for concurrent use.
+// methods are safe for concurrent use. The zero value is ready to use, as a
+// ChanListener of NewChanListener(nil, 0).
 type ChanListener struct {
 	addr      net.Addr
 	conns     chan net.Conn
 	done      chan struct{}
+	initOnce  sync.Once
 	closeOnce sync.Once
+}
+
+// init makes the channels of the zero ChanListener.
+func (l *ChanListener) init() {
+	l.initOnce.Do(func() {
+		if l.conns == nil {
+			l.conns = make(chan net.Conn)
+		}
+		if l.done == nil {
+			l.done = make(chan struct{})
+		}
+	})
 }
 
 // NewChanListener returns a ChanListener that reports addr from Addr and
@@ -44,6 +57,7 @@ func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
 	if c == nil {
 		return errNilListenerConn
 	}
+	l.init()
 	select {
 	case <-l.done:
 		return net.ErrClosed
@@ -72,6 +86,7 @@ func (l *ChanListener) TryDeliver(c net.Conn) bool {
 	if c == nil {
 		return false
 	}
+	l.init()
 	select {
 	case <-l.done:
 		return false
@@ -102,20 +117,22 @@ func (l *ChanListener) delivered() {
 // reverse; a nil remote is reported as "pipe".
 func (l *ChanListener) Dial(ctx context.Context, remote net.Addr) (net.Conn, error) {
 	client, server := net.Pipe()
+	addr := l.Addr()
 	// Delivered, l owns sc; on failure it is closed below.
 	//noinspection GoResourceLeak
-	sc := NewAddrOverrideConn(server, l.addr, remote)
+	sc := NewAddrOverrideConn(server, addr, remote)
 	if err := l.Deliver(ctx, sc); err != nil {
 		_ = client.Close()
 		_ = sc.Close()
 		return nil, err
 	}
-	return NewAddrOverrideConn(client, remote, l.addr), nil
+	return NewAddrOverrideConn(client, remote, addr), nil
 }
 
 // Accept waits for the next queued connection. It returns net.ErrClosed once
 // l is closed.
 func (l *ChanListener) Accept() (net.Conn, error) {
+	l.init()
 	select {
 	case <-l.done:
 		return nil, net.ErrClosed
@@ -132,6 +149,7 @@ func (l *ChanListener) Accept() (net.Conn, error) {
 // Close stops l and closes the connections still queued. Blocked Accept,
 // Deliver and Dial calls return net.ErrClosed. Close always returns nil.
 func (l *ChanListener) Close() error {
+	l.init()
 	l.closeOnce.Do(func() {
 		close(l.done)
 		l.drain()
@@ -139,8 +157,11 @@ func (l *ChanListener) Close() error {
 	return nil
 }
 
-// Addr returns the address given to NewChanListener.
+// Addr returns the address given to NewChanListener, or "pipe".
 func (l *ChanListener) Addr() net.Addr {
+	if l.addr == nil {
+		return pipeAddr{}
+	}
 	return l.addr
 }
 
@@ -171,23 +192,27 @@ func (l *ChanListener) drain() {
 // down, as http.Server.Shutdown does for its connections; Serve returns once
 // the connection is closed.
 func NewSingleConnListener(c net.Conn) *SingleConnListener {
-	l := &SingleConnListener{conn: c, done: make(chan struct{})}
+	l := &SingleConnListener{conn: c}
 	if c != nil {
 		l.addr = c.LocalAddr()
-	}
-	if l.addr == nil {
-		l.addr = pipeAddr{}
 	}
 	return l
 }
 
-// SingleConnListener is the listener that NewSingleConnListener returns.
+// SingleConnListener is the listener that NewSingleConnListener returns. The
+// zero value has no connection: its Accept blocks until Close.
 type SingleConnListener struct {
 	mu       sync.Mutex
 	conn     net.Conn // nil once accepted or closed
 	addr     net.Addr
 	done     chan struct{}
+	initOnce sync.Once
 	doneOnce sync.Once
+}
+
+// init makes the done channel, also of the zero SingleConnListener.
+func (l *SingleConnListener) init() {
+	l.initOnce.Do(func() { l.done = make(chan struct{}) })
 }
 
 // Accept returns the connection the first time and then blocks until it or
@@ -200,6 +225,7 @@ func (l *SingleConnListener) Accept() (net.Conn, error) {
 	if c != nil {
 		return &singleConn{Conn: c, l: l}, nil
 	}
+	l.init()
 	<-l.done
 	return nil, net.ErrClosed
 }
@@ -220,10 +246,14 @@ func (l *SingleConnListener) Close() error {
 
 // Addr returns the connection's LocalAddr, or "pipe" if it has none.
 func (l *SingleConnListener) Addr() net.Addr {
+	if l.addr == nil {
+		return pipeAddr{}
+	}
 	return l.addr
 }
 
 func (l *SingleConnListener) finish() {
+	l.init()
 	l.doneOnce.Do(func() { close(l.done) })
 }
 
@@ -243,10 +273,16 @@ func (c *singleConn) CloseWrite() error {
 	return closeWrite(c.Conn)
 }
 
-func (c *singleConn) innerReader() io.Reader { return c.Conn }
-
 func (c *singleConn) NetConn() net.Conn {
 	return c.Conn
+}
+
+func (c *singleConn) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads | layerPasses}
+	if c != nil {
+		info.conn = c.Conn
+	}
+	return info
 }
 
 // pipeAddr is the address of an in-memory connection, matching net.Pipe.

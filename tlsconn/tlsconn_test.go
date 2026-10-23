@@ -419,8 +419,9 @@ func TestHandshakeDeadlineFromContext(t *testing.T) {
 	}
 }
 
-// Dialer.HandshakeTimeout bounds the handshake within the context's deadline, and
-// without it the context alone does.
+// Dialer.HandshakeTimeout bounds the handshake within the context's deadline;
+// without it the context does, or DefaultHandshakeTimeout when the context has
+// no deadline, and a negative one leaves the context alone to bound it.
 func TestDialerHandshakeDeadline(t *testing.T) {
 	var raw *deadlineRecordingConn
 	dial := func(ctx context.Context, timeout time.Duration) time.Time {
@@ -449,5 +450,14 @@ func TestDialerHandshakeDeadline(t *testing.T) {
 	got := dial(ctx, time.Minute)
 	if got.Before(before.Add(time.Minute)) || got.After(time.Now().Add(time.Minute)) {
 		t.Fatalf("with HandshakeTimeout: deadline %v ahead, want a minute", time.Until(got))
+	}
+	// A negative HandshakeTimeout leaves a context without a deadline as
+	// it is, and the zero one bounds it by DefaultHandshakeTimeout.
+	if got := dial(context.Background(), -1); !got.IsZero() || raw.set {
+		t.Fatalf("with a negative HandshakeTimeout: deadline %v set", got)
+	}
+	before = time.Now()
+	if got := dial(context.Background(), 0); got.Before(before.Add(DefaultHandshakeTimeout)) || got.After(time.Now().Add(DefaultHandshakeTimeout)) {
+		t.Fatalf("without HandshakeTimeout or a context deadline: deadline %v ahead, want DefaultHandshakeTimeout", time.Until(got))
 	}
 }

@@ -2,7 +2,6 @@ package proxydial
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/textproto"
 	"strings"
@@ -47,16 +46,6 @@ func TestHTTPDialerRequestHost(t *testing.T) {
 		if n := strings.Count(strings.ToLower(string(req)), "\r\nhost:"); n != 1 || !strings.Contains(string(req), tt.want) {
 			t.Fatalf("%s: request %q has %d Host lines, want one %q", tt.name, req, n, tt.want)
 		}
-	}
-}
-
-// An https proxy reached without a port, such as over a Unix socket that a
-// custom Forward dials, is verified against the whole address, as
-// tlsconn.Dialer does.
-func TestHTTPDialerServerNameWithoutPort(t *testing.T) {
-	d := &HTTPDialer{ProxyAddr: "proxy.internal", TLSConfig: &tls.Config{}}
-	if got := d.tlsConfig().ServerName; got != "proxy.internal" {
-		t.Fatalf("ServerName = %q, want the whole proxy address", got)
 	}
 }
 

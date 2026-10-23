@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/nettest"
 	"github.com/djylb/netx/socks5"
 )
@@ -71,7 +72,7 @@ func TestServerUserPassAuth(t *testing.T) {
 	var gotUser string
 	var mu sync.Mutex
 	addr := serve(t, &socks5.Server{
-		Auth: []socks5.Authenticator{socks5.UserPassAuth{Check: socks5.Credentials(map[string]string{"alice": "pw"})}},
+		Auth: []socks5.Authenticator{socks5.Credentials(map[string]string{"alice": "pw"})},
 		Allow: func(_ context.Context, req *socks5.Request) error {
 			mu.Lock()
 			gotUser = req.User
@@ -147,8 +148,8 @@ func TestServerHooks(t *testing.T) {
 		user string
 	}
 	calls := make(chan call, 1)
-	relayed := make(chan struct{}, 1)
 	addr := serve(t, &socks5.Server{
+		// The reply carries the bound address that the target reports.
 		Dial: func(_ context.Context, req *socks5.Request) (net.Conn, error) {
 			calls <- call{req.Dst, req.User}
 			client, server := net.Pipe()
@@ -156,18 +157,8 @@ func TestServerHooks(t *testing.T) {
 				defer func() { _ = server.Close() }()
 				_, _ = io.Copy(server, server)
 			}()
-			return client, nil
-		},
-		ConnectAddr: func(*socks5.Request, net.Conn) socks5.Addr {
-			return socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1234}
-		},
-		Relay: func(_ context.Context, req *socks5.Request, target net.Conn) error {
-			client := req.Conn
-			relayed <- struct{}{}
-			defer func() { _ = client.Close(); _ = target.Close() }()
-			go func() { _, _ = io.Copy(target, client) }()
-			_, err := io.Copy(client, target)
-			return err
+			bound := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1234}
+			return netx.NewAddrOverrideConn(client, bound, nil), nil
 		},
 	})
 	c := handshake(t, addr)
@@ -181,7 +172,6 @@ func TestServerHooks(t *testing.T) {
 	if got := <-calls; got.dst.String() != "virtual.example:9" || got.user != "" {
 		t.Fatalf("Dial request = %+v", got)
 	}
-	<-relayed
 	assertEcho(t, c, "hooked")
 }
 

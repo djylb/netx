@@ -23,19 +23,23 @@ const (
 	wsaEHOSTUNREACH     syscall.Errno = 10065 // WSAEHOSTUNREACH
 )
 
-// Errno tables used by the error classifiers in errors.go. The invented
-// syscall.E* values stay in the tables for errors built by portable code.
-var (
-	connResetErrnos    = []error{wsaECONNRESET, errorNetnameDeleted, syscall.ECONNRESET}
-	connAbortedErrnos  = []error{wsaECONNABORTED, syscall.ECONNABORTED}
-	brokenPipeErrnos   = []error{wsaESHUTDOWN, syscall.EPIPE}
-	connRefusedErrnos  = []error{wsaECONNREFUSED, syscall.ECONNREFUSED}
-	hostUnreachErrnos  = []error{wsaEHOSTUNREACH, syscall.EHOSTUNREACH}
-	netUnreachErrnos   = []error{wsaENETUNREACH, syscall.ENETUNREACH}
-	accessErrnos       = []error{wsaEACCES, errorAccessDenied, syscall.EACCES}
-	permErrnos         = []error{syscall.EPERM}
-	timedOutErrnos     = []error{wsaETIMEDOUT, syscall.ETIMEDOUT}
-	addrInUseErrnos    = []error{wsaEADDRINUSE, syscall.EADDRINUSE}
-	addrNotAvailErrnos = []error{wsaEADDRNOTAVAIL, syscall.EADDRNOTAVAIL}
-	msgSizeErrnos      = []error{wsaEMSGSIZE, syscall.EMSGSIZE}
-)
+// platformErrnos are the errnos of each errnoID; see errors.go. The
+// invented syscall.E* values stay in the tables for errors built by portable
+// code.
+// errnoValue is the type of the errors in platformErrnos.
+type errnoValue = syscall.Errno
+
+var platformErrnos = [numErrnoIDs][]errnoValue{
+	eConnReset:    {wsaECONNRESET, errorNetnameDeleted, syscall.ECONNRESET},
+	eConnAborted:  {wsaECONNABORTED, syscall.ECONNABORTED},
+	ePipe:         {wsaESHUTDOWN, syscall.EPIPE},
+	eConnRefused:  {wsaECONNREFUSED, syscall.ECONNREFUSED},
+	eHostUnreach:  {wsaEHOSTUNREACH, syscall.EHOSTUNREACH},
+	eNetUnreach:   {wsaENETUNREACH, syscall.ENETUNREACH},
+	eAccess:       {wsaEACCES, errorAccessDenied, syscall.EACCES},
+	ePerm:         {syscall.EPERM},
+	eTimedOut:     {wsaETIMEDOUT, syscall.ETIMEDOUT},
+	eAddrInUse:    {wsaEADDRINUSE, syscall.EADDRINUSE},
+	eAddrNotAvail: {wsaEADDRNOTAVAIL, syscall.EADDRNOTAVAIL},
+	eMsgSize:      {wsaEMSGSIZE, syscall.EMSGSIZE},
+}

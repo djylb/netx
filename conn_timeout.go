@@ -1,11 +1,12 @@
 package netx
 
 import (
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/netx/internal/dgram"
 )
 
 // TimeoutConn closes an idle connection: before each read or write it moves
@@ -34,16 +35,6 @@ type TimeoutConn struct {
 	mu          sync.Mutex   // serializes deadline updates
 	userRead    time.Time    // set by SetDeadline or SetReadDeadline, guarded by mu
 	userWrite   time.Time    // set by SetDeadline or SetWriteDeadline, guarded by mu
-}
-
-// clockBase anchors the monotonic clock offsets that idle tracking stores in
-// atomics, so a step of the wall clock neither stretches nor cuts an idle
-// period.
-var clockBase = time.Now()
-
-// clockOffset returns t as a monotonic offset from clockBase.
-func clockOffset(t time.Time) int64 {
-	return int64(t.Sub(clockBase))
 }
 
 // NewTimeoutConn wraps c and refreshes its deadline before each read or
@@ -108,7 +99,7 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle <= 0 {
 		return nil
 	}
-	if clockOffset(time.Now())+int64(idle) <= c.deadline.Load() {
+	if dgram.Mono(time.Now())+int64(idle) <= c.deadline.Load() {
 		return nil // at least idle left
 	}
 	c.mu.Lock()
@@ -119,11 +110,11 @@ func (c *TimeoutConn) refreshDeadline() error {
 		return nil
 	}
 	now := time.Now()
-	if clockOffset(now)+int64(idle) <= c.deadline.Load() {
+	if dgram.Mono(now)+int64(idle) <= c.deadline.Load() {
 		return nil
 	}
 	ahead := idle + min(idle/16, time.Second)
-	want := clockOffset(now) + int64(ahead)
+	want := dgram.Mono(now) + int64(ahead)
 	// now.Add keeps the monotonic reading, so the socket deadline does not
 	// follow wall-clock steps either.
 	rd := now.Add(ahead)
@@ -147,36 +138,22 @@ func (c *TimeoutConn) refreshDeadline() error {
 	return nil
 }
 
-func (c *TimeoutConn) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
+// inner returns the wrapped connection, or noConn.
+func (c *TimeoutConn) inner() net.Conn {
+	if c == nil {
+		return noConn
 	}
-	return c.conn.Close()
+	return orClosed(c.conn)
 }
+
+func (c *TimeoutConn) Close() error         { return c.inner().Close() }
+func (c *TimeoutConn) LocalAddr() net.Addr  { return c.inner().LocalAddr() }
+func (c *TimeoutConn) RemoteAddr() net.Addr { return c.inner().RemoteAddr() }
 
 // CloseWrite shuts down the writing side of the wrapped connection, so the
 // peer reads EOF while reads continue. It returns an error matching
 // errors.ErrUnsupported when the wrapped connection cannot do that.
-func (c *TimeoutConn) CloseWrite() error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return closeWrite(c.conn)
-}
-
-func (c *TimeoutConn) LocalAddr() net.Addr {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.LocalAddr()
-}
-
-func (c *TimeoutConn) RemoteAddr() net.Addr {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.RemoteAddr()
-}
+func (c *TimeoutConn) CloseWrite() error { return closeWrite(c.inner()) }
 
 func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	if c == nil || c.conn == nil {
@@ -227,13 +204,6 @@ func (c *TimeoutConn) capDeadline(t time.Time) time.Time {
 	return t
 }
 
-func (c *TimeoutConn) innerReader() io.Reader {
-	if c == nil {
-		return nil
-	}
-	return c.conn
-}
-
 // NetConn returns the connection that c wraps, as *tls.Conn's NetConn does;
 // see InnermostConn and ConnAs. Its reads and writes do not refresh the idle
 // timeout.
@@ -242,4 +212,12 @@ func (c *TimeoutConn) NetConn() net.Conn {
 		return nil
 	}
 	return c.conn
+}
+
+func (c *TimeoutConn) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads | layerRefresh}
+	if c != nil {
+		info.conn = c.conn
+	}
+	return info
 }

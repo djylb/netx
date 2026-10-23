@@ -90,8 +90,10 @@ func main() {
 - `tlsconn.Dialer` dials with any `Forward` dialer, such as a proxy dialer, and
   runs `tlsconn.Client` on the result, taking the server name from the dialed
   address unless the config sets one. The context bounds the dial and the
-  handshake; a positive `HandshakeTimeout` also bounds the handshake. Used as
-  a proxy dialer's `Forward`, it reaches the proxy over TLS.
+  handshake; a positive `HandshakeTimeout` also bounds the handshake, and a
+  negative one leaves the context alone to bound it, without the
+  `DefaultHandshakeTimeout` fallback. Used as a proxy dialer's `Forward`, it
+  reaches the proxy over TLS.
 
 ### TLS certificates
 
@@ -119,6 +121,15 @@ func mutualPins(serverCert, clientCert tls.Certificate) (server, client *tls.Con
 	server = clientPins.ServerConfig(&tls.Config{Certificates: []tls.Certificate{serverCert}})
 	client = serverPins.ClientConfig(&tls.Config{Certificates: []tls.Certificate{clientCert}})
 	return server, client
+}
+
+// reloading serves one certificate from files, picking up a renewal once
+// the files change.
+func reloading() *tls.Config {
+	var certs tlsconn.CertFiles
+	return &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return certs.LoadFiles("/etc/certs/fullchain.pem", "/etc/certs/privkey.pem")
+	}}
 }
 
 // perHost serves certificates from files, picking up renewals as the files
@@ -325,6 +336,17 @@ func sniff(ctx context.Context, c net.Conn) (net.Conn, bool, error) {
 - The wrappers pass `CloseWrite` on to the wrapped connection, so a half-close
   works through them; it returns an error matching `errors.ErrUnsupported` when
   the wrapped connection cannot do it.
+- `DoWithContext(ctx, c, fn)` bounds I/O on `c` by `ctx`, and clears `c`'s
+  deadline when `fn` returns. Like `Peek` and `PeekFull` it leaves `c` open on
+  failure, since a read that times out need not end the connection.
+  `DoHandshake` is the same for an exchange that `c` is no use without: it
+  closes `c` on failure, after `CloseBeneathTLS(c)` when the exchange timed
+  out or was canceled, so that a TLS connection sends no `close_notify` the
+  peer cannot authenticate. Every handshake of this module follows that rule:
+  `tlsconn.Client`, `Server` and `Dialer`, `socks5.Dialer.Handshake` and
+  `Server.Handshake`, and `proxydial.HTTPDialer.Handshake` close the
+  connection they were given when they fail, and return it, or one over it,
+  when they succeed.
 
 ### Relaying
 
@@ -365,7 +387,7 @@ func forward(ctx context.Context, client, backend net.Conn) {
   must be safe for concurrent use. A `Wait` that may block for long must
   return when its `ctx` is done: closing a relay's ends does not wake it, so
   end such relays with their context or `WithRelayGroup`.
-- `netx.Copy(ctx, dst, src, flow)`, with a zero `RelayFlow` for no hooks,
+- `netx.Copy(ctx, dst, src, flow)`, with a nil `*RelayFlow` for no hooks,
   copies one direction the same way without closing either end. It returns
   nil at EOF, and once `ctx` is done it sets
   expired deadlines on `src` and `dst` to interrupt a blocked read or write
@@ -404,9 +426,10 @@ looks through the wrapper. Hooks such as `RelayFlow.Done` may call
 - On Linux and Android, a direction between two `*net.TCPConn`s, or between a
   `*net.TCPConn` and a `*net.UnixConn`, is left to the kernel with `splice`,
   through a pipe that is held only while data moves, so idle relays hold no
-  pipes. Relay looks through `PrefixConn`, `AddrOverrideConn` and
-  `TimeoutConn`, refreshing a `TimeoutConn`'s idle deadline itself, but not
-  through `ObserveConn` or other wrappers; use `RelayFlow` to count.
+  pipes. Relay looks through `PrefixConn`, `AddrOverrideConn`, `TimeoutConn`,
+  refreshing its idle deadline itself, and the connections of
+  `ConnGroup.Track` and `NewSingleConnListener`, but not through
+  `ObserveConn` or other wrappers; use `RelayFlow` to count.
 - Otherwise a direction is copied with the reading end's `WriteTo` or else
   the writing end's `ReadFrom`, as `io.Copy` would, except those of
   `*net.TCPConn`, whose data goes through a pooled 32 KiB buffer instead. On
@@ -441,24 +464,23 @@ conn, i, err := netx.DialFirst(ctx, 200*time.Millisecond,
 )
 ```
 
-`DialAny` races one attempt per address of a service, such as the entry
-points of a cluster, through one dialer (`nil` for a zero `net.Dialer`):
-
-```go
-// addr says which one connected; 0 staggers by DefaultDialStagger.
-conn, addr, err := netx.DialAny(ctx, 0, nil, "tcp", "a.example:8024", "b.example:8024")
-```
-
-`RaceDialer` races several dialers to one address and is itself a
-`netx.ContextDialer`, so it can be an `http.Transport`'s `DialContext` or a
-proxy dialer's `Forward`:
+`RaceDialer` holds the dialers and stagger of such races. Its `DialContext`
+races its dialers to one address, so it is itself a `netx.ContextDialer` and
+can be an `http.Transport`'s `DialContext` or a proxy dialer's `Forward`; its
+`DialAny` races the addresses of a service, such as the entry points of a
+cluster, each through every dialer. The zero `RaceDialer` dials with a zero
+`net.Dialer` and `DefaultDialStagger`:
 
 ```go
 d := &netx.RaceDialer{Dialers: []netx.ContextDialer{direct, viaProxy}, Stagger: 200 * time.Millisecond}
 transport := &http.Transport{DialContext: d.DialContext}
+
+// addr says which one connected.
+conn, addr, err := (&netx.RaceDialer{}).DialAny(ctx, "tcp", "a.example:8024", "b.example:8024")
 ```
 
-All three return `netx.ErrNoDialAttempts` when there is nothing to dial.
+`DialFirst` without attempts and `DialAny` without addresses return
+`netx.ErrNoDialAttempts`.
 
 ## Listeners
 
@@ -515,6 +537,12 @@ func serveOne(c net.Conn, h http.Handler) error {
   The accepted connection is a wrapper (unwrap it with `InnermostConn`), so
   for TLS wrap the listener with `tls.NewListener` instead of passing a
   `*tls.Conn`.
+- The zero `ChanListener` is ready, as `NewChanListener(nil, 0)`; the zero
+  `SingleConnListener` has no connection and its `Accept` waits for `Close`.
+- `netx.Accept(ctx, l)` accepts from any listener, retrying the errors that
+  `netx.IsAcceptRetryable` reports, such as running out of file descriptors,
+  at once and then with a delay growing from 1ms to 1s; a server loop is
+  `for { c, err := netx.Accept(ctx, l); if err != nil { return err }; go serve(c) }`.
 
 ### UDP peers
 
@@ -550,9 +578,14 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   `WithPacketAcceptFilter` sees a new peer's first datagram and rejects it
   before anything is allocated for the peer; it can answer with
   `l.WriteTo`, as a stateless retry does.
+- `WithPacketMaxConns(n)` caps the connections held at once, accepted or
+  waiting; at the cap a new peer's datagram is dropped before the filter runs
+  or anything is allocated. Spoofed sources can still fill the cap, so pair
+  it with `WithPacketIdleTimeout` and a filter that checks a token.
 - `l.Dial(peer)` makes a connection to a known peer from the same socket
   without `Accept`, as hole punching needs; it returns
-  `netx.ErrPacketPeerConnected` if the peer has one.
+  `netx.ErrPacketPeerConnected` if the peer has one and
+  `netx.ErrPacketConnLimit` at the cap.
 - As on a socket, a closed connection or an expired read deadline fails
   `Read` even while datagrams are queued.
 - `WithPacketIdleTimeout` closes a connection that has been idle since `Accept`
@@ -561,6 +594,7 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
 - On a `*net.UDPConn` the read loop, queueing and writes do not allocate per
   datagram up to 2 KiB.
 - The listener owns the socket and closes it, and all connections, on `Close`.
+  The zero `PacketListener` has no socket: `Accept` waits for `Close`.
 - `ListenEphemeralUDP(ctx, lc)` opens a UDP socket on a free port for IPv4 and IPv6, as
   `net.ListenUDP("udp", nil)` does, except that on macOS and iOS it never takes
   a port that another socket holds on one IPv4 address, such as `127.0.0.1`,
@@ -670,8 +704,15 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
 - Version 2 TLVs carry an application's own fields in the custom types
   `TLVCustomMin` to `TLVCustomMax` (0xE0–0xEF), such as who a connection
   belongs to: `h.TLVs, err = h.TLVs.Append(proxyproto.TLVCustomMin, id)`, and
-  `Header.TLV` reads them back. They are as trustworthy as the peer that sent
+  `h.TLVs.Get` reads them back. They are as trustworthy as the peer that sent
   them, so take them from trusted peers only.
+- `h.TLVs.SSL()` reads the TLS information a proxy sends (`PP2_TYPE_SSL`):
+  the client flags, `Verified()`, and `Version`, `CommonName`, `Cipher`,
+  `SigAlg` and `KeyAlg` from its sub-fields; `TLVs.AppendSSL` sends one.
+- `h.TLVs = h.TLVs.AppendCRC32C()` adds a CRC32C field, which
+  `AppendBinary` fills with the header's checksum. `Decode` and the `Conn`
+  verify a CRC32C field that a header carries and fail it with
+  `ErrChecksum`, which matches `ErrMalformed`, when it does not match.
 - `Decode` decodes a header at the start of a byte slice and returns it with
   its length, `ErrNoHeader` when there is none and `io.ErrUnexpectedEOF`
   while it is incomplete, for protocol sniffers.
@@ -714,7 +755,8 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
 ## Transparent Proxying
 
 `github.com/djylb/netx/transparent` listens for connections that firewall
-rules redirect to a local port and recovers where they were going.
+rules redirect to a local port and recovers where they were going. It
+depends only on the standard library and not on the `netx` root package.
 
 ```go
 func serve(ctx context.Context, handle func(c net.Conn, target netip.AddrPort)) error {
@@ -758,8 +800,9 @@ host. A wrapper beneath which no socket can be reached is an error rather
 than trusting its addresses. Lookup failures, such as a closed connection or no
 permission to read `/dev/pf`, are returned as errors. Both unsupported errors
 match `errors.ErrUnsupported`. For a plain listener use `net.Listen`.
-`OriginalDestination` looks through wrappers such as `netx.TimeoutConn` with
-`netx.InnermostConn`, so it can be called on a wrapped connection.
+`OriginalDestination` follows `NetConn` methods down to the socket, through
+wrappers such as `*tls.Conn` and `netx.TimeoutConn`, so it can be called on a
+wrapped connection.
 
 `Listen` is a `net.ListenConfig` whose `Control` is `transparent.Control`.
 To combine the transparent options with your own, such as `SO_REUSEPORT`,
@@ -833,9 +876,12 @@ read from the flow like the first. `RemoteAddr` is the source and `LocalAddr`
 the original destination. Datagrams sent straight to the listener are dropped
 unless `WithFlowDirect` is given; `FlowConn.Redirected` then tells them apart,
 and they are answered from the listener. `WithFlowIdleTimeout`,
-`WithFlowQueue` and `WithFlowAcceptBacklog` bound idle flows, queued
-datagrams and flows waiting for `Accept`; set an idle timeout for traffic
-from untrusted sources. `NewFlowListener` builds one on a socket of your own
+`WithFlowQueue`, `WithFlowAcceptBacklog` and `WithFlowMaxConns` bound idle
+flows, queued datagrams, flows waiting for `Accept` and flows held at once,
+as the `WithPacket` options of `netx.PacketListener` do; set an idle timeout
+and a cap for traffic from untrusted sources. As on a socket, an expired read
+deadline fails `Read` even while datagrams are queued. `netx.Relay` and
+`netx.Copy` take a flow's queued datagrams whole, copying each once. `NewFlowListener` builds one on a socket of your own
 set up with `ControlPacket`.
 
 ```go
@@ -965,7 +1011,9 @@ For SOCKS over TLS, give the dialer a `Forward` that returns TLS connections:
 
 `Handshake(ctx, conn, cmd, dst)` runs the client handshake on a connection
 you already have and returns the bound address of the reply; `DialContext`
-is `Forward` plus `Handshake`.
+is `Forward` plus `Handshake`. On failure it closes the connection, as
+`netx.DoHandshake` does, which `netx.CloseBeneathTLS` helps for exchanges of
+your own.
 
 `ListenPacket` opens a UDP association (SOCKS5 only). The returned
 `*socks5.UDPConn` sends with `WriteTo(payload, dst)` and receives with
@@ -995,17 +1043,13 @@ accepts anonymous clients and dials directly.
 func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 	s := &socks5.Server{
 		Auth: []socks5.Authenticator{
-			socks5.UserPassAuth{Check: socks5.Credentials(map[string]string{"alice": "secret"})},
+			socks5.Credentials(map[string]string{"alice": "secret"}),
 		},
 		Allow: func(ctx context.Context, req *socks5.Request) error {
 			if req.Dst.Port == 25 {
 				return &socks5.ReplyError{Reply: socks5.ReplyNotAllowed}
 			}
 			return nil
-		},
-		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "tcp", req.Dst.String())
 		},
 		UDPSocket: udp, // one fixed UDP port for every association
 	}
@@ -1014,17 +1058,19 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 ```
 
 - Hooks: `Auth` (any `Authenticator`), `Allow`, `Dial` (its error picks the
-  reply code through `ReplyFor`), `ConnectAddr`, `Relay` (it copies between
-  `req.Conn` and the target; by default
-  `netx.Relay` with `WithRelayHalfClose`, so a client that shuts down its sending
-  side still gets the reply; a half-closed connection then lasts until the
-  other side finishes or closes too, so relay through `netx.NewTimeoutConn` to
-  bound idle ones; `RelayOptions` adds `netx.RelayOption`s such as
-  `WithRelayFlows` per `req.User` to that default relay), `Handle` (serves
-  commands of its own, such as BIND, inside `Serve`, see below), and for UDP
-  `DialPacket` (the outbound side, a `socks5.PacketConn` that receives domain
-  names unresolved, for example to forward through a tunnel), `AllowPacket`
-  and `UDPAddr` (the address advertised to clients).
+  reply code through `ReplyFor`, and the target's `LocalAddr` is the bound
+  address of the reply: wrap the target in `netx.NewAddrOverrideConn` to
+  report another), `RelayOptions` (`netx.RelayOption`s for the `netx.Relay`
+  between `req.Conn` and the target, such as `WithRelayFlows` per `req.User`,
+  `WithRelayGroup` or `WithRelayIdleTimeout`; the relay always half-closes, so
+  a client that shuts down its sending side still gets the reply, and a
+  half-closed connection then lasts until the other side finishes or closes
+  too, unless an idle timeout ends it), `Handle` (serves
+  commands of its own, such as BIND, or takes over CONNECT, inside `Serve`,
+  see below), and for UDP `DialPacket` (the outbound side, a
+  `socks5.PacketConn` that receives domain names unresolved, for example to
+  forward through a tunnel), `AllowPacket` and `UDPAddr` (the address
+  advertised to clients).
 - `Allow` and `AllowPacket` see every IP address a client sends in
   `Dst.IP`, including IPv4-mapped IPv6 addresses and domain names that are IP
   literals, also with one trailing dot such as `127.0.0.1.`. Other names
@@ -1049,7 +1095,8 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   and only trusted clients may reach `UDPSocket` that way. `ListenUDP`
   instead gives each association its own socket, which without a known
   client IP takes the first source that sends; use it for untrusted tunneled
-  clients.
+  clients. `socks5.ListenAssociationUDP` is such a `ListenUDP`, on the
+  address the client reached the server at.
   Replies from any source are relayed (full cone), and a reply that cannot be
   delivered is reported to `OnError` and dropped. An association ends with its
   control connection, or after `UDPIdleTimeout`, which closes the control
@@ -1062,7 +1109,7 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 - `UserPassAuth.Check(ctx, conn, user, password) (ok, err)` sees the
   connection for per-address rules; an error, such as an unreachable account
   backend, rejects the client and is returned instead of `ErrAuthFailed`.
-  `Credentials` builds one from a fixed account map, comparing SHA-256
+  `Credentials` builds a `UserPassAuth` for a fixed account map, comparing SHA-256
   digests in constant time so that timing reveals neither password lengths
   nor which users exist.
 - Custom commands: set `Handle`, which runs after `Allow` and before the
@@ -1071,7 +1118,7 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   connection still counts for `Shutdown` and `ActiveConns`. To drive the steps yourself,
   `Handshake(ctx, conn)` runs the negotiation,
   authentication and request read, also for SOCKS4, and returns the
-  `*socks5.Request` without replying. Answer it with `req.Reply(code, bound)`,
+  `*socks5.Request` without replying, or closes `conn` when it fails. Answer it with `req.Reply(code, bound)`,
   which writes SOCKS4 or SOCKS5 as the client spoke, once, or twice for BIND
   (the listening address, then the peer's; a failure reply is the last), and use
   `req.Conn`, which includes any bytes the client sent right after a SOCKS4
@@ -1082,6 +1129,8 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   cancels.
   `Request.User` is the authenticated identity; `Request.UserID4` is the
   unauthenticated SOCKS4 user ID.
+- `ListenAndServe(addr)` listens on a TCP address (`:1080` when empty) and
+  runs `Serve`, which retries temporary `Accept` errors as `netx.Accept` does.
 - `Shutdown(ctx)` closes the listeners and waits for the connections being
   served, including UDP control connections, then calls `Close`; when ctx
   ends first, `Close` ends the rest. `ActiveConns` reports how many
@@ -1101,7 +1150,7 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
 ## Upstream Proxies
 
 `github.com/djylb/netx/proxydial` dials TCP through an HTTP CONNECT or SOCKS5
-proxy. `FromURL` and `FromEnvironment` build the dialers from a URL; they are
+proxy. `FromURL`, `FromString` and `FromEnvironment` build the dialers from a URL; they are
 plain structs (`HTTPDialer`, `socks5.Dialer`) that can also be configured
 directly, for example with a private CA or extra request headers. A program
 that only talks to SOCKS5 proxies can use `socks5.Dialer` alone and avoid the
@@ -1111,9 +1160,12 @@ that only talks to SOCKS5 proxies can use `socks5.Dialer` alone and avoid the
 func corporateProxy(ca *x509.CertPool) *proxydial.HTTPDialer {
 	return &proxydial.HTTPDialer{
 		ProxyAddr: "proxy.corp.example:3128",
-		TLSConfig: &tls.Config{RootCAs: ca},
 		Header:    textproto.MIMEHeader{"User-Agent": {"my-agent/1.0"}},
-		Forward:   &net.Dialer{Timeout: 10 * time.Second},
+		// TLS to the proxy, verified against its host name.
+		Forward: &tlsconn.Dialer{
+			Config:  &tls.Config{RootCAs: ca},
+			Forward: &net.Dialer{Timeout: 10 * time.Second},
+		},
 	}
 }
 ```
@@ -1122,19 +1174,15 @@ func corporateProxy(ca *x509.CertPool) *proxydial.HTTPDialer {
 func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 	forward := &net.Dialer{Timeout: 10 * time.Second}
 	var d netx.ContextDialer
+	var err error
 	if proxyURL != "" {
-		u, err := proxydial.ParseURL(proxyURL) // also bare host:port, as http
-		if err != nil {
-			return nil, err
-		}
-		if d, err = proxydial.FromURL(u, forward, nil); err != nil {
-			return nil, err
-		}
+		// ParseURL and FromURL; a bare host:port is an http proxy.
+		d, err = proxydial.FromString(proxyURL, forward, nil)
 	} else {
-		var err error
-		if d, err = proxydial.FromEnvironment(forward, nil); err != nil {
-			return nil, err
-		}
+		d, err = proxydial.FromEnvironment(forward, nil)
+	}
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -1153,10 +1201,13 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
   resolves them locally. A dialer for one proxy can be the `Forward` dialer of
   another, which chains them.
 - `FromURL` and `FromEnvironment` take a `*tls.Config` for `https` and `+tls`
-  proxies: `nil` verifies the proxy's host name against the system roots, and
-  a config without `ServerName`, such as one carrying a private CA, is cloned
-  with the proxy's host filled in. `FromURL` returns an `*proxydial.HTTPDialer`
-  or a `*socks5.Dialer`; type-assert it to adjust fields such as `Header`.
+  proxies, which they reach through a `*tlsconn.Dialer` as the dialer's
+  `Forward`: `nil` verifies the proxy's host name against the system roots,
+  and a config without `ServerName`, such as one carrying a private CA, is
+  used with the proxy's host filled in. `FromURL` returns an
+  `*proxydial.HTTPDialer` or a `*socks5.Dialer`; type-assert it to adjust
+  fields such as `Header`. Both dialers reach a TLS proxy the same way: set
+  `Forward` to a `tlsconn.Dialer`.
 - `ParseURL` parses a proxy URL leniently: `proxy:3128` or `127.0.0.1:1080`
   without a scheme is an `http` proxy, and its errors never quote the
   password.
@@ -1166,11 +1217,11 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 - `HTTPDialer.Handshake` runs CONNECT on a connection the caller already has
   to the proxy, such as a multiplexed stream. It returns that connection, or
   a `netx.PrefixConn` over it when the proxy sent tunnel bytes with its reply,
-  and leaves the connection open on failure.
+  and closes the connection on failure, as `netx.DoHandshake` does.
 - The dialers also have a `Dial(network, address)` method, for code that
   expects a dialer without a context.
-- The context bounds the dial and the proxy handshake; the returned connection
-  has no deadline. Bytes the HTTP proxy sends right after its `2xx` reply are
+- The context bounds the dial, the TLS handshake with the proxy and the proxy
+  handshake; the returned connection has no deadline. Bytes the HTTP proxy sends right after its `2xx` reply are
   kept.
 - `FromEnvironment` reads `ALL_PROXY` only, with `NO_PROXY`, not
   `HTTP_PROXY` or `HTTPS_PROXY`: a TCP dialer does not know whether its target

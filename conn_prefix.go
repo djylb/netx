@@ -26,8 +26,10 @@ type PrefixConn struct {
 // first read that brings data, so a peer whose first message is shorter
 // than n does not stall it; use PeekFull for exactly n bytes. ctx bounds the
 // wait as DoWithContext does: its deadline becomes c's, and c's deadline is
-// cleared again once bytes have come. The error is that of the read, or
-// ctx's; the returned connection is valid also then.
+// cleared again when Peek returns. The error is that of the read, or ctx's;
+// c is left open and the returned connection is valid also then, so that a
+// read that times out before a peer that waits for the server to speak
+// first can still hand the connection on.
 //
 // On a connection whose Reads return one datagram each, such as one of a
 // PacketListener, Peek reads the first datagram whole, returns up to n of its
@@ -47,7 +49,7 @@ func Peek(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) {
 // PeekFull is Peek reading exactly n bytes, or fewer if a read fails first.
 // On a datagram connection it reads one datagram, as Peek does.
 func PeekFull(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) {
-	if datagramReader(c) {
+	if readsDatagrams(c) {
 		return Peek(ctx, c, n)
 	}
 	return peek(ctx, c, n, func(b []byte) (int, error) { return io.ReadFull(c, b) })
@@ -56,8 +58,8 @@ func PeekFull(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) 
 func peek(ctx context.Context, c net.Conn, n int, read func([]byte) (int, error)) (net.Conn, []byte, error) {
 	n = max(n, 0)
 	size := n
-	if datagramReader(c) {
-		size = relayDatagramBufSize // the whole datagram
+	if readsDatagrams(c) {
+		size = largeBufSize // the whole datagram
 	}
 	b := make([]byte, size)
 	var m int
@@ -104,54 +106,25 @@ func (c *PrefixConn) Read(b []byte) (int, error) {
 	return c.conn.Read(b)
 }
 
-func (c *PrefixConn) Write(b []byte) (int, error) {
-	if c == nil || c.conn == nil {
-		return 0, net.ErrClosed
+// inner returns the wrapped connection, or noConn.
+func (c *PrefixConn) inner() net.Conn {
+	if c == nil {
+		return noConn
 	}
-	return c.conn.Write(b)
+	return orClosed(c.conn)
 }
 
-func (c *PrefixConn) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.Close()
-}
+func (c *PrefixConn) Write(b []byte) (int, error)        { return c.inner().Write(b) }
+func (c *PrefixConn) Close() error                       { return c.inner().Close() }
+func (c *PrefixConn) LocalAddr() net.Addr                { return c.inner().LocalAddr() }
+func (c *PrefixConn) RemoteAddr() net.Addr               { return c.inner().RemoteAddr() }
+func (c *PrefixConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
+func (c *PrefixConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *PrefixConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
-func (c *PrefixConn) LocalAddr() net.Addr {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.LocalAddr()
-}
-
-func (c *PrefixConn) RemoteAddr() net.Addr {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.RemoteAddr()
-}
-
-func (c *PrefixConn) SetDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetDeadline(t)
-}
-
-func (c *PrefixConn) SetReadDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetReadDeadline(t)
-}
-
-func (c *PrefixConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetWriteDeadline(t)
-}
+// CloseWrite shuts down the writing side of the wrapped connection; see
+// TimeoutConn.CloseWrite.
+func (c *PrefixConn) CloseWrite() error { return closeWrite(c.inner()) }
 
 // WriteTo writes the rest of the prefix to w and then copies the wrapped
 // connection to w, through its own WriteTo when it has one, so a
@@ -166,28 +139,18 @@ func (c *PrefixConn) WriteTo(w io.Writer) (int64, error) {
 	c.drained.Store(true)
 	c.mu.Unlock()
 
-	n, err := writeAll(w, prefix)
-	if err != nil {
-		return int64(n), err
+	if len(prefix) > 0 {
+		if n, err := writeOnce(w, prefix); err != nil {
+			return int64(n), err
+		}
 	}
 	m, err := io.Copy(w, c.conn)
-	return int64(n) + m, err
+	return int64(len(prefix)) + m, err
 }
 
-// CloseWrite shuts down the writing side of the wrapped connection; see
-// TimeoutConn.CloseWrite.
-func (c *PrefixConn) CloseWrite() error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return closeWrite(c.conn)
-}
-
-func (c *PrefixConn) innerReader() io.Reader {
-	if c == nil {
-		return nil
-	}
-	return c.conn
+// pending reports whether c still holds prefix bytes.
+func (c *PrefixConn) pending() bool {
+	return c != nil && !c.drained.Load()
 }
 
 // NetConn returns the connection that c wraps, as *tls.Conn's NetConn does;
@@ -198,4 +161,12 @@ func (c *PrefixConn) NetConn() net.Conn {
 		return nil
 	}
 	return c.conn
+}
+
+func (c *PrefixConn) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads | layerPrefix}
+	if c != nil {
+		info.conn = c.conn
+	}
+	return info
 }

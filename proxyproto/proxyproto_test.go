@@ -380,10 +380,10 @@ func TestCustomTLVs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := got.TLV(TLVCustomMin); string(v) != "user-7" {
+	if v, _ := got.TLVs.Get(TLVCustomMin); string(v) != "user-7" {
 		t.Fatalf("custom field = %q", v)
 	}
-	if v, _ := got.TLV(TLVCustomMin + 1); string(v) != "tunnel-9" {
+	if v, _ := got.TLVs.Get(TLVCustomMin + 1); string(v) != "tunnel-9" {
 		t.Fatalf("custom field = %q", v)
 	}
 }

@@ -137,18 +137,23 @@ func (a UserPassAuth) Authenticate(ctx context.Context, c net.Conn) (string, err
 	return user, nil
 }
 
-// Credentials returns a UserPassAuth.Check function that accepts the given
-// user names and passwords. It compares SHA-256 digests in constant time, and
-// for unknown users compares against a digest of no account, so that the
-// time taken tells neither the length of a password nor whether a user
-// exists.
-func Credentials(accounts map[string]string) func(ctx context.Context, c net.Conn, user, password string) (bool, error) {
+// Credentials returns a UserPassAuth that accepts the given user names and
+// passwords, for a server with a fixed account list:
+//
+//	s := &socks5.Server{Auth: []socks5.Authenticator{socks5.Credentials(accounts)}}
+//
+// It compares SHA-256 digests in constant time, and for unknown users
+// compares against a digest of no account, so that the time taken tells
+// neither the length of a password nor whether a user exists. accounts is
+// read once; later changes to it are not seen. Its Check can be called by a
+// Check of your own, such as one that also has rules per client address.
+func Credentials(accounts map[string]string) UserPassAuth {
 	digests := make(map[string][sha256.Size]byte, len(accounts))
 	for user, password := range accounts {
 		digests[user] = sha256.Sum256([]byte(password))
 	}
 	var unknown [sha256.Size]byte // no password has this digest
-	return func(_ context.Context, _ net.Conn, user, password string) (bool, error) {
+	return UserPassAuth{Check: func(_ context.Context, _ net.Conn, user, password string) (bool, error) {
 		want, known := digests[user]
 		if !known {
 			want = unknown
@@ -156,7 +161,7 @@ func Credentials(accounts map[string]string) func(ctx context.Context, c net.Con
 		got := sha256.Sum256([]byte(password))
 		match := subtle.ConstantTimeCompare(want[:], got[:]) == 1
 		return known && match, nil
-	}
+	}}
 }
 
 // Server serves SOCKS5 clients, and SOCKS4 and SOCKS4a clients when enabled.
@@ -221,23 +226,22 @@ type Server struct {
 
 	// Dial connects to the destination of a CONNECT request; nil dials it
 	// directly. ctx is bounded by DialTimeout. The error's ReplyFor code is
-	// sent to the client, so return a *ReplyError to choose it.
+	// sent to the client, so return a *ReplyError to choose it. The bound
+	// address of the reply is the connection's LocalAddr; to report another,
+	// such as for a target that is not a socket, return the connection
+	// wrapped by netx.NewAddrOverrideConn, which the relay sees through.
 	Dial func(ctx context.Context, req *Request) (net.Conn, error)
-	// ConnectAddr returns the bound address of a successful CONNECT reply;
-	// nil uses target's local address.
-	ConnectAddr func(req *Request, target net.Conn) Addr
-	// Relay copies data between req.Conn and the target of a CONNECT request
-	// and closes both; nil uses netx.Relay with netx.WithRelayHalfClose, so
-	// that a client that shuts down its writing side still gets the reply.
-	// As with TCP itself, a half-closed connection then lasts until the
-	// other side finishes or closes too; to bound how long an idle one may
-	// last, relay through netx.NewTimeoutConn on both ends. ctx ends, and
-	// both connections are closed, when Close is called.
-	Relay func(ctx context.Context, req *Request, target net.Conn) error
-	// RelayOptions, if set, returns options added to those of the default
-	// relay of a CONNECT request, such as netx.WithRelayFlows for the
-	// allowance or byte count of req.User, netx.WithRelayGroup or an idle
-	// timeout. It is not used when Relay is set.
+	// RelayOptions, if set, returns options for the netx.Relay between
+	// req.Conn and the target of a CONNECT request, such as
+	// netx.WithRelayFlows for the allowance or byte count of req.User,
+	// netx.WithRelayGroup or netx.WithRelayIdleTimeout. They follow
+	// netx.WithRelayHalfClose, which the relay always has, so that a client
+	// that shuts down its writing side still gets the reply. As with TCP
+	// itself, a half-closed connection then lasts until the other side
+	// finishes or closes too; an idle timeout bounds how long an idle one may
+	// last. The relay ends, and both connections are closed, when Close is
+	// called. To relay in another way, wrap the target in Dial, or serve
+	// CONNECT in Handle.
 	RelayOptions func(req *Request) []netx.RelayOption
 
 	// UDPSocket is the client-facing UDP socket shared by all associations,
@@ -262,7 +266,7 @@ type Server struct {
 	// Close closes UDPSocket.
 	UDPSocket net.PacketConn
 	// ListenUDP, used when UDPSocket is nil, opens a UDP socket for one
-	// association, which the association owns. Datagrams are taken as on
+	// association, which the association owns; ListenAssociationUDP is one. Datagrams are taken as on
 	// UDPSocket, except that when neither the control connection nor the
 	// request gives the client's IP address, the first source that sends
 	// becomes the client.
@@ -320,12 +324,26 @@ type Server struct {
 	closeDone chan struct{} // closed when the first Close has returned
 }
 
+// ListenAndServe listens on the TCP address addr, ":1080" when empty, and
+// serves the connections as Serve does. It returns ErrServerClosed after
+// Shutdown or Close, or the error that ended listening or accepting.
+func (s *Server) ListenAndServe(addr string) error {
+	if addr == "" {
+		addr = ":1080"
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(l)
+}
+
 // Serve accepts connections on l and serves each with ServeConn, under a
 // context that Close cancels, in its own goroutine. It returns
 // ErrServerClosed after Shutdown or Close, which close l, or the error that
 // ended Accept.
-// Temporary Accept errors, such as timeouts and running out of file
-// descriptors (EMFILE, ENFILE), are retried with a growing delay.
+// Accept errors for which netx.IsAcceptRetryable reports true, such as
+// running out of file descriptors, are retried as netx.Accept does.
 func (s *Server) Serve(l net.Listener) error {
 	if !s.track(&l, true) {
 		_ = l.Close()
@@ -333,28 +351,14 @@ func (s *Server) Serve(l net.Listener) error {
 	}
 	defer s.track(&l, false)
 	ctx := s.baseContext()
-	closed := ctx.Done()
-	var delay time.Duration
 	for {
-		c, err := l.Accept()
+		c, err := netx.Accept(ctx, l)
 		if err != nil {
 			if s.stopping() {
 				return ErrServerClosed
 			}
-			if temporary(err) {
-				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
-				t := time.NewTimer(delay)
-				select {
-				case <-t.C:
-				case <-closed:
-					t.Stop()
-					return ErrServerClosed
-				}
-				continue
-			}
 			return err
 		}
-		delay = 0
 		// Tracked before the goroutine starts, so that Shutdown, once it
 		// sees no connections, cannot miss one being started. One accepted
 		// just before Shutdown or Close closed the listener is refused,
@@ -370,17 +374,6 @@ func (s *Server) Serve(l net.Listener) error {
 			}
 		}()
 	}
-}
-
-// temporary reports whether an Accept error is worth retrying, as net/http
-// decides: a timeout, or an error that reports itself temporary.
-func temporary(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return true
-	}
-	var te interface{ Temporary() bool }
-	return errors.As(err, &te) && te.Temporary()
 }
 
 // ServeConn serves one client connection, as Handshake and ServeRequest do,
@@ -419,10 +412,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 // rejected credentials or a malformed request, are answered before it
 // returns. c has no deadline set after a success.
 //
-// On failure c is left open for the caller to close; after a timeout or the
-// end of ctx it is unusable, and the connection beneath a *tls.Conn is
-// already closed, so that closing it sends no close_notify the peer cannot
-// authenticate.
+// On failure c is closed, as by netx.DoHandshake.
 //
 // The request is served by ServeRequest, or by the caller, which replies
 // with Request.Reply and reads and writes Request.Conn; Allow is then not
@@ -431,6 +421,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 func (s *Server) Handshake(ctx context.Context, c net.Conn) (*Request, error) {
 	ctx, cancel, err := s.bindContext(ctx)
 	if err != nil {
+		_ = c.Close()
 		return nil, err
 	}
 	defer cancel()
@@ -465,13 +456,14 @@ func (s *Server) bindContext(ctx context.Context) (context.Context, context.Canc
 	return ctx, func() { stop(); cancel() }, nil
 }
 
-// handshake runs the handshake on c under HandshakeTimeout and ctx.
+// handshake runs the handshake on c under HandshakeTimeout and ctx, and
+// closes c when it fails.
 func (s *Server) handshake(ctx context.Context, c net.Conn) (*Request, error) {
 	// The authenticators' context ends with the handshake timeout too.
 	hctx, cancel := context.WithTimeout(ctx, positive(s.HandshakeTimeout, DefaultHandshakeTimeout))
 	defer cancel()
 	var req *Request
-	err := netx.DoWithContext(hctx, c, func() (err error) {
+	err := netx.DoHandshake(hctx, c, func() (err error) {
 		req, err = s.readRequest(hctx, c)
 		return err
 	})
@@ -481,13 +473,8 @@ func (s *Server) handshake(ctx context.Context, c net.Conn) (*Request, error) {
 	// The connection's deadline is hctx's, so an I/O timeout can come just
 	// before hctx reports it; the deadline having passed tells them apart
 	// from the timeouts of an authenticator's own backend.
-	deadline, _ := hctx.Deadline()
-	timedOut := hctx.Err() != nil || !time.Now().Before(deadline)
-	if timedOut && ctx.Err() == nil {
+	if deadline, _ := hctx.Deadline(); ctx.Err() == nil && (hctx.Err() != nil || !time.Now().Before(deadline)) {
 		err = os.ErrDeadlineExceeded
-	}
-	if timedOut || ctx.Err() != nil {
-		closeBeneathTLS(c)
 	}
 	return nil, err
 }
@@ -657,11 +644,7 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 	if err != nil {
 		return refuse(req, ReplyFor(err), err)
 	}
-	bound := AddrFromNetAddr(target.LocalAddr())
-	if s.ConnectAddr != nil {
-		bound = s.ConnectAddr(req, target)
-	}
-	if err := req.Reply(ReplySucceeded, bound); err != nil {
+	if err := req.Reply(ReplySucceeded, AddrFromNetAddr(target.LocalAddr())); err != nil {
 		_ = target.Close()
 		return err
 	}
@@ -670,11 +653,7 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 	// outlive Close.
 	stop := context.AfterFunc(ctx, func() { _ = target.Close() })
 	defer stop()
-	// Also for a Relay hook that leaves it open.
 	defer func() { _ = target.Close() }()
-	if s.Relay != nil {
-		return s.Relay(ctx, req, target)
-	}
 	opts := []netx.RelayOption{netx.WithRelayHalfClose()}
 	if s.RelayOptions != nil {
 		opts = append(opts, s.RelayOptions(req)...)
@@ -849,24 +828,6 @@ func (s *Server) trackConn(c *net.Conn, add bool) bool {
 func (s *Server) onError(c net.Conn, err error) {
 	if s.OnError != nil && !s.isClosed() {
 		s.OnError(c, err)
-	}
-}
-
-// closeBeneathTLS closes the connection beneath c after a timeout when c is a
-// *tls.Conn. One whose write timed out would still send close_notify on
-// Close, under a record number that the peer cannot authenticate, so the peer
-// would see a TLS failure instead of the end of the connection. Only the
-// connection that c's Close closes anyway is closed, never one that c merely
-// borrows, such as the parent of a netx.WrapConn.
-func closeBeneathTLS(c net.Conn) {
-	// Matched by its methods, so that the package does not link crypto/tls.
-	if tc, ok := c.(interface {
-		NetConn() net.Conn
-		HandshakeContext(context.Context) error
-	}); ok {
-		if raw := tc.NetConn(); raw != nil {
-			_ = raw.Close()
-		}
 	}
 }
 

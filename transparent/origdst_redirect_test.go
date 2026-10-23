@@ -12,7 +12,7 @@ import (
 )
 
 // stubConn is a connection that is not a socket, with the addresses it is
-// given, as a wrapper that netx.InnermostConn cannot look through.
+// given, as a wrapper without a NetConn method to look through.
 type stubConn struct {
 	local net.Addr
 }

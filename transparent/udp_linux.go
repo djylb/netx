@@ -10,6 +10,9 @@ import (
 	"net/netip"
 	"syscall"
 	"unsafe"
+
+	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // packetErr reports no error: ListenPacket is supported.
@@ -23,9 +26,9 @@ func readFromUDP(c *net.UDPConn, b []byte) (int, PacketInfo, error) {
 	if err != nil {
 		return n, PacketInfo{}, err
 	}
-	info := PacketInfo{Src: unmapAddrPort(src)}
+	info := PacketInfo{Src: netutil.UnmapAddrPort(src)}
 	laddr, _ := c.LocalAddr().(*net.UDPAddr)
-	bound := unmapAddrPort(laddr.AddrPort())
+	bound := netutil.UnmapAddrPort(laddr.AddrPort())
 	dst, ok := origDstFromControl(oob[:oobn])
 	if !ok {
 		if flags&syscall.MSG_CTRUNC != 0 {
@@ -108,14 +111,14 @@ func setCmsg(oob []byte, level, typ, n int) []byte {
 }
 
 // readDatagram waits until raw is readable, holding no buffer meanwhile, and
-// reads one datagram into a buffer from datagramPool, which the caller puts
+// reads one datagram into a buffer from dgram.Large, which the caller puts
 // back.
 func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 	var bp *[]byte
 	var n int
 	var opErr error
 	err := raw.Read(func(fd uintptr) bool {
-		bp = datagramPool.Get().(*[]byte)
+		bp = dgram.Large.Get()
 		for {
 			n, opErr = syscall.Read(int(fd), *bp)
 			if opErr != syscall.EINTR {
@@ -123,7 +126,7 @@ func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 			}
 		}
 		if opErr == syscall.EAGAIN {
-			datagramPool.Put(bp)
+			dgram.Large.Put(bp)
 			bp = nil
 			return false
 		}
@@ -134,7 +137,7 @@ func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 	}
 	if err != nil {
 		if bp != nil {
-			datagramPool.Put(bp)
+			dgram.Large.Put(bp)
 		}
 		return nil, 0, err
 	}
@@ -180,7 +183,7 @@ func origDstFromControl(oob []byte) (netip.AddrPort, bool) {
 }
 
 func dialUDP(ctx context.Context, local, remote netip.AddrPort) (*net.UDPConn, error) {
-	local, remote = unmapAddrPort(local), unmapAddrPort(remote)
+	local, remote = netutil.UnmapAddrPort(local), netutil.UnmapAddrPort(remote)
 	network := "udp6"
 	if local.Addr().Is4() && remote.Addr().Is4() {
 		network = "udp4"

@@ -4,6 +4,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // NoProxy matches the targets that should bypass a proxy, as listed in a
@@ -45,7 +47,7 @@ func ParseNoProxy(s string) NoProxy {
 			continue
 		}
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
-			np.prefixes = append(np.prefixes, noProxyPrefixes(prefix.Masked())...)
+			np.prefixes = append(np.prefixes, netutil.UnmappedPrefixes(prefix)...)
 			continue
 		}
 		host, port := entry, ""
@@ -116,21 +118,4 @@ func unbracket(host string) string {
 		return host[1 : len(host)-1]
 	}
 	return host
-}
-
-// v4InV6 is the IPv4-mapped part of the IPv6 address space.
-var v4InV6 = netip.MustParsePrefix("::ffff:0.0.0.0/96")
-
-// noProxyPrefixes returns the prefixes that match what p covers. Targets are
-// matched in their unmapped form, so an IPv4-mapped prefix is matched as the
-// IPv4 prefix it maps, and one that covers all mapped addresses also as
-// 0.0.0.0/0.
-func noProxyPrefixes(p netip.Prefix) []netip.Prefix {
-	switch {
-	case p.Addr().Is4In6() && p.Bits() >= v4InV6.Bits():
-		return []netip.Prefix{netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-v4InV6.Bits())}
-	case p.Addr().Is6() && p.Bits() < v4InV6.Bits() && p.Contains(v4InV6.Addr()):
-		return []netip.Prefix{p, netip.PrefixFrom(netip.IPv4Unspecified(), 0)}
-	}
-	return []netip.Prefix{p}
 }

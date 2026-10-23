@@ -31,7 +31,7 @@ func TestCopyStreamIdleSocketHoldsNoBuffer(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	for _, c := range conns {
 		src := c[1].(io.Reader)
-		wg.Go(func() { _, _ = copyStream(context.Background(), io.Discard, src, nil) })
+		wg.Go(func() { _, _ = copyStream(context.Background(), io.Discard, newRelaySource(src), nil) })
 	}
 	time.Sleep(200 * time.Millisecond) // let every copy block
 	runtime.ReadMemStats(&after)
@@ -85,7 +85,7 @@ func TestRelayEndsWhenClosedWhileWaitWouldBlock(t *testing.T) {
 		}
 		done := make(chan struct{})
 		go func() {
-			_, _, _ = Relay(context.Background(), b, dst, WithRelayFlows(blocked, blocked))
+			_, _, _ = Relay(context.Background(), b, dst, WithRelayFlows(&blocked, &blocked))
 			close(done)
 		}()
 		time.Sleep(50 * time.Millisecond)
@@ -117,7 +117,7 @@ func heldPerCopy(t *testing.T, n int, feed func(peer io.Writer), flow func() *Re
 	runtime.ReadMemStats(&before)
 	for _, src := range srcs {
 		f := flow()
-		wg.Go(func() { _, _ = copyStream(context.Background(), io.Discard, src, f) })
+		wg.Go(func() { _, _ = copyStream(context.Background(), io.Discard, newRelaySource(src), f) })
 	}
 	waitUntil(t, stalled)
 	time.Sleep(100 * time.Millisecond)
@@ -210,7 +210,7 @@ func TestRelayWithGroupEndsBlockedWaits(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Relay(context.Background(), b, dst, WithRelayGroup(&g), WithRelayFlows(blockAfterFirst(100, &blocked), blockAfterFirst(100, &blocked)))
+			_, _, err := Relay(context.Background(), b, dst, WithRelayGroup(&g), WithRelayFlows(new(blockAfterFirst(100, &blocked)), new(blockAfterFirst(100, &blocked))))
 			done <- err
 		}()
 		_, _ = a.Write(make([]byte, 1000))
@@ -251,7 +251,7 @@ func TestRelayPassesEndAfterFullReadWithoutWait(t *testing.T) {
 			dst = NewTimeoutConn(c, time.Minute)
 		}
 		go func() {
-			_, _, _ = Relay(context.Background(), b, dst, WithRelayHalfClose(), WithRelayFlows(blockAfterFirst(100, &blocked), RelayFlow{}))
+			_, _, _ = Relay(context.Background(), b, dst, WithRelayHalfClose(), WithRelayFlows(new(blockAfterFirst(100, &blocked)), nil))
 		}()
 		_, _ = a.Write(make([]byte, 100))
 		_ = a.(*net.TCPConn).CloseWrite()
@@ -296,7 +296,7 @@ func TestCopyDatagramsBlockedWaitHoldsNoBuffer(t *testing.T) {
 			}
 			return limit, nil
 		}}
-		wg.Go(func() { _, _ = copyDatagrams(context.Background(), io.Discard, src, f) })
+		wg.Go(func() { _, _ = copyDatagrams(context.Background(), io.Discard, newRelaySource(src), f) })
 	}
 	waitUntil(t, func() bool { return blocked.Load() == n })
 	runtime.ReadMemStats(&after)
@@ -305,8 +305,8 @@ func TestCopyDatagramsBlockedWaitHoldsNoBuffer(t *testing.T) {
 		_ = p.Close()
 	}
 	wg.Wait()
-	if per := int64(after.HeapAlloc-before.HeapAlloc) / n; per >= relayDatagramBufSize/2 {
-		t.Fatalf("a datagram copy blocked in Wait holds %d bytes, want no %d byte buffer", per, relayDatagramBufSize)
+	if per := int64(after.HeapAlloc-before.HeapAlloc) / n; per >= largeBufSize/2 {
+		t.Fatalf("a datagram copy blocked in Wait holds %d bytes, want no %d byte buffer", per, largeBufSize)
 	}
 }
 
@@ -315,7 +315,7 @@ func TestCopyDatagramsBlockedWaitHoldsNoBuffer(t *testing.T) {
 func TestCopyStreamReportsWaitErrorsAsReads(t *testing.T) {
 	_, b := tcpPair(t)
 	_ = b.SetReadDeadline(time.Now().Add(-time.Second))
-	_, err := copyStream(context.Background(), io.Discard, b, nil)
+	_, err := copyStream(context.Background(), io.Discard, newRelaySource(b), nil)
 	var oe *net.OpError
 	if !IsTimeout(err) || !errors.As(err, &oe) || oe.Op != "read" {
 		t.Fatalf("copyStream() error = %v, want a read timeout", err)

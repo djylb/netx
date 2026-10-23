@@ -122,7 +122,8 @@ func parseV1Addr(ip, port string) (netip.AddrPort, bool) {
 // addresses apply, treats commands other than PROXY as LOCAL and leaves the
 // addresses unset for unknown families and transports and for an address
 // block too short for its family. TLVs end at the first truncated one, and
-// NOOP padding is dropped.
+// NOOP padding is dropped. A CRC32C field is verified, and one that does
+// not match fails the header.
 func decodeV2(b []byte) (*Header, int, int, error) {
 	if len(b) < v2HeadLen {
 		return nil, 0, v2HeadLen, io.ErrUnexpectedEOF
@@ -141,10 +142,20 @@ func decodeV2(b []byte) (*Header, int, int, error) {
 	if len(payload) < addrLen {
 		return h, n, 0, nil
 	}
+	tlvs := TLVs(payload[addrLen:])
+	// A receiver that supports the checksum must verify it (section 2.2.3).
+	if off, ok := tlvs.crc32cField(); !ok {
+		return nil, n, 0, fmt.Errorf("%w: CRC32C field not a single 4-byte value", ErrChecksum)
+	} else if off >= 0 {
+		off += v2HeadLen + addrLen
+		if binary.BigEndian.Uint32(b[off:]) != headerCRC32C(b[:n], off) {
+			return nil, n, 0, ErrChecksum
+		}
+	}
 	if !h.Local && (proto == 1 || proto == 2) {
 		h.Source, h.Destination = v2Addrs(af, proto, payload[:addrLen])
 	}
-	h.TLVs = decodeTLVs(payload[addrLen:])
+	h.TLVs = decodeTLVs(tlvs)
 	return h, n, 0, nil
 }
 

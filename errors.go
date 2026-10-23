@@ -23,7 +23,7 @@ func IsTimeout(err error) bool {
 
 func isTimeout(t *errText) bool {
 	// Checked first because Errno.Timeout is false for WSAETIMEDOUT on Windows.
-	if errorIsAny(t.err, timedOutErrnos) {
+	if t.hasErrno(errnoSet(1) << eTimedOut) {
 		return true
 	}
 	if ne, ok := errors.AsType[net.Error](t.err); ok {
@@ -76,128 +76,98 @@ func IsDNSNotFound(err error) bool {
 	return ok && de.IsNotFound
 }
 
-// IsConnReset reports whether err looks like a connection reset.
-func IsConnReset(err error) bool {
-	return err != nil && isConnReset(&errText{err: err})
+// errorClass is how a classifier matches an error: by the platform errnos
+// of its POSIX names anywhere in the chain, then by the error's text with
+// spaces, hyphens and underscores removed.
+type errorClass struct {
+	errnos errnoSet
+	texts  []string
 }
 
-func isConnReset(t *errText) bool {
-	return errorIsAny(t.err, connResetErrnos) || t.has(
+func (c *errorClass) match(t *errText) bool {
+	return t.hasErrno(c.errnos) || t.has(c.texts...)
+}
+
+// is reports whether err is of the class.
+func (c *errorClass) is(err error) bool {
+	return err != nil && c.match(&errText{err: err})
+}
+
+var (
+	connReset = errorClass{errnoSet(1) << eConnReset, []string{
 		"connectionresetbypeer",
 		"forciblyclosedbytheremotehost",
-		"networknameisnolongeravailable")
-}
-
-// IsConnAborted reports whether err looks like an aborted connection.
-func IsConnAborted(err error) bool {
-	return err != nil && isConnAborted(&errText{err: err})
-}
-
-func isConnAborted(t *errText) bool {
-	return errorIsAny(t.err, connAbortedErrnos) || t.has(
+		"networknameisnolongeravailable"}}
+	connAborted = errorClass{errnoSet(1) << eConnAborted, []string{
 		"connectionaborted",
 		"connectionwasaborted",
-		"softwarecausedconnectionabort")
-}
+		"softwarecausedconnectionabort"}}
+	brokenPipe = errorClass{errnoSet(1) << ePipe, []string{
+		"brokenpipe",
+		"sockethadalreadybeenshutdown"}}
+	connRefused = errorClass{errnoSet(1) << eConnRefused, []string{
+		"connectionrefused",
+		"activelyrefusedit"}}
+	hostUnreachable = errorClass{errnoSet(1) << eHostUnreach, []string{
+		"noroutetohost",
+		"hostunreachable",
+		"hostisunreachable",
+		"unreachablehost"}}
+	networkUnreachable = errorClass{errnoSet(1) << eNetUnreach, []string{
+		"networkunreachable",
+		"networkisunreachable",
+		"unreachablenetwork"}}
+	permissionDenied = errorClass{errnoSet(1)<<eAccess | errnoSet(1)<<ePerm, []string{
+		"permissiondenied",
+		"operationnotpermitted",
+		"accessisdenied",
+		"forbiddenbyitsaccesspermissions"}}
+	addrInUse = errorClass{errnoSet(1) << eAddrInUse, []string{
+		"addressalreadyinuse",
+		"onlyoneusageofeachsocketaddress"}}
+	addrNotAvailable = errorClass{errnoSet(1) << eAddrNotAvail, []string{
+		"cannotassignrequestedaddress",
+		"requestedaddressisnotvalidinitscontext"}}
+	messageTooLarge = errorClass{errnoSet(1) << eMsgSize, []string{
+		"messagetoolong",
+		"messagesentonadatagramsocketwaslarger"}}
+)
+
+// IsConnReset reports whether err looks like a connection reset.
+func IsConnReset(err error) bool { return connReset.is(err) }
+
+// IsConnAborted reports whether err looks like an aborted connection.
+func IsConnAborted(err error) bool { return connAborted.is(err) }
 
 // IsBrokenPipe reports whether err looks like a broken pipe.
-func IsBrokenPipe(err error) bool {
-	return err != nil && isBrokenPipe(&errText{err: err})
-}
-
-func isBrokenPipe(t *errText) bool {
-	return errorIsAny(t.err, brokenPipeErrnos) || t.has(
-		"brokenpipe",
-		"sockethadalreadybeenshutdown")
-}
+func IsBrokenPipe(err error) bool { return brokenPipe.is(err) }
 
 // IsConnRefused reports whether err looks like a refused connection attempt.
-func IsConnRefused(err error) bool {
-	return err != nil && isConnRefused(&errText{err: err})
-}
-
-func isConnRefused(t *errText) bool {
-	return errorIsAny(t.err, connRefusedErrnos) || t.has(
-		"connectionrefused",
-		"activelyrefusedit")
-}
+func IsConnRefused(err error) bool { return connRefused.is(err) }
 
 // IsHostUnreachable reports whether err looks like an unreachable host. A
 // failed lookup is KindDNS for NetErrorKind, whatever its cause; IsDNSError
 // tells it apart.
-func IsHostUnreachable(err error) bool {
-	return err != nil && isHostUnreachable(&errText{err: err})
-}
-
-func isHostUnreachable(t *errText) bool {
-	return errorIsAny(t.err, hostUnreachErrnos) || t.has(
-		"noroutetohost",
-		"hostunreachable",
-		"hostisunreachable",
-		"unreachablehost")
-}
+func IsHostUnreachable(err error) bool { return hostUnreachable.is(err) }
 
 // IsNetworkUnreachable reports whether err looks like an unreachable network.
-func IsNetworkUnreachable(err error) bool {
-	return err != nil && isNetworkUnreachable(&errText{err: err})
-}
-
-func isNetworkUnreachable(t *errText) bool {
-	return errorIsAny(t.err, netUnreachErrnos) || t.has(
-		"networkunreachable",
-		"networkisunreachable",
-		"unreachablenetwork")
-}
+func IsNetworkUnreachable(err error) bool { return networkUnreachable.is(err) }
 
 // IsPermissionDenied reports whether err looks like a permission failure
 // (EACCES or EPERM), such as a connect blocked by a local firewall rule.
-func IsPermissionDenied(err error) bool {
-	return err != nil && isPermissionDenied(&errText{err: err})
-}
-
-func isPermissionDenied(t *errText) bool {
-	return errorIsAny(t.err, accessErrnos) || errorIsAny(t.err, permErrnos) || t.has(
-		"permissiondenied",
-		"operationnotpermitted",
-		"accessisdenied",
-		"forbiddenbyitsaccesspermissions")
-}
+func IsPermissionDenied(err error) bool { return permissionDenied.is(err) }
 
 // IsAddrInUse reports whether err looks like an address already in use,
 // as when a listener's port is taken.
-func IsAddrInUse(err error) bool {
-	return err != nil && isAddrInUse(&errText{err: err})
-}
-
-func isAddrInUse(t *errText) bool {
-	return errorIsAny(t.err, addrInUseErrnos) || t.has(
-		"addressalreadyinuse",
-		"onlyoneusageofeachsocketaddress")
-}
+func IsAddrInUse(err error) bool { return addrInUse.is(err) }
 
 // IsAddrNotAvailable reports whether err looks like an address that is not
 // available on this host, as when binding to an address of another host.
-func IsAddrNotAvailable(err error) bool {
-	return err != nil && isAddrNotAvailable(&errText{err: err})
-}
-
-func isAddrNotAvailable(t *errText) bool {
-	return errorIsAny(t.err, addrNotAvailErrnos) || t.has(
-		"cannotassignrequestedaddress",
-		"requestedaddressisnotvalidinitscontext")
-}
+func IsAddrNotAvailable(err error) bool { return addrNotAvailable.is(err) }
 
 // IsMessageTooLarge reports whether err looks like a datagram too large to
 // send or receive whole.
-func IsMessageTooLarge(err error) bool {
-	return err != nil && isMessageTooLarge(&errText{err: err})
-}
-
-func isMessageTooLarge(t *errText) bool {
-	return errorIsAny(t.err, msgSizeErrnos) || t.has(
-		"messagetoolong",
-		"messagesentonadatagramsocketwaslarger")
-}
+func IsMessageTooLarge(err error) bool { return messageTooLarge.is(err) }
 
 // ErrorKind is a stable category of a network error, for metrics and logs;
 // see NetErrorKind.
@@ -237,7 +207,8 @@ func NetErrorKind(err error) ErrorKind {
 }
 
 // netErrorKind is NetErrorKind for a non-nil error. The classifiers share t,
-// so the error is formatted and normalized at most once.
+// so the error's chain is searched for errnos, and its text formatted and
+// normalized, at most once.
 func netErrorKind(t *errText) ErrorKind {
 	switch {
 	// Before the others, whose text fallbacks would match the cause that a
@@ -246,25 +217,25 @@ func netErrorKind(t *errText) ErrorKind {
 		return KindCanceled
 	case IsDNSError(t.err):
 		return KindDNS
-	case isConnReset(t):
+	case connReset.match(t):
 		return KindConnReset
-	case isConnAborted(t):
+	case connAborted.match(t):
 		return KindConnAborted
-	case isBrokenPipe(t):
+	case brokenPipe.match(t):
 		return KindBrokenPipe
-	case isConnRefused(t):
+	case connRefused.match(t):
 		return KindConnRefused
-	case isHostUnreachable(t):
+	case hostUnreachable.match(t):
 		return KindHostUnreachable
-	case isNetworkUnreachable(t):
+	case networkUnreachable.match(t):
 		return KindNetworkUnreachable
-	case isPermissionDenied(t):
+	case permissionDenied.match(t):
 		return KindPermissionDenied
-	case isAddrInUse(t):
+	case addrInUse.match(t):
 		return KindAddrInUse
-	case isAddrNotAvailable(t):
+	case addrNotAvailable.match(t):
 		return KindAddrNotAvailable
-	case isMessageTooLarge(t):
+	case messageTooLarge.match(t):
 		return KindMessageTooLarge
 	case isTimeout(t):
 		return KindTimeout
@@ -374,18 +345,35 @@ func ErrnoName(err error) string {
 // form is computed on first use, so that NetErrorKind, which may try every
 // classifier, formats and normalizes the error only once.
 type errText struct {
-	err  error
-	raw  string // err.Error()
-	low  string // raw in lower case
-	norm string // low without spaces, hyphens and underscores
-	have uint8  // which of raw, low and norm are set
+	err    error
+	raw    string   // err.Error()
+	low    string   // raw in lower case
+	norm   string   // low without spaces, hyphens and underscores
+	errnos errnoSet // the errnos in err's chain
+	have   uint8    // which of the fields above are set
 }
 
 const (
 	haveRaw uint8 = 1 << iota
 	haveLow
 	haveNorm
+	haveErrnos
 )
+
+// findErrnos finds the errnos in the chain of t's error, all in one walk.
+func (t *errText) findErrnos() {
+	if t.have&haveErrnos == 0 {
+		t.errnos = chainErrnos(t.err)
+		t.have |= haveErrnos
+	}
+}
+
+// hasErrno reports whether t's error matches any of the errnos of set, as
+// errors.Is would.
+func (t *errText) hasErrno(set errnoSet) bool {
+	t.findErrnos()
+	return t.errnos&set != 0
+}
 
 func (t *errText) text() string {
 	if t.have&haveRaw == 0 {
@@ -435,12 +423,86 @@ func stripSeparators(s string) string {
 	return b.String()
 }
 
-// errorIsAny reports whether errors.Is(err, target) holds for any target.
-func errorIsAny(err error, targets []error) bool {
-	for _, target := range targets {
-		if errors.Is(err, target) {
-			return true
+// errnoID names a POSIX errno that the classifiers know. platformErrnos
+// holds each one's errnos on the platform; errnoNames, in the same order,
+// their names.
+type errnoID uint8
+
+const (
+	eConnReset errnoID = iota
+	eConnAborted
+	ePipe
+	eConnRefused
+	eHostUnreach
+	eNetUnreach
+	eAccess
+	ePerm
+	eTimedOut
+	eAddrInUse
+	eAddrNotAvail
+	eMsgSize
+	numErrnoIDs
+)
+
+var errnoNames = [numErrnoIDs]string{
+	eConnReset:    "ECONNRESET",
+	eConnAborted:  "ECONNABORTED",
+	ePipe:         "EPIPE",
+	eConnRefused:  "ECONNREFUSED",
+	eHostUnreach:  "EHOSTUNREACH",
+	eNetUnreach:   "ENETUNREACH",
+	eAccess:       "EACCES",
+	ePerm:         "EPERM",
+	eTimedOut:     "ETIMEDOUT",
+	eAddrInUse:    "EADDRINUSE",
+	eAddrNotAvail: "EADDRNOTAVAIL",
+	eMsgSize:      "EMSGSIZE",
+}
+
+// errnoSet is a set of errnoIDs.
+type errnoSet uint16
+
+// chainErrnos returns the errnos that err's chain matches, as errors.Is
+// would for each of them, in one walk of the chain.
+func chainErrnos(err error) errnoSet {
+	var set errnoSet
+	for err != nil {
+		set |= errnosOf(err)
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, e := range u.Unwrap() {
+				set |= chainErrnos(e)
+			}
+			return set
+		default:
+			return set
 		}
 	}
-	return false
+	return set
+}
+
+// errnosOf returns the errnos that err itself matches, as errors.Is
+// compares each error of a chain with its target.
+func errnosOf(err error) errnoSet {
+	// An errno equals its targets or none: its Is matches the os errors
+	// alone.
+	if set, ok := errnoValueSet(err); ok {
+		return set
+	}
+	is, ok := err.(interface{ Is(error) bool })
+	if !ok {
+		return 0
+	}
+	var set errnoSet
+	for id, targets := range platformErrnos {
+		for _, target := range targets {
+			if is.Is(target) {
+				set |= 1 << id
+				break
+			}
+		}
+	}
+	return set
 }

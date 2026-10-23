@@ -56,7 +56,7 @@ func TestRecordingConnHelpersHandleNilState(t *testing.T) {
 	if raw, data := nilConn.Release(); raw != nil || data != nil {
 		t.Fatalf("nil Release() = (%v, %v), want (nil, nil)", raw, data)
 	}
-	nilConn.Stop(true)
+	nilConn.Discard()
 
 	malformed := &RecordingConn{}
 	assertClosedConnState(t, "malformed", malformed)
@@ -110,7 +110,7 @@ func TestRecordingConnDiscardBufferStopsCapture(t *testing.T) {
 	if n, err := tee.Read(buf); err != nil || n != 3 {
 		t.Fatalf("Read() = %d, %v; want 3, nil", n, err)
 	}
-	tee.Stop(true)
+	tee.Discard()
 	if got := tee.Buffered(); len(got) != 0 {
 		t.Fatalf("Buffered() after Stop(true) = %q, want empty", string(got))
 	}
@@ -130,7 +130,7 @@ func TestRecordingConnTruncatedAndStop(t *testing.T) {
 	if rc.Truncated() {
 		t.Fatal("Truncated() before the limit")
 	}
-	rc.Stop(false)
+	rc.Stop()
 	_, _ = io.ReadFull(rc, make([]byte, 3))
 	if got := string(rc.Buffered()); got != "abc" || rc.Truncated() {
 		t.Fatalf("after Stop(false): Buffered() = %q, Truncated() = %v", got, rc.Truncated())

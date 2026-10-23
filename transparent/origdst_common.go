@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // ErrOriginalDestinationUnsupported is returned by OriginalDestination on
@@ -33,10 +33,11 @@ var ErrOriginalDestinationUnsupported = fmt.Errorf("transparent: original destin
 // connection or without permission to read /dev/pf, are returned. On other
 // platforms it returns ErrOriginalDestinationUnsupported.
 //
-// Wrappers such as netx.TimeoutConn are looked through with netx.InnermostConn,
-// so the lookup and the local address are the accepted socket's rather than
-// an address that a wrapper reports, such as the destination of a PROXY
-// header, which conn.LocalAddr returns. A connection beneath which no socket
+// Wrappers, such as a *tls.Conn or the connection types of the netx package,
+// are looked through along their NetConn methods, so the lookup and the
+// local address are the accepted socket's rather than an address that a
+// wrapper reports, such as the destination of a PROXY header, which
+// conn.LocalAddr returns. A connection beneath which no socket
 // can be reached is an error. IPv4-mapped addresses are unmapped, and a
 // link-local IPv6 address keeps its zone, such as [fe80::1%eth0]:80, which a
 // dialer needs to reach it. A nil conn returns net.ErrClosed.
@@ -44,11 +45,34 @@ func OriginalDestination(conn net.Conn) (dst netip.AddrPort, redirected bool, er
 	if conn == nil {
 		return netip.AddrPort{}, false, net.ErrClosed
 	}
-	// A nil pointer, such as a nil *net.TCPConn, unwraps to nil. The
-	// connection beneath is only looked at; conn's owner closes it.
+	// The connection beneath is only looked at; conn's owner closes it.
 	//noinspection GoResourceLeak
-	if conn = netx.InnermostConn(conn); conn == nil {
+	if conn = innermost(conn); conn == nil {
 		return netip.AddrPort{}, false, net.ErrClosed
 	}
 	return originalDestination(conn)
+}
+
+// maxUnwrapDepth bounds a NetConn chain, so that wrappers that lead back to
+// themselves cannot loop forever.
+const maxUnwrapDepth = 16
+
+// innermost follows conn's NetConn methods to the connection that has none,
+// or to the one maxUnwrapDepth levels down. A nil pointer on the way, such
+// as a nil *net.TCPConn, gives nil.
+func innermost(conn net.Conn) net.Conn {
+	for range maxUnwrapDepth {
+		if conn == nil || netutil.IsNilPointer(conn) {
+			return nil
+		}
+		w, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return conn
+		}
+		conn = w.NetConn()
+	}
+	if conn == nil || netutil.IsNilPointer(conn) {
+		return nil
+	}
+	return conn
 }

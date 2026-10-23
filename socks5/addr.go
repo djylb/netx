@@ -5,9 +5,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // Address types defined by RFC 1928.
@@ -52,7 +53,7 @@ func AddrFromNetAddr(a net.Addr) Addr {
 		}
 		return addrFromIP(a.IP, a.Port)
 	}
-	if isNilPointer(a) {
+	if netutil.IsNilPointer(a) {
 		return Addr{}
 	}
 	addr, err := ParseAddr(a.String())
@@ -60,13 +61,6 @@ func AddrFromNetAddr(a net.Addr) Addr {
 		return Addr{}
 	}
 	return addr
-}
-
-// isNilPointer reports whether a holds a nil pointer, such as a nil *Addr,
-// whose String would panic.
-func isNilPointer(a net.Addr) bool {
-	v := reflect.ValueOf(a)
-	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 func addrFromIP(ip net.IP, port int) Addr {

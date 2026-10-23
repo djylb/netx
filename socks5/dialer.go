@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // Dialer dials TCP connections through a SOCKS5, SOCKS4 or SOCKS4a proxy
@@ -72,7 +73,6 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return nil, err
 	}
 	if _, err := d.Handshake(ctx, c, CmdConnect, dst); err != nil {
-		_ = c.Close()
 		return nil, err
 	}
 	return c, nil
@@ -85,25 +85,20 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 // leave unspecified. dst is sent as it is, without Resolver. SOCKS4 has no
 // UDP ASSOCIATE and returns an error matching errors.ErrUnsupported for it.
 //
-// ctx bounds the handshake as with netx.DoWithContext, and c has no deadline
+// ctx bounds the handshake as with netx.DoHandshake, and c has no deadline
 // set after a success. A non-success reply is returned as a *ReplyError. On
-// failure c is left open for the caller to close; after a timeout or the end
-// of ctx it is unusable, and the connection beneath a *tls.Conn is already
-// closed, so that closing it sends no close_notify the peer cannot
-// authenticate.
+// failure c is closed, as by netx.DoHandshake.
 func (d *Dialer) Handshake(ctx context.Context, c net.Conn, cmd Command, dst Addr) (Addr, error) {
 	if d.SOCKS4 && cmd == CmdUDPAssociate {
+		_ = c.Close()
 		return Addr{}, fmt.Errorf("socks5: SOCKS4 %v: %w", cmd, errors.ErrUnsupported)
 	}
 	var bound Addr
-	err := netx.DoWithContext(ctx, c, func() (err error) {
+	err := netx.DoHandshake(ctx, c, func() (err error) {
 		bound, err = d.request(c, cmd, dst)
 		return err
 	})
 	if err != nil {
-		if ctx.Err() != nil || netx.IsTimeout(err) {
-			closeBeneathTLS(c)
-		}
 		return Addr{}, err
 	}
 	return bound, nil
@@ -217,17 +212,19 @@ func (d *Dialer) ListenPacket(ctx context.Context) (*UDPConn, error) {
 	// connection, as a NAT may rewrite it.
 	announced := Addr{Port: uint16(pc.LocalAddr().(*net.UDPAddr).Port)}
 	bound, err := d.Handshake(ctx, ctrl, CmdUDPAssociate, announced)
-	if err == nil {
-		var relay netip.AddrPort
-		if relay, err = d.relayAddr(ctx, ctrl, bound); err == nil {
-			u := &UDPConn{ctrl: ctrl, pc: pc, relay: relay}
-			go u.watch()
-			return u, nil
-		}
+	if err != nil {
+		_ = pc.Close()
+		return nil, err
 	}
-	_ = ctrl.Close()
-	_ = pc.Close()
-	return nil, err
+	relay, err := d.relayAddr(ctx, ctrl, bound)
+	if err != nil {
+		_ = ctrl.Close()
+		_ = pc.Close()
+		return nil, err
+	}
+	u := &UDPConn{ctrl: ctrl, pc: pc, relay: relay}
+	go u.watch()
+	return u, nil
 }
 
 // relayAddr returns the address to send datagrams to from the bound address
@@ -248,7 +245,7 @@ func (d *Dialer) relayAddr(ctx context.Context, ctrl net.Conn, bound Addr) (neti
 			return netip.AddrPort{}, err
 		}
 	}
-	remote := peerAddrPort(ctrl.RemoteAddr()).Addr()
+	remote := netutil.PeerAddrPort(ctrl.RemoteAddr()).Addr()
 	switch {
 	case !ip.IsValid() || ip.IsUnspecified():
 		// Servers often reply 0.0.0.0: the relay is where the client
@@ -321,7 +318,7 @@ func (u *UDPConn) ReadFrom(p []byte) (int, Addr, error) {
 		if err != nil {
 			return 0, Addr{}, err
 		}
-		if netip.AddrPortFrom(src.Addr().Unmap(), src.Port()) != u.relay {
+		if netutil.UnmapAddrPort(src) != u.relay {
 			continue
 		}
 		addr, h, err := DecodeDatagram(buf[:n])

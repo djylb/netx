@@ -169,23 +169,21 @@ func TestServerCloseEndsHandshakeCall(t *testing.T) {
 	}
 }
 
-// The Relay hook reads req.Conn, which carries the bytes a SOCKS4 client
-// sent with its request.
-func TestServerRelayHookReadsEarlyData(t *testing.T) {
+// The relay starts with the bytes that a SOCKS4 client sent along with its
+// request.
+func TestServerRelaysEarlyData(t *testing.T) {
 	got := make(chan string, 1)
 	addr := serve(t, &socks5.Server{
 		SOCKS4: true,
 		Dial: func(context.Context, *socks5.Request) (net.Conn, error) {
 			a, b := net.Pipe()
-			go func() { _, _ = io.Copy(io.Discard, b) }()
+			go func() {
+				buf := make([]byte, 5)
+				_, _ = io.ReadFull(b, buf)
+				got <- string(buf)
+				_, _ = io.Copy(io.Discard, b)
+			}()
 			return a, nil
-		},
-		Relay: func(_ context.Context, req *socks5.Request, target net.Conn) error {
-			defer func() { _ = req.Conn.Close(); _ = target.Close() }()
-			buf := make([]byte, 5)
-			_, err := io.ReadFull(req.Conn, buf)
-			got <- string(buf)
-			return err
 		},
 	})
 	c, err := net.Dial("tcp", addr)
@@ -202,10 +200,10 @@ func TestServerRelayHookReadsEarlyData(t *testing.T) {
 	select {
 	case s := <-got:
 		if s != "early" {
-			t.Fatalf("Relay read %q, want early", s)
+			t.Fatalf("target read %q, want early", s)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Relay was not called")
+		t.Fatal("the target got nothing")
 	}
 }
 
@@ -315,9 +313,7 @@ func TestDialerListenPacket(t *testing.T) {
 
 	// A chained server relays its clients' datagrams through upstream.
 	chained := serve(t, &socks5.Server{
-		ListenUDP: func(context.Context, *socks5.Request) (net.PacketConn, error) {
-			return net.ListenPacket("udp", "127.0.0.1:0")
-		},
+		ListenUDP: socks5.ListenAssociationUDP,
 		DialPacket: func(ctx context.Context, _ *socks5.Request) (socks5.PacketConn, error) {
 			return d.ListenPacket(ctx)
 		},
@@ -464,9 +460,10 @@ func TestDialerHandshakeBoundAddr(t *testing.T) {
 				case rep != socks5.ReplySucceeded && !errors.As(err, &replyErr):
 					t.Fatalf("Handshake() of a refusal = %v, %v; want a *ReplyError", got, err)
 				}
-				// Open until the caller closes it: the read sees the server's end.
-				if _, err := client.Read(make([]byte, 1)); errors.Is(err, io.ErrClosedPipe) {
-					t.Fatal("Handshake closed the connection")
+				// The caller's on success, closed on failure.
+				_, err = client.Read(make([]byte, 1))
+				if closed := errors.Is(err, io.ErrClosedPipe); closed != (rep != socks5.ReplySucceeded) {
+					t.Fatalf("after a reply %v the connection is closed: %v, want %v", rep, closed, rep != socks5.ReplySucceeded)
 				}
 				_ = client.Close()
 			}
@@ -764,7 +761,7 @@ func TestServerRelayOptions(t *testing.T) {
 	var mu sync.Mutex
 	sent := map[string]int64{}
 	addr := serve(t, &socks5.Server{
-		Auth: []socks5.Authenticator{socks5.UserPassAuth{Check: socks5.Credentials(map[string]string{"alice": "a", "bob": "b"})}},
+		Auth: []socks5.Authenticator{socks5.Credentials(map[string]string{"alice": "a", "bob": "b"})},
 		RelayOptions: func(req *socks5.Request) []netx.RelayOption {
 			count := netx.RelayFlow{Done: func(n int64) error {
 				mu.Lock()
@@ -772,7 +769,7 @@ func TestServerRelayOptions(t *testing.T) {
 				mu.Unlock()
 				return nil
 			}}
-			return []netx.RelayOption{netx.WithRelayFlows(count, netx.RelayFlow{})}
+			return []netx.RelayOption{netx.WithRelayFlows(&count, nil)}
 		},
 	})
 	target := echoTCP(t)
@@ -1013,7 +1010,7 @@ func TestServeTracksAcceptedBeforeServing(t *testing.T) {
 
 // Credentials accepts exactly the accounts it was given.
 func TestCredentials(t *testing.T) {
-	check := socks5.Credentials(map[string]string{"alice": "secret", "empty": ""})
+	check := socks5.Credentials(map[string]string{"alice": "secret", "empty": ""}).Check
 	for _, tt := range []struct {
 		user, password string
 		want           bool
@@ -1043,33 +1040,5 @@ func TestAddrFromNilPointers(t *testing.T) {
 	u := &socks5.UDPConn{}
 	if _, err := u.AsNetPacketConn().WriteTo(nil, (*socks5.Addr)(nil)); !errors.Is(err, socks5.ErrInvalidAddr) {
 		t.Fatalf("WriteTo(nil *Addr) = %v, want ErrInvalidAddr", err)
-	}
-}
-
-// The target of a CONNECT is closed after a Relay hook that leaves it open.
-func TestServerClosesTargetAfterRelayHook(t *testing.T) {
-	targetClosed := make(chan struct{})
-	addr := serve(t, &socks5.Server{
-		Dial: func(context.Context, *socks5.Request) (net.Conn, error) {
-			a, b := net.Pipe()
-			go func() {
-				_, _ = io.Copy(io.Discard, b)
-				close(targetClosed)
-			}()
-			return a, nil
-		},
-		Relay: func(context.Context, *socks5.Request, net.Conn) error { return nil },
-	})
-	c := handshake(t, addr)
-	if err := socks5.WriteRequest(c, socks5.CmdConnect, socks5.Addr{Name: "example.com", Port: 80}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := socks5.ReadReply(c); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-targetClosed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the target outlived the Relay hook")
 	}
 }

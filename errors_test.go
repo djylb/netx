@@ -118,20 +118,20 @@ func TestNetErrorClassifiersMatchErrnoTables(t *testing.T) {
 	tables := []struct {
 		kind   ErrorKind
 		name   string
-		errnos []error
+		errnos []errnoValue
 	}{
-		{kind: "conn_reset", name: "ECONNRESET", errnos: connResetErrnos},
-		{kind: "conn_aborted", name: "ECONNABORTED", errnos: connAbortedErrnos},
-		{kind: "broken_pipe", name: "EPIPE", errnos: brokenPipeErrnos},
-		{kind: "conn_refused", name: "ECONNREFUSED", errnos: connRefusedErrnos},
-		{kind: "host_unreachable", name: "EHOSTUNREACH", errnos: hostUnreachErrnos},
-		{kind: "network_unreachable", name: "ENETUNREACH", errnos: netUnreachErrnos},
-		{kind: "permission_denied", name: "EACCES", errnos: accessErrnos},
-		{kind: "permission_denied", name: "EPERM", errnos: permErrnos},
-		{kind: "timeout", name: "ETIMEDOUT", errnos: timedOutErrnos},
-		{kind: "addr_in_use", name: "EADDRINUSE", errnos: addrInUseErrnos},
-		{kind: "addr_not_available", name: "EADDRNOTAVAIL", errnos: addrNotAvailErrnos},
-		{kind: "message_too_large", name: "EMSGSIZE", errnos: msgSizeErrnos},
+		{kind: "conn_reset", name: "ECONNRESET", errnos: platformErrnos[eConnReset]},
+		{kind: "conn_aborted", name: "ECONNABORTED", errnos: platformErrnos[eConnAborted]},
+		{kind: "broken_pipe", name: "EPIPE", errnos: platformErrnos[ePipe]},
+		{kind: "conn_refused", name: "ECONNREFUSED", errnos: platformErrnos[eConnRefused]},
+		{kind: "host_unreachable", name: "EHOSTUNREACH", errnos: platformErrnos[eHostUnreach]},
+		{kind: "network_unreachable", name: "ENETUNREACH", errnos: platformErrnos[eNetUnreach]},
+		{kind: "permission_denied", name: "EACCES", errnos: platformErrnos[eAccess]},
+		{kind: "permission_denied", name: "EPERM", errnos: platformErrnos[ePerm]},
+		{kind: "timeout", name: "ETIMEDOUT", errnos: platformErrnos[eTimedOut]},
+		{kind: "addr_in_use", name: "EADDRINUSE", errnos: platformErrnos[eAddrInUse]},
+		{kind: "addr_not_available", name: "EADDRNOTAVAIL", errnos: platformErrnos[eAddrNotAvail]},
+		{kind: "message_too_large", name: "EMSGSIZE", errnos: platformErrnos[eMsgSize]},
 	}
 	for _, table := range tables {
 		for _, errno := range table.errnos {
@@ -275,7 +275,7 @@ func TestNetErrorClassifiersOnLoopback(t *testing.T) {
 
 // NetErrorDetails gives an error's information as fields.
 func TestNetErrorDetails(t *testing.T) {
-	err := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", connResetErrnos[0])}
+	err := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", platformErrnos[eConnReset][0])}
 	info := NetErrorDetails(err, nil)
 	if info.Kind != KindConnReset || info.Op != "read" || info.Net != "tcp" || info.Syscall != "read" {
 		t.Fatalf("NetErrorDetails() = %+v", info)

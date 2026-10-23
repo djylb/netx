@@ -189,7 +189,11 @@ type dialAnyCase struct {
 }
 
 func (c *dialAnyCase) DialAny(ctx context.Context, network string) (net.Conn, string, error) {
-	return DialAny(ctx, c.Stagger, c.Forward, network, c.Addresses...)
+	d := &RaceDialer{Stagger: c.Stagger}
+	if c.Forward != nil {
+		d.Dialers = []ContextDialer{c.Forward}
+	}
+	return d.DialAny(ctx, network, c.Addresses...)
 }
 
 // A RaceDialer races its dialers to one address and is a ContextDialer.
@@ -200,13 +204,19 @@ func TestRaceDialer(t *testing.T) {
 	if c, err := d.DialContext(ctx, "tcp", "x"); err != nil || c == nil {
 		t.Fatalf("DialContext() = %v, %v; want the second dialer's connection", c, err)
 	}
-	if _, err := (&RaceDialer{}).DialContext(ctx, "tcp", "x"); !errors.Is(err, ErrNoDialAttempts) {
-		t.Fatalf("DialContext() without dialers = %v", err)
+	// Every dialer for the first address, then for the next.
+	c, addr, err := (&RaceDialer{Dialers: []ContextDialer{failDialer{}, fast}, Stagger: time.Hour}).DialAny(ctx, "tcp", "a", "b")
+	if err != nil || c == nil || addr != "a" {
+		t.Fatalf("DialAny() = %v, %q, %v; want the second dialer's connection to the first address", c, addr, err)
+	}
+	var none *RaceDialer
+	if _, _, err := none.DialAny(ctx, "tcp"); !errors.Is(err, ErrNoDialAttempts) {
+		t.Fatalf("DialAny() without addresses = %v, want ErrNoDialAttempts", err)
 	}
 }
 
 type failDialer struct{}
 
-func (failDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+func (failDialer) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
 	return nil, errors.New("refused")
 }

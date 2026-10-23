@@ -86,14 +86,12 @@ func TestPacketListenerDial(t *testing.T) {
 		t.Fatalf("Read() = %q, %v", buf[:n], err)
 	}
 	// Not queued for Accept.
-	select {
-	case got := <-l.accept:
-		t.Fatalf("Dial()ed connection queued for Accept: %v", got.RemoteAddr())
-	default:
+	if n := l.conns.Pending(); n != 0 {
+		t.Fatalf("Dial()ed connection queued for Accept: %d pending", n)
 	}
 	// The idle timeout applies from Dial on, and the peer can then connect
 	// again.
-	waitUntil(t, func() bool { return isClosedChan(c.(*packetConn).closed) })
+	waitUntil(t, func() bool { return c.(*packetConn).q.Closed() })
 	if c2, err := l.Dial(peer.LocalAddr()); err != nil {
 		t.Fatalf("Dial() after idle close = %v", err)
 	} else {
@@ -196,9 +194,7 @@ func TestPacketListenerDialDuringFirstDatagram(t *testing.T) {
 	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "first" {
 		t.Fatalf("Dial()ed connection read %q, %v; want the first datagram", buf[:n], err)
 	}
-	select {
-	case got := <-l.accept:
-		t.Fatalf("a second connection was queued for %v", got.RemoteAddr())
-	default:
+	if n := l.conns.Pending(); n != 0 {
+		t.Fatalf("a second connection was queued: %d pending", n)
 	}
 }

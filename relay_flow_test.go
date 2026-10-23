@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // readSizesConn reads from data, recording the size of each Read buffer, and
@@ -75,7 +77,7 @@ func TestRelayFlowPacesStream(t *testing.T) {
 			return nil
 		},
 	}
-	aToB, _, err := Relay(context.Background(), src, dst, WithRelayFlows(flow, RelayFlow{}))
+	aToB, _, err := Relay(context.Background(), src, dst, WithRelayFlows(&flow, nil))
 	if err != nil || aToB != 1000 || done.Load() != 1000 || dst.out.Len() != 1000 {
 		t.Fatalf("Relay(context.Background()) = %d, %v; Done saw %d, wrote %d; want 1000 each", aToB, err, done.Load(), dst.out.Len())
 	}
@@ -98,7 +100,7 @@ func TestRelayFlowErrorsEndRelay(t *testing.T) {
 	} {
 		src := &readSizesConn{data: []byte("data")}
 		// The other direction blocks until the relay ends.
-		_, _, err := Relay(context.Background(), src, &blockingRWC{closed: make(chan struct{})}, WithRelayFlows(flow, RelayFlow{}))
+		_, _, err := Relay(context.Background(), src, &blockingRWC{closed: make(chan struct{})}, WithRelayFlows(&flow, nil))
 		if !errors.Is(err, errQuota) {
 			t.Fatalf("%s: Relay(context.Background()) error = %v, want the flow's error", name, err)
 		}
@@ -116,7 +118,7 @@ func TestRelayFlowWaitEndsWithRelay(t *testing.T) {
 	}}
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := Relay(context.Background(), b, c, WithRelayFlows(RelayFlow{}, blocking))
+		_, _, err := Relay(context.Background(), b, c, WithRelayFlows(nil, &blocking))
 		done <- err
 	}()
 	_ = a.Close() // b reaches EOF, ending the relay
@@ -183,7 +185,7 @@ func TestRelayFlowCountsTCPAsItPasses(t *testing.T) {
 		}
 		done := make(chan struct{})
 		go func() {
-			_, _, _ = Relay(context.Background(), NewPrefixConn(b, []byte("pre:")), c, WithRelayFlows(flow, RelayFlow{}))
+			_, _, _ = Relay(context.Background(), NewPrefixConn(b, []byte("pre:")), c, WithRelayFlows(&flow, nil))
 			close(done)
 		}()
 		if _, err := a.Write([]byte("abc")); err != nil {
@@ -225,7 +227,7 @@ func TestRelayFlowKeepsDatagramsWhole(t *testing.T) {
 	flow := RelayFlow{Wait: func(context.Context, int64) (int64, error) { return 1, nil }}
 	done := make(chan struct{})
 	go func() {
-		_, _, _ = Relay(context.Background(), src, sink, WithRelayFlows(flow, RelayFlow{}))
+		_, _, _ = Relay(context.Background(), src, sink, WithRelayFlows(&flow, nil))
 		close(done)
 	}()
 	waitUntil(t, func() bool { return len(sink.sizes()) > 0 })
@@ -461,7 +463,7 @@ func TestRelayIdleDatagramSourcesHoldNoBuffer(t *testing.T) {
 		var got atomic.Int64
 		for _, src := range srcs {
 			wg.Go(func() {
-				_, _ = copyDatagrams(context.Background(), writerFunc(func(b []byte) (int, error) {
+				_, _ = copyDatagramsOf(context.Background(), writerFunc(func(b []byte) (int, error) {
 					got.Add(1)
 					return len(b), nil
 				}), src, nil)
@@ -475,8 +477,8 @@ func TestRelayIdleDatagramSourcesHoldNoBuffer(t *testing.T) {
 			_ = peers[i].Close()
 		}
 		wg.Wait()
-		if per := int64(after.HeapAlloc-before.HeapAlloc) / n; per >= relayDatagramBufSize/4 {
-			t.Fatalf("%s: an idle relay holds %d bytes, want no %d byte buffer", kind, per, relayDatagramBufSize)
+		if per := int64(after.HeapAlloc-before.HeapAlloc) / n; per >= largeBufSize/4 {
+			t.Fatalf("%s: an idle relay holds %d bytes, want no %d byte buffer", kind, per, largeBufSize)
 		}
 	}
 }
@@ -524,7 +526,7 @@ func TestRelayFlowFirst(t *testing.T) {
 			if prefix != "" {
 				src = NewPrefixConn(b, []byte(prefix))
 			}
-			go func() { _, _, _ = Relay(context.Background(), src, c, WithRelayFlows(*f, RelayFlow{})) }()
+			go func() { _, _, _ = Relay(context.Background(), src, c, WithRelayFlows(f, nil)) }()
 			_, _ = a.Write([]byte("GET / HTTP/1.1\r\n"))
 			_ = d.SetReadDeadline(time.Now().Add(5 * time.Second))
 			want := prefix + "GET / HTTP/1.1\r\n"
@@ -556,7 +558,7 @@ func TestRelayFlowFirst(t *testing.T) {
 		f, seen := record()
 		src := &readSizesConn{data: []byte("hello")}
 		dst := &blockingSink{blockingRWC: blockingRWC{closed: make(chan struct{})}}
-		if n, _, err := Relay(context.Background(), src, dst, WithRelayFlows(*f, RelayFlow{})); err != nil || n != 5 {
+		if n, _, err := Relay(context.Background(), src, dst, WithRelayFlows(f, nil)); err != nil || n != 5 {
 			t.Fatalf("Relay(context.Background()) = %d, %v; want 5 bytes", n, err)
 		}
 		if s := seen(); len(s) != 1 || s[0] != "hello" || dst.out.String() != "hello" {
@@ -573,7 +575,7 @@ func TestRelayFlowFirst(t *testing.T) {
 		f, seen := record()
 		done := make(chan struct{})
 		go func() {
-			_, _, _ = Relay(context.Background(), src, sink, WithRelayFlows(*f, RelayFlow{}))
+			_, _, _ = Relay(context.Background(), src, sink, WithRelayFlows(f, nil))
 			close(done)
 		}()
 		waitUntil(t, func() bool { return len(sink.sizes()) == 2 })
@@ -589,7 +591,7 @@ func TestRelayFlowFirst(t *testing.T) {
 		f, seen := record()
 		done := make(chan struct{})
 		go func() {
-			_, _, _ = Relay(context.Background(), b, c, WithRelayFlows(*f, RelayFlow{}))
+			_, _, _ = Relay(context.Background(), b, c, WithRelayFlows(f, nil))
 			close(done)
 		}()
 		_ = a.Close()
@@ -610,7 +612,7 @@ func TestConnGroupTrack(t *testing.T) {
 	if err != nil || g.Len() != 1 {
 		t.Fatalf("Track() = %v, Len() = %d", err, g.Len())
 	}
-	if InnermostConn(tc) != a || (spliceOS && !canSplice(tc, b)) {
+	if InnermostConn(tc) != a || (netutil.SpliceOS && !spliceable(tc, b)) {
 		t.Fatal("the tracked connection hides the one beneath")
 	}
 	if err := tc.Close(); err != nil || g.Len() != 0 {

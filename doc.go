@@ -15,14 +15,16 @@
 //     and pacing and counting each direction through RelayFlow hooks; Copy
 //     copies one direction the same way. ConnGroup closes connections and
 //     relays together. DoWithContext bounds a blocking call on a connection
-//     with a context.
+//     with a context, and DoHandshake an exchange that closes the
+//     connection when it fails, as the handshakes of this module do.
 //   - Dialing: DialFirst returns the first of several dial attempts that
-//     connects, DialAny races the addresses of a service, and RaceDialer
-//     races several dialers as a ContextDialer.
+//     connects, and RaceDialer races several dialers as a ContextDialer, or
+//     the addresses of a service with DialAny.
 //   - Listeners: ChanListener accepts connections that the program delivers or
 //     dials in memory, NewSingleConnListener serves one connection,
 //     PacketListener splits a UDP socket into one connection per peer, and
-//     ListenEphemeralUDP opens a UDP socket on a free port.
+//     ListenEphemeralUDP opens a UDP socket on a free port. Accept retries
+//     temporary Accept errors with a backoff.
 //   - Error classification: IsTimeout, IsClosed, IsConnReset, IsConnRefused
 //     and the other Is* helpers, NetErrorKind and NetErrorDetails. They match
 //     platform errnos, including Winsock codes on Windows, before English

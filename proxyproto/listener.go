@@ -7,11 +7,12 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"reflect"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // DefaultHeaderTimeout bounds how long a Conn waits for its header when the
@@ -46,50 +47,20 @@ const (
 func TrustPrefixes(p ...netip.Prefix) func(peer net.Addr) Policy {
 	prefixes := make([]netip.Prefix, 0, len(p))
 	for _, pfx := range p {
-		if a := pfx.Addr(); a.Is4In6() && pfx.Bits() >= 96 {
-			pfx = netip.PrefixFrom(a.Unmap(), pfx.Bits()-96)
-		}
-		if pfx = pfx.Masked(); pfx.IsValid() {
-			prefixes = append(prefixes, pfx)
-		}
+		prefixes = append(prefixes, netutil.UnmappedPrefixes(pfx)...)
 	}
 	return func(peer net.Addr) Policy {
-		ip, ok := peerIP(peer)
-		if !ok {
+		ip := netutil.PeerAddrPort(peer).Addr()
+		if !ip.IsValid() {
 			return Ignore
 		}
-		mapped := netip.AddrFrom16(ip.As16())
 		for _, pfx := range prefixes {
-			if pfx.Contains(ip) || (ip.Is4() && pfx.Contains(mapped)) {
+			if pfx.Contains(ip) {
 				return Required
 			}
 		}
 		return Ignore
 	}
-}
-
-// peerIP returns the IP address of peer, unmapped and without a zone.
-func peerIP(peer net.Addr) (netip.Addr, bool) {
-	var ip netip.Addr
-	switch a := peer.(type) {
-	case nil:
-		return netip.Addr{}, false
-	case *net.TCPAddr:
-		ip = a.AddrPort().Addr()
-	case *net.UDPAddr:
-		ip = a.AddrPort().Addr()
-	default:
-		if isNilPointer(peer) {
-			return netip.Addr{}, false
-		}
-		s := peer.String()
-		if ap, err := netip.ParseAddrPort(s); err == nil {
-			ip = ap.Addr()
-		} else if ip, err = netip.ParseAddr(s); err != nil {
-			return netip.Addr{}, false
-		}
-	}
-	return ip.Unmap().WithZone(""), ip.IsValid()
 }
 
 // Config configures a Conn.
@@ -120,7 +91,7 @@ func NewConn(c net.Conn, cfg Config) *Conn {
 	if timeout <= 0 {
 		timeout = DefaultHeaderTimeout
 	}
-	if c != nil && isNilPointer(c) {
+	if c != nil && netutil.IsNilPointer(c) {
 		c = nil
 	}
 	pc := &Conn{conn: c, policy: cfg.Policy, timeout: timeout, datagram: cfg.Datagram}
@@ -143,7 +114,7 @@ func NewConn(c net.Conn, cfg Config) *Conn {
 func HeaderOf(c net.Conn) (*Header, error) {
 	// A bound on the depth stops a chain of wrappers that loops.
 	for range maxUnwrapDepth {
-		if c == nil || isNilPointer(c) {
+		if c == nil || netutil.IsNilPointer(c) {
 			return nil, nil
 		}
 		if pc, ok := c.(*Conn); ok {
@@ -160,13 +131,6 @@ func HeaderOf(c net.Conn) (*Header, error) {
 
 // maxUnwrapDepth bounds the NetConn chain that HeaderOf follows.
 const maxUnwrapDepth = 16
-
-// isNilPointer reports whether v is a nil pointer in a non-nil interface,
-// whose methods, such as *tls.Conn's NetConn, may not accept it.
-func isNilPointer(v any) bool {
-	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Pointer && rv.IsNil()
-}
 
 // Listener wraps a net.Listener whose peers, such as load balancers, send a
 // PROXY protocol header, and reports the addresses from the header as the
@@ -208,21 +172,6 @@ func (l *Listener) Accept() (net.Conn, error) {
 // headerReadSize is the initial buffer for a stream header; it grows to the
 // length of a larger version 2 header once that is known.
 const headerReadSize = 256
-
-// maxDatagram is the largest datagram a datagram Conn reads in full.
-const maxDatagram = 65535
-
-var datagramPool = sync.Pool{New: func() any {
-	b := make([]byte, maxDatagram)
-	return &b
-}}
-
-// streamPool holds the buffers that WriteTo copies a stream through when the
-// writer has no ReadFrom.
-var streamPool = sync.Pool{New: func() any {
-	b := make([]byte, 32<<10)
-	return &b
-}}
 
 // Conn is a connection whose peer sends a PROXY protocol header, from
 // NewConn or a Listener. It reads the header the first time it is read, its
@@ -523,8 +472,8 @@ func signaturePrefix(b []byte) bool {
 }
 
 func (c *Conn) readDatagramHeader() error {
-	bp := datagramPool.Get().(*[]byte)
-	defer datagramPool.Put(bp)
+	bp := dgram.Large.Get()
+	defer dgram.Large.Put(bp)
 	buf := *bp
 	n, err := c.conn.Read(buf)
 	if err != nil {
@@ -615,8 +564,8 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 		return 0, c.err
 	}
 	if c.datagram {
-		bp := datagramPool.Get().(*[]byte)
-		defer datagramPool.Put(bp)
+		bp := dgram.Large.Get()
+		defer dgram.Large.Put(bp)
 		buf := *bp
 		var total int64
 		for {
@@ -645,7 +594,7 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	if splices(w, c.conn) {
+	if netutil.Splices(w, c.conn) {
 		n, err := io.Copy(w, c.conn)
 		return total + n, err
 	}
@@ -657,42 +606,11 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 		return total + n, err
 	}
 	// Without ReadFrom, io.Copy would allocate a buffer for every call.
-	bp := streamPool.Get().(*[]byte)
-	defer streamPool.Put(bp)
+	// Through a stream buffer: the writer has no ReadFrom.
+	bp := dgram.Stream.Get()
+	defer dgram.Stream.Put(bp)
 	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.conn}, *bp)
 	return total + n, err
-}
-
-// spliceOS reports whether *net.TCPConn moves data with splice(2).
-const spliceOS = runtime.GOOS == "linux" || runtime.GOOS == "android"
-
-// splices reports whether io.Copy(dst, src) moves the data with splice: from
-// a TCP or Unix stream connection into a TCP connection, or from a TCP
-// connection into a Unix stream connection.
-func splices(dst io.Writer, src net.Conn) bool {
-	if !spliceOS {
-		return false
-	}
-	switch d := dst.(type) {
-	case *net.TCPConn:
-		switch s := src.(type) {
-		case *net.TCPConn:
-			return true
-		case *net.UnixConn:
-			return isStreamUnix(s)
-		}
-	case *net.UnixConn:
-		_, ok := src.(*net.TCPConn)
-		return ok && isStreamUnix(d)
-	}
-	return false
-}
-
-// isStreamUnix reports whether c is a "unix" stream socket, the only kind of
-// Unix connection that splice is used for.
-func isStreamUnix(c *net.UnixConn) bool {
-	addr := c.LocalAddr()
-	return addr != nil && addr.Network() == "unix"
 }
 
 // readerOnly hides every method but Read, so that io.CopyBuffer uses the

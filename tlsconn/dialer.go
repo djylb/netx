@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"net"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
-// ContextDialer dials connections. *net.Dialer implements it.
-type ContextDialer interface {
-	DialContext(ctx context.Context, network, address string) (net.Conn, error)
-}
+// ContextDialer dials connections with a DialContext(ctx, network, address)
+// (net.Conn, error) method. *net.Dialer implements it. It is the same type as
+// netx.ContextDialer.
+type ContextDialer = netutil.ContextDialer
 
 // Dialer dials connections with Forward and runs a TLS client handshake on
 // them. Unlike tls.Dialer, Forward can be any ContextDialer, such as a proxy
@@ -22,8 +24,10 @@ type Dialer struct {
 	// tls.Dialer does, or the whole address when it has no port.
 	Config *tls.Config
 	// HandshakeTimeout, if positive, also bounds the handshake, after the
-	// dial and within the context's deadline. Without it, and without a
-	// context deadline, the handshake is bounded by DefaultHandshakeTimeout.
+	// dial and within the context's deadline. If zero, a handshake whose
+	// context has no deadline is bounded by DefaultHandshakeTimeout, as with
+	// Client. If negative, the context alone bounds it, as for a dialer
+	// whose callers bound a whole dial through a proxy with the context.
 	HandshakeTimeout time.Duration
 	// Forward dials the underlying connection; nil means a zero net.Dialer.
 	Forward ContextDialer
@@ -58,13 +62,16 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, err
 	}
-	hsCtx := ctx
-	if d.HandshakeTimeout > 0 {
+	limit := DefaultHandshakeTimeout
+	switch {
+	case d.HandshakeTimeout > 0:
 		var cancel context.CancelFunc
-		hsCtx, cancel = context.WithTimeout(ctx, d.HandshakeTimeout)
+		ctx, cancel = context.WithTimeout(ctx, d.HandshakeTimeout)
 		defer cancel()
+	case d.HandshakeTimeout < 0:
+		limit = 0
 	}
-	tc, err := Client(hsCtx, raw, cfg)
+	tc, err := handshake(ctx, raw, cfg, tls.Client, limit)
 	if err != nil {
 		return nil, err
 	}

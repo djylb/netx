@@ -216,7 +216,7 @@ func TestRelaySpliceBlockedWaitHoldsNoPipe(t *testing.T) {
 			}
 			return 1000, nil
 		}}
-		wg.Go(func() { _, _, _ = Relay(context.Background(), b, c, WithRelayFlows(paced, RelayFlow{})) })
+		wg.Go(func() { _, _, _ = Relay(context.Background(), b, c, WithRelayFlows(&paced, nil)) })
 		_, _ = a.Write(make([]byte, 64<<10))
 	}
 	waitUntil(t, func() bool { return blocked.Load() == n })

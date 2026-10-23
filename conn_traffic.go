@@ -28,6 +28,14 @@ func ObserveConn(conn net.Conn, onRead, onWrite func(n int64) error) net.Conn {
 	return WrapConn(&observedReadWriteCloser{rwc: conn, onRead: onRead, onWrite: onWrite}, conn)
 }
 
+// inner returns the wrapped value, or noConn.
+func (c *observedReadWriteCloser) inner() io.ReadWriteCloser {
+	if c == nil || c.rwc == nil {
+		return noConn
+	}
+	return c.rwc
+}
+
 func (c *observedReadWriteCloser) Read(p []byte) (int, error) {
 	if c == nil || c.rwc == nil {
 		return 0, net.ErrClosed
@@ -55,26 +63,8 @@ func observe(fn func(int64) error, n int, err error) (int, error) {
 	return n, err
 }
 
-func (c *observedReadWriteCloser) Close() error {
-	if c == nil || c.rwc == nil {
-		return nil
-	}
-	return c.rwc.Close()
-}
-
-func (c *observedReadWriteCloser) CloseWrite() error {
-	if c == nil || c.rwc == nil {
-		return net.ErrClosed
-	}
-	return closeWrite(c.rwc)
-}
-
-func (c *observedReadWriteCloser) innerReader() io.Reader {
-	if c == nil {
-		return nil
-	}
-	return c.rwc
-}
+func (c *observedReadWriteCloser) Close() error      { return c.inner().Close() }
+func (c *observedReadWriteCloser) CloseWrite() error { return closeWrite(c.inner()) }
 
 // NetConn returns the connection that c wraps, if it is one.
 func (c *observedReadWriteCloser) NetConn() net.Conn {
@@ -83,4 +73,12 @@ func (c *observedReadWriteCloser) NetConn() net.Conn {
 	}
 	conn, _ := c.rwc.(net.Conn)
 	return conn
+}
+
+func (c *observedReadWriteCloser) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads}
+	if c != nil {
+		info.rwc = c.rwc
+	}
+	return info
 }

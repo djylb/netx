@@ -341,3 +341,98 @@ func TestChanListenerTryDeliver(t *testing.T) {
 		t.Fatal("TryDeliver() on a closed listener succeeded or closed the connection")
 	}
 }
+
+// tempErr is an Accept error that reports itself temporary.
+type tempErr struct{}
+
+func (tempErr) Error() string   { return "temporary" }
+func (tempErr) Timeout() bool   { return false }
+func (tempErr) Temporary() bool { return true }
+
+// failingListener fails its first Accepts with errs and then returns conn.
+type failingListener struct {
+	net.Listener
+	errs []error
+	conn net.Conn
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		return nil, err
+	}
+	return l.conn, nil
+}
+
+func TestAcceptRetries(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close(); _ = b.Close() }()
+	l := &failingListener{errs: []error{tempErr{}, &net.OpError{Op: "accept", Err: tempErr{}}, tempErr{}}, conn: a}
+	if c, err := Accept(context.Background(), l); c != a || err != nil {
+		t.Fatalf("Accept() = %v, %v, want the connection after the temporary errors", c, err)
+	}
+	l = &failingListener{errs: []error{tempErr{}, net.ErrClosed}, conn: a}
+	if _, err := Accept(context.Background(), l); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept() = %v, want the error of a closed listener", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	l = &failingListener{errs: []error{tempErr{}, tempErr{}}, conn: a}
+	if _, err := Accept(ctx, l); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Accept() = %v, want ctx's error while it waits to retry", err)
+	}
+	if IsAcceptRetryable(nil) || IsAcceptRetryable(net.ErrClosed) || IsAcceptRetryable(errors.New("x")) || !IsAcceptRetryable(tempErr{}) {
+		t.Fatal("IsAcceptRetryable misclassifies")
+	}
+}
+
+// The zero listeners are ready: they report "pipe", or no address, and
+// Close ends a blocked Accept instead of panicking.
+func TestZeroListeners(t *testing.T) {
+	for name, l := range map[string]net.Listener{
+		"ChanListener":       new(ChanListener),
+		"SingleConnListener": new(SingleConnListener),
+		"PacketListener":     new(PacketListener),
+	} {
+		accepted := make(chan error, 1)
+		go func() {
+			_, err := l.Accept()
+			accepted <- err
+		}()
+		if a := l.Addr(); name != "PacketListener" && (a == nil || a.String() != "pipe") {
+			t.Fatalf("%s: Addr() = %v, want pipe", name, a)
+		}
+		if err := l.Close(); err != nil {
+			t.Fatalf("%s: Close() = %v", name, err)
+		}
+		if err := <-accepted; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("%s: Accept() = %v, want net.ErrClosed", name, err)
+		}
+	}
+	var cl ChanListener
+	_ = cl.Close()
+	c, err := cl.Dial(context.Background(), nil)
+	if err == nil || c != nil {
+		t.Fatalf("Dial() on a closed zero ChanListener = %v, %v", c, err)
+	}
+	var open ChanListener
+	go func() {
+		if s, err := open.Accept(); err == nil {
+			_ = s.Close()
+		}
+	}()
+	if c, err := open.Dial(context.Background(), nil); err != nil {
+		t.Fatalf("Dial() on a zero ChanListener = %v", err)
+	} else {
+		_ = c.Close()
+	}
+	_ = open.Close()
+	var pl PacketListener
+	if _, err := pl.Dial(&net.UDPAddr{Port: 1}); err == nil {
+		t.Fatal("Dial() on the zero PacketListener succeeded")
+	}
+	if _, err := pl.WriteTo(nil, &net.UDPAddr{Port: 1}); err == nil {
+		t.Fatal("WriteTo() on the zero PacketListener succeeded")
+	}
+}

@@ -72,7 +72,7 @@ func ExampleWithRelayFlows_limit() {
 	client, front := net.Pipe()
 	back, backend := net.Pipe()
 	go func() { _, _ = io.Copy(io.Discard, backend) }()
-	go func() { _, _, _ = netx.Relay(context.Background(), front, back, netx.WithRelayFlows(flow, flow)) }()
+	go func() { _, _, _ = netx.Relay(context.Background(), front, back, netx.WithRelayFlows(&flow, &flow)) }()
 
 	start := time.Now()
 	_, _ = client.Write(make([]byte, 48<<10)) // 16 KiB at once, then 32 KiB at 64 KiB/s

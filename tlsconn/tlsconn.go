@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"os"
 	"time"
 )
 
@@ -34,10 +35,12 @@ const DefaultHandshakeTimeout = 10 * time.Second
 // The handshake stops when ctx is done; a ctx without a deadline gets one
 // DefaultHandshakeTimeout ahead. The deadline is applied both on raw and
 // through the context, so it also holds when raw ignores deadlines or fails to
-// set them. On failure raw is closed and the returned connection is nil.
-// netx.InnermostConn unwraps the result through its NetConn method.
+// set them. A handshake that ctx ends, or whose deadline passes, returns
+// ctx's error, such as context.DeadlineExceeded. On failure raw is closed
+// and the returned connection is nil. The result's NetConn method returns
+// raw, which unwrappers such as netx.InnermostConn follow.
 func Client(ctx context.Context, raw net.Conn, cfg *tls.Config) (*tls.Conn, error) {
-	return handshake(ctx, raw, cfg, tls.Client)
+	return handshake(ctx, raw, cfg, tls.Client, DefaultHandshakeTimeout)
 }
 
 // Server is Client for the server side of the handshake, whose cfg must not
@@ -47,31 +50,45 @@ func Server(ctx context.Context, raw net.Conn, cfg *tls.Config) (*tls.Conn, erro
 		_ = raw.Close()
 		return nil, errNoServerConfig
 	}
-	return handshake(ctx, raw, cfg, tls.Server)
+	return handshake(ctx, raw, cfg, tls.Server, DefaultHandshakeTimeout)
 }
 
 var errNoServerConfig = errors.New("tlsconn: Server needs a TLS config")
 
-func handshake(ctx context.Context, raw net.Conn, cfg *tls.Config, newConn func(net.Conn, *tls.Config) *tls.Conn) (*tls.Conn, error) {
+// handshake runs the handshake of newConn(raw, cfg) under ctx, which gets a
+// deadline limit ahead when it has none and limit is positive.
+func handshake(ctx context.Context, raw net.Conn, cfg *tls.Config, newConn func(net.Conn, *tls.Config) *tls.Conn, limit time.Duration) (*tls.Conn, error) {
 	if raw == nil {
 		return nil, net.ErrClosed
 	}
 	deadline, ok := ctx.Deadline()
-	if !ok {
+	if !ok && limit > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultHandshakeTimeout)
+		ctx, cancel = context.WithTimeout(ctx, limit)
 		defer cancel()
-		deadline, _ = ctx.Deadline()
+		deadline, ok = ctx.Deadline()
 	}
-	// A connection without deadline support, which may say so with an error
-	// such as errors.ErrUnsupported, is bounded by the context instead.
-	_ = raw.SetDeadline(deadline)
+	if ok {
+		// A connection without deadline support, which may say so with an
+		// error such as errors.ErrUnsupported, is bounded by the context
+		// instead.
+		_ = raw.SetDeadline(deadline)
+	}
 	tc := newConn(raw, cfg)
 	if err := tc.HandshakeContext(ctx); err != nil {
 		// Before a completed handshake this only closes raw.
 		_ = tc.Close()
+		// raw's deadline can fire just before ctx reports that it ended.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if ok && errors.Is(err, os.ErrDeadlineExceeded) && !time.Now().Before(deadline) {
+			return nil, context.DeadlineExceeded
+		}
 		return nil, err
 	}
-	_ = raw.SetDeadline(time.Time{})
+	if ok {
+		_ = raw.SetDeadline(time.Time{})
+	}
 	return tc, nil
 }

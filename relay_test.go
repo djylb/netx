@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/netx/proxyproto"
 )
 
@@ -225,8 +227,8 @@ func TestRelayCopyPoolsBufferWithOneTCPEnd(t *testing.T) {
 	}()
 	payload := make([]byte, 1024)
 	copyOnce := func() {
-		if n, err := relayCopy(client, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
-			t.Fatalf("relayCopy() = %d, %v", n, err)
+		if n, err := copyPlain(client, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
+			t.Fatalf("copyPlain() = %d, %v", n, err)
 		}
 	}
 	copyOnce() // warm up the pool
@@ -239,7 +241,7 @@ func TestRelayCopyPoolsBufferWithOneTCPEnd(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	// The race detector drops a quarter of the pool's Puts, so allow some.
 	if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
-		t.Fatalf("relayCopy() allocates %d bytes per copy, want the pooled buffer reused", perCopy)
+		t.Fatalf("copyPlain() allocates %d bytes per copy, want the pooled buffer reused", perCopy)
 	}
 }
 
@@ -256,19 +258,19 @@ func TestRelayCanSplice(t *testing.T) {
 		src  io.Reader
 		want bool
 	}{
-		{"tcp to tcp", tcpA, tcpB, spliceOS},
-		{"prefixed tcp to tcp", tcpA, NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), spliceOS},
+		{"tcp to tcp", tcpA, tcpB, netutil.SpliceOS},
+		{"prefixed tcp to tcp", tcpA, NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), netutil.SpliceOS},
 		{"pipe to tcp", tcpA, pipeA, false},
 		{"tcp to pipe", pipeA, tcpB, false},
-		{"tcp to timeout tcp", NewTimeoutConn(tcpA, time.Second), tcpB, spliceOS},
-		{"timeout tcp to tcp", tcpA, NewPrefixConn(NewTimeoutConn(tcpB, time.Second), nil), spliceOS},
+		{"tcp to timeout tcp", NewTimeoutConn(tcpA, time.Second), tcpB, netutil.SpliceOS},
+		{"timeout tcp to tcp", tcpA, NewPrefixConn(NewTimeoutConn(tcpB, time.Second), nil), netutil.SpliceOS},
 		{"tcp to observed tcp", ObserveConn(tcpA, nil, func(int64) error { return nil }), tcpB, false},
 		{"prefixed pipe to tcp", tcpA, NewPrefixConn(pipeA, nil), false},
 		{"nil prefix conn to tcp", tcpA, (*PrefixConn)(nil), false},
 	}
 	for _, tt := range tests {
-		if got := canSplice(tt.dst, tt.src); got != tt.want {
-			t.Errorf("%s: canSplice() = %t, want %t", tt.name, got, tt.want)
+		if got := spliceable(tt.dst, tt.src); got != tt.want {
+			t.Errorf("%s: spliceable() = %t, want %t", tt.name, got, tt.want)
 		}
 	}
 }
@@ -397,11 +399,11 @@ func TestRelayCopyUsesCustomWriterToAndReaderFrom(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 100<<10)
 	for _, dst := range []io.Writer{tcpA, &bytes.Buffer{}} {
 		src := &customWriterTo{Reader: bytes.NewReader(payload)}
-		if n, err := relayCopy(dst, src); n != int64(len(payload)) || err != nil {
-			t.Fatalf("relayCopy(%T) = %d, %v", dst, n, err)
+		if n, err := copyPlain(dst, src); n != int64(len(payload)) || err != nil {
+			t.Fatalf("copyPlain(%T) = %d, %v", dst, n, err)
 		}
 		if src.calls != 1 {
-			t.Fatalf("relayCopy(%T) called WriteTo %d times, want 1", dst, src.calls)
+			t.Fatalf("copyPlain(%T) called WriteTo %d times, want 1", dst, src.calls)
 		}
 	}
 
@@ -409,16 +411,16 @@ func TestRelayCopyUsesCustomWriterToAndReaderFrom(t *testing.T) {
 	inner := &customWriterTo{Reader: bytes.NewReader(payload)}
 	pc := NewPrefixConn(writerToConn{customWriterTo: inner}, []byte("head"))
 	var out bytes.Buffer
-	if n, err := relayCopy(&out, pc); n != int64(len(payload)+4) || err != nil || out.Len() != len(payload)+4 {
-		t.Fatalf("relayCopy(prefix) = %d, %v, wrote %d", n, err, out.Len())
+	if n, err := copyPlain(&out, pc); n != int64(len(payload)+4) || err != nil || out.Len() != len(payload)+4 {
+		t.Fatalf("copyPlain(prefix) = %d, %v, wrote %d", n, err, out.Len())
 	}
 	if inner.calls != 1 {
-		t.Fatalf("relayCopy(prefix) called WriteTo %d times, want 1", inner.calls)
+		t.Fatalf("copyPlain(prefix) called WriteTo %d times, want 1", inner.calls)
 	}
 
 	rf := &customReaderFrom{}
-	if n, err := relayCopy(rf, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
-		t.Fatalf("relayCopy(ReaderFrom) = %d, %v", n, err)
+	if n, err := copyPlain(rf, plainReader{bytes.NewReader(payload)}); n != int64(len(payload)) || err != nil {
+		t.Fatalf("copyPlain(ReaderFrom) = %d, %v", n, err)
 	}
 	if rf.calls != 1 || rf.Len() != len(payload) {
 		t.Fatalf("ReadFrom calls = %d, buffered %d", rf.calls, rf.Len())
@@ -490,8 +492,8 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 			srcs[i] = NewPrefixConn(tt.source(), []byte("p"))
 		}
 		copyFrom := func(src io.Reader) {
-			if n, err := relayCopy(tt.dst, src); n != int64(len(payload)+1) || err != nil {
-				t.Fatalf("%s: relayCopy() = %d, %v", tt.name, n, err)
+			if n, err := copyPlain(tt.dst, src); n != int64(len(payload)+1) || err != nil {
+				t.Fatalf("%s: copyPlain() = %d, %v", tt.name, n, err)
 			}
 		}
 		copyFrom(srcs[runs]) // warm up the pool
@@ -506,7 +508,7 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 		debug.SetGCPercent(gc)
 		// The race detector drops a quarter of the pool's Puts, so allow some.
 		if perCopy := (after.TotalAlloc - before.TotalAlloc) / runs; perCopy >= relayBufSize/2 {
-			t.Fatalf("%s: relayCopy() allocates %d bytes per copy, want the pooled buffer reused", tt.name, perCopy)
+			t.Fatalf("%s: copyPlain() allocates %d bytes per copy, want the pooled buffer reused", tt.name, perCopy)
 		}
 	}
 }
@@ -637,12 +639,12 @@ func TestRelayLooksThroughWritingPrefixConn(t *testing.T) {
 	client, server := tcpPair(t)
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
-	dst := unwrapPrefixWriter(NewPrefixConn(NewPrefixConn(server, []byte("x")), nil))
+	dst := sinkWriter(NewPrefixConn(NewPrefixConn(server, []byte("x")), nil))
 	if dst != server {
-		t.Fatalf("unwrapPrefixWriter() = %T, want the TCP connection", dst)
+		t.Fatalf("relay sink writer = %T, want the TCP connection", dst)
 	}
-	if spliceOS && !canSplice(dst, client) {
-		t.Fatal("canSplice() = false beneath a writing PrefixConn")
+	if netutil.SpliceOS && !spliceable(dst, client) {
+		t.Fatal("spliceable() = false beneath a writing PrefixConn")
 	}
 }
 
@@ -691,10 +693,52 @@ func (udpFlowConn) LocalAddr() net.Addr { return &net.UDPAddr{IP: net.IPv4(10, 0
 // Relay copies such a connection as datagrams, whole above its stream buffer.
 func TestRelayDatagramsByNetwork(t *testing.T) {
 	src := udpFlowConn{&datagramConn{msgs: [][]byte{make([]byte, 40000), {}, make([]byte, 7)}}}
-	if !datagramReader(src) {
+	if !readsDatagrams(src) {
 		t.Fatal("a connection on a UDP address is not read as datagrams")
 	}
-	if datagramReader(plainReader{}) {
+	if readsDatagrams(plainReader{}) {
 		t.Fatal("a reader without an address is read as datagrams")
+	}
+}
+
+// queueConn stands for a connection of another package of this module whose
+// datagrams are in a dgram.Queue, such as a transparent.FlowConn.
+type queueConn struct {
+	q dgram.Queue
+	source
+}
+
+type source = dgram.Source
+
+func newQueueConn() *queueConn {
+	c := &queueConn{}
+	c.q.Init(4)
+	c.source = dgram.NewSource(c, &c.q)
+	return c
+}
+
+func (c *queueConn) Read(b []byte) (int, error) { return c.q.Read(b) }
+
+// Relay takes the queued datagrams of such a connection whole, but not
+// through a type of another package that embeds it, which may read
+// otherwise.
+func TestRelayQueueSource(t *testing.T) {
+	c := newQueueConn()
+	if s := newRelaySource(c); s.datagrams == nil || !s.readsDatagrams() {
+		t.Fatal("the queue of a connection of this module is not handed over")
+	}
+	embedding := struct{ *queueConn }{c}
+	if s := newRelaySource(embedding); s.datagrams != nil {
+		t.Fatal("the queue of an embedded connection is handed over")
+	}
+	var nilConn *queueConn
+	if s := newRelaySource(nilConn); s.datagrams != nil {
+		t.Fatal("a nil connection's queue is handed over")
+	}
+	c.q.Enqueue([]byte("one"))
+	c.q.Close(io.EOF)
+	var buf bytes.Buffer
+	if n, err := Copy(context.Background(), &buf, c, nil); n != 0 || err != nil {
+		t.Fatalf("Copy() of a closed queue = %d, %v", n, err)
 	}
 }

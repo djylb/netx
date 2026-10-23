@@ -14,91 +14,47 @@ type AddrOverrideConn struct {
 	rAddr net.Addr
 }
 
-// NewAddrOverrideConn wraps base and overrides its local or remote address,
-// in the order of LocalAddr and RemoteAddr; a nil address keeps base's own.
-func NewAddrOverrideConn(base net.Conn, local, remote net.Addr) *AddrOverrideConn {
+// NewAddrOverrideConn wraps c and overrides its local or remote address, in
+// the order of LocalAddr and RemoteAddr; a nil address keeps c's own.
+func NewAddrOverrideConn(c net.Conn, local, remote net.Addr) *AddrOverrideConn {
 	return &AddrOverrideConn{
-		conn:  base,
+		conn:  c,
 		lAddr: local,
 		rAddr: remote,
 	}
 }
 
-func (c *AddrOverrideConn) Read(b []byte) (int, error) {
-	if c == nil || c.conn == nil {
-		return 0, net.ErrClosed
+// inner returns the wrapped connection, or noConn.
+func (c *AddrOverrideConn) inner() net.Conn {
+	if c == nil {
+		return noConn
 	}
-	return c.conn.Read(b)
+	return orClosed(c.conn)
 }
 
-func (c *AddrOverrideConn) Write(b []byte) (int, error) {
-	if c == nil || c.conn == nil {
-		return 0, net.ErrClosed
-	}
-	return c.conn.Write(b)
-}
-
-func (c *AddrOverrideConn) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.Close()
-}
+func (c *AddrOverrideConn) Read(b []byte) (int, error)         { return c.inner().Read(b) }
+func (c *AddrOverrideConn) Write(b []byte) (int, error)        { return c.inner().Write(b) }
+func (c *AddrOverrideConn) Close() error                       { return c.inner().Close() }
+func (c *AddrOverrideConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
+func (c *AddrOverrideConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
 // CloseWrite shuts down the writing side of the wrapped connection; see
 // TimeoutConn.CloseWrite.
-func (c *AddrOverrideConn) CloseWrite() error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return closeWrite(c.conn)
-}
+func (c *AddrOverrideConn) CloseWrite() error { return closeWrite(c.inner()) }
 
 func (c *AddrOverrideConn) LocalAddr() net.Addr {
-	if c == nil {
-		return nil
-	}
-	if c.lAddr != nil {
+	if c != nil && c.lAddr != nil {
 		return c.lAddr
 	}
-	if c.conn == nil {
-		return nil
-	}
-	return c.conn.LocalAddr()
+	return c.inner().LocalAddr()
 }
 
 func (c *AddrOverrideConn) RemoteAddr() net.Addr {
-	if c == nil {
-		return nil
-	}
-	if c.rAddr != nil {
+	if c != nil && c.rAddr != nil {
 		return c.rAddr
 	}
-	if c.conn == nil {
-		return nil
-	}
-	return c.conn.RemoteAddr()
-}
-
-func (c *AddrOverrideConn) SetDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetDeadline(t)
-}
-
-func (c *AddrOverrideConn) SetReadDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetReadDeadline(t)
-}
-
-func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.conn == nil {
-		return net.ErrClosed
-	}
-	return c.conn.SetWriteDeadline(t)
+	return c.inner().RemoteAddr()
 }
 
 // WriteTo copies the wrapped connection to w, through its own WriteTo when it
@@ -110,13 +66,6 @@ func (c *AddrOverrideConn) WriteTo(w io.Writer) (int64, error) {
 	return io.Copy(w, c.conn)
 }
 
-func (c *AddrOverrideConn) innerReader() io.Reader {
-	if c == nil {
-		return nil
-	}
-	return c.conn
-}
-
 // NetConn returns the connection that c wraps, as *tls.Conn's NetConn does;
 // see InnermostConn and ConnAs.
 func (c *AddrOverrideConn) NetConn() net.Conn {
@@ -124,4 +73,12 @@ func (c *AddrOverrideConn) NetConn() net.Conn {
 		return nil
 	}
 	return c.conn
+}
+
+func (c *AddrOverrideConn) netxLayer() layerInfo {
+	info := layerInfo{self: c, kind: layerWraps | layerReads | layerPasses}
+	if c != nil {
+		info.conn = c.conn
+	}
+	return info
 }

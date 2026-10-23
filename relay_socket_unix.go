@@ -7,7 +7,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // streamSocket is a source read straight from a TCP or Unix stream socket,
@@ -15,32 +18,29 @@ import (
 // without a buffer. Other sources may hold data the socket does not show, as
 // a TLS connection does.
 type streamSocket struct {
-	src  io.Reader // what Relay reads, around conn
+	src  *relaySource // what Relay reads, around conn
 	conn net.Conn
-	// timeouts are the TimeoutConns around conn, refreshed before each
-	// wait or read of the socket.
-	timeouts relayTimeouts
-	raw      syscall.RawConn
-	err      error
-	peek     func(fd uintptr) bool
-	read     func(fd uintptr) bool
-	buf      []byte
-	n        int
+	raw  syscall.RawConn
+	err  error
+	peek func(fd uintptr) bool
+	read func(fd uintptr) bool
+	buf  []byte
+	n    int
 	// The state of a call, which the callbacks below share, so that they are
 	// made once.
 	peekBuf [1]byte
 	blocked bool
 }
 
-// socketSource returns the stream socket that src reads, or nil.
-func socketSource(src io.Reader) relaySocket {
+// socketSource returns the stream socket that s reads, or nil.
+func socketSource(s *relaySource) relaySocket {
 	var sc syscall.Conn
-	conn, ok := unwrapPrefix(src).(net.Conn)
+	conn, ok := s.base.(net.Conn)
 	switch c := conn.(type) {
 	case *net.TCPConn:
 		sc = c
 	case *net.UnixConn:
-		if !isStreamUnix(c) {
+		if !netutil.IsStreamUnix(c) {
 			return nil
 		}
 		sc = c
@@ -52,32 +52,32 @@ func socketSource(src io.Reader) relaySocket {
 	if err != nil {
 		return nil
 	}
-	s := &streamSocket{src: src, conn: conn, raw: raw, timeouts: timeoutsOf(src)}
-	s.peek = func(fd uintptr) bool {
+	st := &streamSocket{src: s, conn: conn, raw: raw}
+	st.peek = func(fd uintptr) bool {
 		for {
-			n, _, err := syscall.Recvfrom(int(fd), s.peekBuf[:], syscall.MSG_PEEK)
+			n, _, err := syscall.Recvfrom(int(fd), st.peekBuf[:], syscall.MSG_PEEK)
 			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
 				return false
 			}
-			s.n, s.err = n, err
+			st.n, st.err = n, err
 			return true
 		}
 	}
-	s.read = func(fd uintptr) bool {
+	st.read = func(fd uintptr) bool {
 		for {
-			n, err := syscall.Read(int(fd), s.buf)
+			n, err := syscall.Read(int(fd), st.buf)
 			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
-			s.blocked = errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
-			s.n, s.err = n, err
+			st.blocked = errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
+			st.n, st.err = n, err
 			return true
 		}
 	}
-	return s
+	return st
 }
 
 // wait waits until the socket has data, an end or an error to read, and
@@ -86,18 +86,18 @@ func socketSource(src io.Reader) relaySocket {
 // report a clean end instead, and the error of the wait itself, as for a
 // closed connection or a passed deadline, as a read would.
 func (s *streamSocket) wait() (bool, error) {
-	if prefixPending(s.src) {
+	if s.src.prefixPending() {
 		return false, nil
 	}
-	if err := s.timeouts.refresh(); err != nil {
+	if err := s.src.timeouts.refresh(); err != nil {
 		return false, err
 	}
 	s.n, s.err = 0, nil
 	if err := s.raw.Read(s.peek); err != nil {
-		return false, asReadError(err)
+		return false, rawOpError(err, "read")
 	}
 	if s.err != nil {
-		return false, s.opError("recvfrom", s.err)
+		return false, sockOpError(s.conn, "read", "recvfrom", s.err)
 	}
 	return s.n == 0, nil
 }
@@ -106,11 +106,11 @@ func (s *streamSocket) wait() (bool, error) {
 // blocked when there is nothing yet. Bytes a PrefixConn holds are read
 // through it.
 func (s *streamSocket) readNow(b []byte) (int, bool, error) {
-	if prefixPending(s.src) {
-		n, err := s.src.Read(b)
+	if s.src.prefixPending() {
+		n, err := s.src.r.Read(b)
 		return n, false, err
 	}
-	if err := s.timeouts.refresh(); err != nil {
+	if err := s.src.timeouts.refresh(); err != nil {
 		return 0, false, err
 	}
 	s.buf, s.n, s.err, s.blocked = b, 0, nil, false
@@ -121,28 +121,32 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 		// wait reports a failure as a read would.
 		return 0, true, nil
 	case s.err != nil:
-		return 0, false, s.opError("read", s.err)
+		return 0, false, sockOpError(s.conn, "read", "read", s.err)
 	case s.n == 0 && len(b) > 0:
 		return 0, false, io.EOF
 	}
 	return s.n, false, nil
 }
 
-func (s *streamSocket) opError(syscallName string, err error) error {
-	return &net.OpError{Op: "read", Net: s.conn.LocalAddr().Network(), Source: s.conn.LocalAddr(),
-		Addr: s.conn.RemoteAddr(), Err: os.NewSyscallError(syscallName, err)}
+// sockOpError reports the error of a system call on c as c's own I/O errors
+// are reported.
+func sockOpError(c net.Conn, op, syscallName string, err error) error {
+	return &net.OpError{Op: op, Net: c.LocalAddr().Network(), Source: c.LocalAddr(),
+		Addr: c.RemoteAddr(), Err: os.NewSyscallError(syscallName, err)}
 }
 
-// asReadError reports an error of RawConn.Read, whose operation is
-// "raw-read", as one of Read.
-func asReadError(err error) error {
+// rawOpError reports an error of syscall.RawConn's Read or Write, whose
+// operation is "raw-read" or "raw-write", as one of Read or Write, op.
+func rawOpError(err error, op string) error {
 	if err == nil {
 		return nil
 	}
-	var oe *net.OpError
-	if errors.As(err, &oe) && oe.Op == "raw-read" {
+	if oe, ok := errors.AsType[*net.OpError](err); ok {
+		if rawOp, raw := strings.CutPrefix(oe.Op, "raw-"); !raw || rawOp != op {
+			return err
+		}
 		e := *oe
-		e.Op = "read"
+		e.Op = op
 		return &e
 	}
 	return err

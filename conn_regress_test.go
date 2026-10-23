@@ -8,8 +8,11 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/dgram"
 )
 
 // WrapConn without a parent takes addresses and deadlines from rwc itself
@@ -79,11 +82,11 @@ func TestAddrOverrideConnPassesDataThrough(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = b.Close() }()
 	c := NewAddrOverrideConn(a, nil, &net.TCPAddr{Port: 1})
-	if got := unwrapPrefix(c); got != a {
-		t.Fatalf("unwrapPrefix() = %v, want the wrapped conn", got)
+	if got := newRelaySource(c).base; got != a {
+		t.Fatalf("relay source base = %v, want the wrapped conn", got)
 	}
-	if got := unwrapPrefixWriter(NewPrefixConn(c, nil)); got != a {
-		t.Fatalf("unwrapPrefixWriter() = %v, want the wrapped conn", got)
+	if got := sinkWriter(NewPrefixConn(c, nil)); got != a {
+		t.Fatalf("relay sink writer = %v, want the wrapped conn", got)
 	}
 	go func() { _, _ = b.Write([]byte("hello")); _ = b.Close() }()
 	var out bytes.Buffer
@@ -115,19 +118,21 @@ func TestInnermostConnNilPointer(t *testing.T) {
 func TestPacketListenerCloseHoldingFilterLock(t *testing.T) {
 	var mu sync.Mutex
 	closed := make(chan struct{})
-	testHookBeforeFilter = func(l *PacketListener) {
-		testHookBeforeFilter = nil
+	var hooked atomic.Bool
+	beforeFilter := func(l *PacketListener) {
+		if hooked.Swap(true) {
+			return
+		}
 		go func() {
 			mu.Lock()
 			_ = l.Close()
 			mu.Unlock()
 			close(closed)
 		}()
-		for !isClosedChan(l.done) {
+		for !dgram.IsClosed(l.conns.Done()) {
 			runtime.Gosched()
 		}
 	}
-	defer func() { testHookBeforeFilter = nil }()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +143,7 @@ func TestPacketListenerCloseHoldingFilterLock(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return true
-	}))
+	}), func(o *packetListenerOptions) { o.beforeFilter = beforeFilter })
 	c, err := net.DialUDP("udp", nil, pc.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
@@ -154,26 +159,6 @@ func TestPacketListenerCloseHoldingFilterLock(t *testing.T) {
 	}
 	if len(filtered) != 0 {
 		t.Fatal("the accept filter ran after Close")
-	}
-}
-
-// A datagram that races with the connection's Close must not stay queued,
-// holding its pooled buffer, on the closed connection.
-func TestPacketConnEnqueueAfterShutdownReleasesBuffer(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	l := NewPacketListener(pc)
-	defer func() { _ = l.Close() }()
-	for i := range 200 {
-		c := &packetConn{l: l, peer: &net.UDPAddr{Port: 1}, queue: make(chan *[]byte, 4),
-			closed: make(chan struct{}), readDeadline: makeDeadline(), writeDeadline: makeDeadline()}
-		c.shutdown(net.ErrClosed)
-		c.enqueue([]byte("y"))
-		if n := len(c.queue); n != 0 {
-			t.Fatalf("attempt %d: %d datagrams queued on a closed connection", i, n)
-		}
 	}
 }
 
@@ -268,8 +253,8 @@ func TestInnermostConnStopsOnCyclesThroughWrappers(t *testing.T) {
 	if err := WrapConn(c, parent, WithWrapParentClose()).Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if datagramReader(NewPrefixConn(c.outer, nil)) {
-		t.Fatal("datagramReader(cycle) = true, want false")
+	if readsDatagrams(NewPrefixConn(c.outer, nil)) {
+		t.Fatal("readsDatagrams(cycle) = true, want false")
 	}
 }
 

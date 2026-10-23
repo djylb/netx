@@ -1,7 +1,6 @@
 package netx
 
 import (
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -24,15 +23,15 @@ type RecordingConn struct {
 	maxBufBytes int
 }
 
-// NewRecordingConn wraps conn and records up to maxBufBytes read bytes,
-// DefaultRecordingLimit if maxBufBytes is not positive.
-func NewRecordingConn(conn net.Conn, maxBufBytes int) *RecordingConn {
+// NewRecordingConn wraps c and records up to limit read bytes,
+// DefaultRecordingLimit if limit is not positive.
+func NewRecordingConn(c net.Conn, limit int) *RecordingConn {
 	size := DefaultRecordingLimit
-	if maxBufBytes > 0 {
-		size = maxBufBytes
+	if limit > 0 {
+		size = limit
 	}
 	return &RecordingConn{
-		underlying:  conn,
+		underlying:  c,
 		maxBufBytes: size,
 	}
 }
@@ -51,72 +50,38 @@ func (c *RecordingConn) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func (c *RecordingConn) Write(p []byte) (n int, err error) {
-	conn := c.conn()
-	if conn == nil {
-		return 0, net.ErrClosed
-	}
-	return conn.Write(p)
-}
+// inner returns the connection that c records, or noConn after Close or
+// Release.
+func (c *RecordingConn) inner() net.Conn { return orClosed(c.conn()) }
 
-func (c *RecordingConn) LocalAddr() net.Addr {
-	conn := c.conn()
-	if conn == nil {
-		return nil
-	}
-	return conn.LocalAddr()
-}
+func (c *RecordingConn) Write(p []byte) (int, error)        { return c.inner().Write(p) }
+func (c *RecordingConn) LocalAddr() net.Addr                { return c.inner().LocalAddr() }
+func (c *RecordingConn) RemoteAddr() net.Addr               { return c.inner().RemoteAddr() }
+func (c *RecordingConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
+func (c *RecordingConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *RecordingConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
-func (c *RecordingConn) RemoteAddr() net.Addr {
-	conn := c.conn()
-	if conn == nil {
-		return nil
-	}
-	return conn.RemoteAddr()
-}
-
-func (c *RecordingConn) SetDeadline(deadline time.Time) error {
-	conn := c.conn()
-	if conn == nil {
-		return net.ErrClosed
-	}
-	return conn.SetDeadline(deadline)
-}
-
-func (c *RecordingConn) SetReadDeadline(deadline time.Time) error {
-	conn := c.conn()
-	if conn == nil {
-		return net.ErrClosed
-	}
-	return conn.SetReadDeadline(deadline)
-}
-
-func (c *RecordingConn) SetWriteDeadline(deadline time.Time) error {
-	conn := c.conn()
-	if conn == nil {
-		return net.ErrClosed
-	}
-	return conn.SetWriteDeadline(deadline)
-}
-
-func (c *RecordingConn) innerReader() io.Reader {
-	if conn := c.conn(); conn != nil {
-		return conn
-	}
-	return nil
-}
+// CloseWrite shuts down the writing side of the underlying connection; see
+// TimeoutConn.CloseWrite.
+func (c *RecordingConn) CloseWrite() error { return closeWrite(c.inner()) }
 
 // NetConn returns the connection that c wraps, or nil after Close or
 // Release, as *tls.Conn's NetConn does; see InnermostConn and ConnAs.
-func (c *RecordingConn) NetConn() net.Conn {
-	if c == nil {
-		return nil
-	}
-	return c.conn()
+func (c *RecordingConn) NetConn() net.Conn { return c.conn() }
+
+func (c *RecordingConn) netxLayer() layerInfo {
+	return layerInfo{self: c, conn: c.conn(), kind: layerWraps | layerReads}
 }
 
-// Stop stops recording reads, and with discard frees what was recorded.
-func (c *RecordingConn) Stop(discard bool) {
+// Stop stops recording reads and keeps what was recorded, for Buffered and
+// Release.
+func (c *RecordingConn) Stop() { c.stop(false) }
+
+// Discard stops recording reads and frees what was recorded, such as once a
+// sniffed protocol turned out not to need replaying.
+func (c *RecordingConn) Discard() { c.stop(true) }
+
+func (c *RecordingConn) stop(discard bool) {
 	if c == nil {
 		return
 	}
@@ -142,16 +107,6 @@ func (c *RecordingConn) Close() error {
 		return nil
 	}
 	return conn.Close()
-}
-
-// CloseWrite shuts down the writing side of the underlying connection; see
-// TimeoutConn.CloseWrite.
-func (c *RecordingConn) CloseWrite() error {
-	conn := c.conn()
-	if conn == nil {
-		return net.ErrClosed
-	}
-	return closeWrite(conn)
 }
 
 // Buffered returns a copy of the bytes recorded so far.

@@ -106,6 +106,22 @@ func ExamplePinSet() {
 	defer func() { _ = conn.Close() }()
 }
 
+// Serve one certificate from files, picking up a renewal, such as by
+// certbot, once the files change.
+func ExampleCertFiles_reload() {
+	var certs tlsconn.CertFiles
+	cfg := &tls.Config{
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return certs.LoadFiles("/etc/certs/fullchain.pem", "/etc/certs/privkey.pem")
+		},
+	}
+	ln, err := tls.Listen("tcp", ":443", cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+}
+
 // Serve per-host certificates from files, picking up renewals as the files
 // change.
 func ExampleCertFiles() {
