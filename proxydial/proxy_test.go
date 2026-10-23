@@ -755,17 +755,18 @@ func TestHTTPDialerHandshake(t *testing.T) {
 			}
 			echoAfter(c, tt.reply)
 		})
-		c, err := net.Dial("tcp", addr)
+		raw, err := net.Dial("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
+		c := &closeCounter{Conn: raw}
 		conn, err := (&HTTPDialer{}).Handshake(context.Background(), c, "example.com:443")
 		if tt.wantErr {
 			if err == nil {
 				t.Fatalf("%s: Handshake() succeeded", tt.name)
 			}
-			if err := c.Close(); !errors.Is(err, net.ErrClosed) {
-				t.Fatalf("%s: Close() after a failed Handshake() = %v, want it closed already", tt.name, err)
+			if n := c.closes.Load(); n != 1 {
+				t.Fatalf("%s: a failed Handshake() closed the connection %d times, want once", tt.name, n)
 			}
 			continue
 		}
@@ -797,17 +798,18 @@ func TestHTTPDialerHandshake(t *testing.T) {
 // connection.
 func TestHTTPDialerHandshakeCanceled(t *testing.T) {
 	addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
-	c, err := net.Dial("tcp", addr)
+	raw, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c := &closeCounter{Conn: raw}
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
 	if _, err := (&HTTPDialer{}).Handshake(ctx, c, "example.com:443"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Handshake() error = %v, want context.Canceled", err)
 	}
-	if err := c.Close(); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("Close() after a canceled Handshake() = %v, want it closed already", err)
+	if n := c.closes.Load(); n != 1 {
+		t.Fatalf("a canceled Handshake() closed the connection %d times, want once", n)
 	}
 }
 
@@ -1070,4 +1072,16 @@ func TestFromString(t *testing.T) {
 	if _, err := FromString("http://", nil, nil); err == nil {
 		t.Fatal("FromString() of a URL without host succeeded")
 	}
+}
+
+// closeCounter counts the Close calls on a connection, which tells whether
+// it was closed on every platform, unlike the error of a second Close.
+type closeCounter struct {
+	net.Conn
+	closes atomic.Int32
+}
+
+func (c *closeCounter) Close() error {
+	c.closes.Add(1)
+	return c.Conn.Close()
 }
