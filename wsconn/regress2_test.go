@@ -40,7 +40,7 @@ func TestPongDoesNotHoldReader(t *testing.T) {
 
 // deflateBomb returns a compressed message payload (sync tail removed) that
 // inflates to n zero bytes.
-func deflateBomb(t *testing.T, n int) []byte {
+func deflateBomb(n int) []byte {
 	var buf bytes.Buffer
 	fw, _ := flate.NewWriter(&buf, flate.BestCompression)
 	zero := make([]byte, 1<<20)
@@ -55,7 +55,7 @@ func deflateBomb(t *testing.T, n int) []byte {
 }
 
 func TestDeflateBombHitsLimit(t *testing.T) {
-	bomb := deflateBomb(t, 64<<20)
+	bomb := deflateBomb(64 << 20)
 	t.Logf("bomb: %d bytes compressed", len(bomb))
 	in := frame(finBit|rsv1Bit|opBinary, true, bomb)
 	mc := &memConn{r: bytes.NewReader(in)}

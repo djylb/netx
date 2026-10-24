@@ -143,13 +143,13 @@ type datagramRelay struct {
 	sent     func(dst netx.Addr, n int)
 	received func(src netx.Addr, n int)
 	onError  func(err error)
-	// reportInvalid passes the datagrams dropped as invalid to onError,
-	// which a Server does not.
-	reportInvalid bool
-	idle          *datagramIdle // nil without an idle timeout
+	idle     *datagramIdle // nil without an idle timeout
 	// icmpCredit counts the datagrams sent, up to maxICMPCredit, that a
 	// reported ICMP error can stand for; see replies.
 	icmpCredit atomic.Int32
+	// reportInvalid passes the datagrams dropped as invalid to onError,
+	// which a Server does not.
+	reportInvalid bool
 }
 
 // maxICMPCredit bounds the ICMP errors that replies skips without a datagram

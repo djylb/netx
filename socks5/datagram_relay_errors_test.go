@@ -20,8 +20,8 @@ import (
 type scriptedPacketConn struct {
 	reads  chan scriptedRead
 	last   scriptedRead
-	sent   atomic.Int32
 	done   chan struct{}
+	sent   atomic.Int32
 	closed atomic.Bool
 }
 

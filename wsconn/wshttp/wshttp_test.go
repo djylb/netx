@@ -123,8 +123,8 @@ func TestDialerNeedsTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Code != 101 {
-		t.Fatalf("status %d", resp.Code)
+	if resp == nil || resp.Code != 101 {
+		t.Fatalf("response %+v", resp)
 	}
 	_ = c.WriteMessage(wsconn.Text, []byte("h1"))
 	if _, p, err := c.ReadMessage(); err != nil || string(p) != "h1" {
