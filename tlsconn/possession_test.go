@@ -264,14 +264,6 @@ func TestPossessionFraming(t *testing.T) {
 // The zero Challenger has no key: it issues nothing and accepts nothing,
 // not even a challenge made with the all-zero key it would otherwise have.
 func TestPossessionZeroChallenger(t *testing.T) {
-	var zero Challenger
-	var nilChallenger *Challenger
-	if _, err := zero.Challenge("p"); !errors.Is(err, ErrNoChallenger) {
-		t.Fatalf("zero Challenge() = %v", err)
-	}
-	if _, err := nilChallenger.Challenge("p"); !errors.Is(err, ErrNoChallenger) {
-		t.Fatalf("nil Challenge() = %v", err)
-	}
 	var raw [challengeSize]byte
 	raw[0] = challengeVersion
 	binary.BigEndian.PutUint64(raw[1:9], uint64(time.Now().Add(100*365*24*time.Hour).UnixNano()))
@@ -280,19 +272,22 @@ func TestPossessionZeroChallenger(t *testing.T) {
 	m.Write([]byte("p"))
 	m.Sum(raw[9+nonceSize : 9+nonceSize])
 	forged := base64.RawURLEncoding.EncodeToString(raw[:])
-	if _, err := zero.Expiry("p", forged); !errors.Is(err, ErrNoChallenger) {
-		t.Fatalf("zero Expiry(forged) = %v", err)
-	}
 	key := testEd25519Key(t)
 	sig, err := SignPossession(key, "p", forged)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := zero.Verify(key.Public(), "p", forged, sig); !errors.Is(err, ErrNoChallenger) {
-		t.Fatalf("zero Verify(forged) = %v", err)
-	}
-	if err := nilChallenger.Verify(key.Public(), "p", forged, sig); !errors.Is(err, ErrNoChallenger) {
-		t.Fatalf("nil Verify(forged) = %v", err)
+	// The zero value and a nil pointer alike.
+	for _, c := range []*Challenger{new(Challenger), nil} {
+		if _, err := c.Challenge("p"); !errors.Is(err, ErrNoChallenger) {
+			t.Fatalf("%p Challenge() = %v", c, err)
+		}
+		if _, err := c.Expiry("p", forged); !errors.Is(err, ErrNoChallenger) {
+			t.Fatalf("%p Expiry(forged) = %v", c, err)
+		}
+		if err := c.Verify(key.Public(), "p", forged, sig); !errors.Is(err, ErrNoChallenger) {
+			t.Fatalf("%p Verify(forged) = %v", c, err)
+		}
 	}
 }
 
