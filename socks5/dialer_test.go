@@ -52,7 +52,7 @@ func (d *recordingDialer) DialContext(ctx context.Context, network, address stri
 }
 
 func TestDialerForwardAndHostNames(t *testing.T) {
-	requests := make(chan socks5.Addr, 1)
+	requests := make(chan netx.Addr, 1)
 	addr := serveRaw(t, func(c net.Conn) {
 		if _, err := socks5.ReadMethods(c); err != nil {
 			return
@@ -63,7 +63,7 @@ func TestDialerForwardAndHostNames(t *testing.T) {
 			return
 		}
 		requests <- dst
-		_ = socks5.WriteReply(c, socks5.ReplySucceeded, socks5.Addr{})
+		_ = socks5.WriteReply(c, socks5.ReplySucceeded, netx.Addr{})
 		_, _ = io.Copy(c, c)
 	})
 	forward := &recordingDialer{}
@@ -72,7 +72,7 @@ func TestDialerForwardAndHostNames(t *testing.T) {
 		t.Fatalf("DialContext() error = %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	if got := <-requests; got != (socks5.Addr{Name: "example.com", Port: 443}) {
+	if got := <-requests; got != (netx.Addr{Name: "example.com", Port: 443}) {
 		t.Fatalf("request = %v, want example.com:443 by name", got)
 	}
 	if len(forward.addrs) != 1 || forward.addrs[0] != addr {
@@ -182,7 +182,7 @@ func TestServerOnError(t *testing.T) {
 func TestDialerSOCKS4(t *testing.T) {
 	target := echoTCP(t)
 	_, port, _ := net.SplitHostPort(target)
-	requests := make(chan socks5.Addr, 4)
+	requests := make(chan netx.Addr, 4)
 	addr := serve(t, &socks5.Server{
 		SOCKS4: true,
 		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
@@ -229,7 +229,7 @@ func TestDialerResolver(t *testing.T) {
 		t.Skip("no name resolution on " + runtime.GOOS)
 	}
 	target := echoTCP(t)
-	requests := make(chan socks5.Addr, 2)
+	requests := make(chan netx.Addr, 2)
 	addr := serve(t, &socks5.Server{
 		SOCKS4: true,
 		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {

@@ -29,18 +29,18 @@ func (s *Server) handshake4(ctx context.Context, c net.Conn, first []byte) (*Req
 	}
 	if err != nil {
 		if errors.Is(err, ErrMalformed) {
-			_ = WriteReply4(c, Reply4Rejected, Addr{})
+			_ = WriteReply4(c, Reply4Rejected, netx.Addr{})
 		}
 		return nil, err
 	}
 	noAuth := s.noAuth()
 	if noAuth == nil {
-		_ = WriteReply4(c, Reply4Rejected, Addr{})
+		_ = WriteReply4(c, Reply4Rejected, netx.Addr{})
 		return nil, errSOCKS4Auth
 	}
 	user, err := noAuth.Authenticate(ctx, c)
 	if err != nil {
-		_ = WriteReply4(c, Reply4Rejected, Addr{})
+		_ = WriteReply4(c, Reply4Rejected, netx.Addr{})
 		return nil, err
 	}
 	req := &Request{Version: Version4, Command: cmd, Dst: dst, User: user, UserID4: userID, Conn: c}

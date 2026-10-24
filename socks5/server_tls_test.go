@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -90,7 +91,7 @@ func TestServerOverTLS(t *testing.T) {
 	if _, err := socks5.ReadMethod(ctrl); err != nil {
 		t.Fatal(err)
 	}
-	if err := socks5.WriteRequest(ctrl, socks5.CmdUDPAssociate, socks5.AddrFromNetAddr(client.LocalAddr())); err != nil {
+	if err := socks5.WriteRequest(ctrl, socks5.CmdUDPAssociate, netx.AddrFromNetAddr(client.LocalAddr())); err != nil {
 		t.Fatal(err)
 	}
 	bound, err := socks5.ReadReply(ctrl)
@@ -98,7 +99,7 @@ func TestServerOverTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := echoUDPOnce(t)
-	packet, _ := socks5.AppendDatagram(nil, socks5.AddrFromNetAddr(peer.LocalAddr()), []byte("dgram"))
+	packet, _ := socks5.AppendDatagram(nil, netx.AddrFromNetAddr(peer.LocalAddr()), []byte("dgram"))
 	if _, err := client.WriteToUDPAddrPort(packet, netip.AddrPortFrom(bound.IP, bound.Port)); err != nil {
 		t.Fatal(err)
 	}

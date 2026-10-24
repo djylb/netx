@@ -7,10 +7,12 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/djylb/netx"
 )
 
 func TestSOCKS4RoundTrip(t *testing.T) {
-	for _, dst := range []Addr{
+	for _, dst := range []netx.Addr{
 		{IP: netip.MustParseAddr("192.0.2.1"), Port: 80},
 		{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 81}, // sent as IPv4
 		{Name: "example.com", Port: 443},
@@ -31,7 +33,7 @@ func TestSOCKS4RoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	bound := Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1080}
+	bound := netx.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1080}
 	if err := WriteReply4(&buf, ReplySucceeded, bound); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +48,7 @@ func TestSOCKS4RoundTrip(t *testing.T) {
 		Reply4IdentdMismatch:   Reply4IdentdMismatch,
 	} {
 		buf.Reset()
-		_ = WriteReply4(&buf, in, Addr{IP: netip.MustParseAddr("::1")})
+		_ = WriteReply4(&buf, in, netx.Addr{IP: netip.MustParseAddr("::1")})
 		_, err := ReadReply4(&buf)
 		var replyErr *ReplyError
 		if !errors.As(err, &replyErr) || replyErr.Reply != want {
@@ -62,7 +64,7 @@ func TestSOCKS4RoundTrip(t *testing.T) {
 // A SOCKS4a name that is an IP literal, also with one trailing dot, is read as
 // that IP address.
 func TestReadRequest4LiteralName(t *testing.T) {
-	for name, want := range map[string]Addr{
+	for name, want := range map[string]netx.Addr{
 		"127.0.0.1":   {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
 		"127.0.0.1.":  {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
 		"127.0.0.1..": {Name: "127.0.0.1..", Port: 80},
@@ -78,19 +80,19 @@ func TestReadRequest4LiteralName(t *testing.T) {
 }
 
 func TestSOCKS4Errors(t *testing.T) {
-	ipv6 := Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 1}
+	ipv6 := netx.Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 1}
 	if err := WriteRequest4(io.Discard, CmdConnect, ipv6, ""); !errors.Is(err, ErrAddrType) {
 		t.Errorf("IPv6 error = %v, want %v", err, ErrAddrType)
 	}
 	for _, tt := range []struct {
-		dst  Addr
+		dst  netx.Addr
 		user string
 	}{
-		{Addr{Port: 1}, ""},
-		{Addr{Name: "a\x00b", Port: 1}, ""},
-		{Addr{Name: strings.Repeat("a", 256), Port: 1}, ""},
-		{Addr{Name: "a", Port: 1}, "u\x00"},
-		{Addr{Name: "a", Port: 1}, strings.Repeat("u", 1024)},
+		{netx.Addr{Port: 1}, ""},
+		{netx.Addr{Name: "a\x00b", Port: 1}, ""},
+		{netx.Addr{Name: strings.Repeat("a", 256), Port: 1}, ""},
+		{netx.Addr{Name: "a", Port: 1}, "u\x00"},
+		{netx.Addr{Name: "a", Port: 1}, strings.Repeat("u", 1024)},
 	} {
 		if err := WriteRequest4(io.Discard, CmdConnect, tt.dst, tt.user); !errors.Is(err, ErrMalformed) {
 			t.Errorf("WriteRequest4(%q, %q) error = %v, want %v", tt.dst.Name, tt.user, err, ErrMalformed)

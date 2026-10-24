@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+
+	"github.com/djylb/netx"
 )
 
 // Version4 is the version byte of SOCKS4 and SOCKS4a requests.
@@ -31,24 +33,24 @@ const (
 // 0.0.0.x with x not zero, is returned by name, or by IP address when the
 // name is an IP literal, as DecodeAddr does. The user ID is not
 // authentication: SOCKS4 has none.
-func ReadRequest4(r io.Reader) (cmd Command, dst Addr, userID string, err error) {
+func ReadRequest4(r io.Reader) (cmd Command, dst netx.Addr, userID string, err error) {
 	var hdr [8]byte // version, command, port, IPv4 address
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return 0, Addr{}, "", err
+		return 0, netx.Addr{}, "", err
 	}
 	if hdr[0] != Version4 {
-		return 0, Addr{}, "", ErrVersion
+		return 0, netx.Addr{}, "", ErrVersion
 	}
 	if userID, err = readNULString(r, maxUserID4); err != nil {
-		return 0, Addr{}, "", err
+		return 0, netx.Addr{}, "", err
 	}
 	if socks4aMarker([4]byte(hdr[4:8])) {
 		name, err := readNULString(r, maxHost4)
 		if err != nil {
-			return 0, Addr{}, "", err
+			return 0, netx.Addr{}, "", err
 		}
 		if name == "" {
-			return 0, Addr{}, "", ErrMalformed
+			return 0, netx.Addr{}, "", ErrMalformed
 		}
 		dst = nameAddr(name)
 	} else {
@@ -63,7 +65,7 @@ func ReadRequest4(r io.Reader) (cmd Command, dst Addr, userID string, err error)
 // for SOCKS4a, with x not zero. It returns an error wrapping ErrAddrType for an
 // IPv6 destination and ErrMalformed for a user ID or name that is too long or
 // contains a NUL byte.
-func WriteRequest4(w io.Writer, cmd Command, dst Addr, userID string) error {
+func WriteRequest4(w io.Writer, cmd Command, dst netx.Addr, userID string) error {
 	msg := make([]byte, 8, 8+len(userID)+1+len(dst.Name)+1)
 	msg[0], msg[1] = Version4, byte(cmd)
 	binary.BigEndian.PutUint16(msg[2:4], dst.Port)
@@ -98,7 +100,7 @@ func WriteRequest4(w io.Writer, cmd Command, dst Addr, userID string) error {
 // as 0.0.0.0 unless it is IPv4. rep may be a SOCKS4 reply or, for servers that
 // share code with SOCKS5, a SOCKS5 one: ReplySucceeded is sent as
 // Reply4Granted and other SOCKS5 replies as Reply4Rejected.
-func WriteReply4(w io.Writer, rep Reply, bound Addr) error {
+func WriteReply4(w io.Writer, rep Reply, bound netx.Addr) error {
 	switch {
 	case rep == ReplySucceeded:
 		rep = Reply4Granted
@@ -117,12 +119,12 @@ func WriteReply4(w io.Writer, rep Reply, bound Addr) error {
 // ReadReply4 reads a SOCKS4 reply and returns the bound address. A reply
 // other than Reply4Granted is returned as a *ReplyError. The version byte,
 // which should be 0, is not checked, since some servers send 4.
-func ReadReply4(r io.Reader) (Addr, error) {
+func ReadReply4(r io.Reader) (netx.Addr, error) {
 	var msg [8]byte
 	if _, err := io.ReadFull(r, msg[:]); err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
-	bound := Addr{IP: netip.AddrFrom4([4]byte(msg[4:8])), Port: binary.BigEndian.Uint16(msg[2:4])}
+	bound := netx.Addr{IP: netip.AddrFrom4([4]byte(msg[4:8])), Port: binary.BigEndian.Uint16(msg[2:4])}
 	if rep := Reply(msg[1]); rep != Reply4Granted {
 		return bound, &ReplyError{Reply: rep}
 	}

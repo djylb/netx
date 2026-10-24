@@ -8,28 +8,30 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/djylb/netx"
 )
 
 func TestAddrEncoding(t *testing.T) {
 	tests := []struct {
 		name string
-		addr Addr
+		addr netx.Addr
 		wire []byte
 		str  string
 	}{
-		{"ipv4", Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
-		{"mapped ipv4", Addr{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
-		{"ipv6", Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 443},
+		{"ipv4", netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
+		{"mapped ipv4", netx.Addr{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
+		{"ipv6", netx.Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 443},
 			append(append([]byte{4}, netip.MustParseAddr("2001:db8::1").AsSlice()...), 1, 187), "[2001:db8::1]:443"},
-		{"domain", Addr{Name: "example.com", Port: 8080}, append(append([]byte{3, 11}, "example.com"...), 0x1f, 0x90), "example.com:8080"},
-		{"zero", Addr{}, []byte{1, 0, 0, 0, 0, 0, 0}, "0.0.0.0:0"},
-		{"ip wins over name", Addr{IP: netip.MustParseAddr("10.0.0.1"), Name: "ignored", Port: 1}, []byte{1, 10, 0, 0, 1, 0, 1}, "10.0.0.1:1"},
+		{"domain", netx.Addr{Name: "example.com", Port: 8080}, append(append([]byte{3, 11}, "example.com"...), 0x1f, 0x90), "example.com:8080"},
+		{"zero", netx.Addr{}, []byte{1, 0, 0, 0, 0, 0, 0}, "0.0.0.0:0"},
+		{"ip wins over name", netx.Addr{IP: netip.MustParseAddr("10.0.0.1"), Name: "ignored", Port: 1}, []byte{1, 10, 0, 0, 1, 0, 1}, "10.0.0.1:1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.addr.AppendBinary(nil)
+			got, err := AppendAddr(nil, tt.addr)
 			if err != nil || !bytes.Equal(got, tt.wire) {
-				t.Fatalf("AppendBinary() = %v, %v; want %v", got, err, tt.wire)
+				t.Fatalf("AppendAddr() = %v, %v; want %v", got, err, tt.wire)
 			}
 			if s := tt.addr.String(); s != tt.str {
 				t.Fatalf("String() = %q, want %q", s, tt.str)
@@ -44,8 +46,8 @@ func TestAddrEncoding(t *testing.T) {
 		})
 	}
 
-	if _, err := (Addr{Name: strings.Repeat("a", 256)}).AppendBinary(nil); !errors.Is(err, ErrInvalidAddr) {
-		t.Fatalf("AppendBinary(long name) error = %v", err)
+	if _, err := AppendAddr(nil, netx.Addr{Name: strings.Repeat("a", 256)}); !errors.Is(err, ErrInvalidAddr) {
+		t.Fatalf("AppendAddr(long name) error = %v", err)
 	}
 }
 
@@ -83,8 +85,8 @@ func TestAddrConversions(t *testing.T) {
 		{dummyAddr("pipe"), "0.0.0.0:0"},
 	}
 	for _, tt := range tests {
-		if got := AddrFromNetAddr(tt.in).String(); got != tt.want {
-			t.Errorf("AddrFromNetAddr(%v) = %s, want %s", tt.in, got, tt.want)
+		if got := netx.AddrFromNetAddr(tt.in).String(); got != tt.want {
+			t.Errorf("netx.AddrFromNetAddr(%v) = %s, want %s", tt.in, got, tt.want)
 		}
 	}
 
@@ -96,14 +98,14 @@ func TestAddrConversions(t *testing.T) {
 		"localhost:0":           "localhost:0",
 		"xn--bcher-kva.ch:8443": "xn--bcher-kva.ch:8443",
 	} {
-		addr, err := ParseAddr(in)
+		addr, err := netx.ParseAddr(in)
 		if err != nil || addr.String() != want {
-			t.Errorf("ParseAddr(%q) = %v, %v; want %s", in, addr, err, want)
+			t.Errorf("netx.ParseAddr(%q) = %v, %v; want %s", in, addr, err, want)
 		}
 	}
 	for _, in := range []string{"", "example.com", ":80", "host:65536", "host:-1", strings.Repeat("a", 256) + ":1"} {
-		if _, err := ParseAddr(in); !errors.Is(err, ErrInvalidAddr) {
-			t.Errorf("ParseAddr(%q) error = %v, want %v", in, err, ErrInvalidAddr)
+		if _, err := netx.ParseAddr(in); !errors.Is(err, ErrInvalidAddr) {
+			t.Errorf("netx.ParseAddr(%q) error = %v, want %v", in, err, ErrInvalidAddr)
 		}
 	}
 }
@@ -164,7 +166,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 		}
 	}
 
-	dst := Addr{Name: "example.com", Port: 443}
+	dst := netx.Addr{Name: "example.com", Port: 443}
 	if err := WriteRequest(&wire, CmdConnect, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -172,14 +174,14 @@ func TestHandshakeRoundTrip(t *testing.T) {
 		t.Fatalf("ReadRequest() = %v, %v, %v", cmd, addr, err)
 	}
 
-	bound := Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1080}
+	bound := netx.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1080}
 	if err := WriteReply(&wire, ReplySucceeded, bound); err != nil {
 		t.Fatal(err)
 	}
 	if addr, err := ReadReply(&wire); err != nil || addr != bound {
 		t.Fatalf("ReadReply() = %v, %v", addr, err)
 	}
-	if err := WriteReply(&wire, ReplyConnectionRefused, Addr{}); err != nil {
+	if err := WriteReply(&wire, ReplyConnectionRefused, netx.Addr{}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = ReadReply(&wire)
@@ -247,7 +249,7 @@ func TestMessageErrors(t *testing.T) {
 	if _, err := ReadReply(read(4, 0, 0, 1, 0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrVersion) {
 		t.Errorf("ReadReply(v4) error = %v", err)
 	}
-	if err := WriteRequest(io.Discard, CmdConnect, Addr{Name: strings.Repeat("a", 256)}); !errors.Is(err, ErrInvalidAddr) {
+	if err := WriteRequest(io.Discard, CmdConnect, netx.Addr{Name: strings.Repeat("a", 256)}); !errors.Is(err, ErrInvalidAddr) {
 		t.Errorf("WriteRequest(long name) error = %v", err)
 	}
 	if err := WriteMethod(shortWriter{}, MethodNoAuth); !errors.Is(err, io.ErrShortWrite) {
@@ -260,7 +262,7 @@ type shortWriter struct{}
 func (shortWriter) Write(b []byte) (int, error) { return len(b) / 2, nil }
 
 func TestDatagram(t *testing.T) {
-	dst := Addr{IP: netip.MustParseAddr("203.0.113.5"), Port: 53}
+	dst := netx.Addr{IP: netip.MustParseAddr("203.0.113.5"), Port: 53}
 	payload := []byte("query")
 	packet, err := AppendDatagram(make([]byte, 0, 64), dst, payload)
 	if err != nil {
@@ -295,16 +297,16 @@ func TestDatagram(t *testing.T) {
 		{[]byte{0, 0, 0, 3, 4, 'a'}, ErrMalformed},
 		{[]byte{0, 0, 0, 7, 0}, ErrAddrType},
 	} {
-		if addr, n, err := DecodeDatagram(tt.b); !errors.Is(err, tt.want) || n != 0 || addr != (Addr{}) {
+		if addr, n, err := DecodeDatagram(tt.b); !errors.Is(err, tt.want) || n != 0 || addr != (netx.Addr{}) {
 			t.Fatalf("DecodeDatagram(%v) = %v, %d, %v, want %v", tt.b, addr, n, err, tt.want)
 		}
 	}
 
 	prefix := []byte("keep")
-	if got, err := AppendDatagram(prefix, Addr{Name: strings.Repeat("a", 256)}, payload); !errors.Is(err, ErrInvalidAddr) || string(got) != "keep" {
+	if got, err := AppendDatagram(prefix, netx.Addr{Name: strings.Repeat("a", 256)}, payload); !errors.Is(err, ErrInvalidAddr) || string(got) != "keep" {
 		t.Fatalf("AppendDatagram(long name) = %q, %v", got, err)
 	}
-	long := Addr{Name: strings.Repeat("a", 255), Port: 1}
+	long := netx.Addr{Name: strings.Repeat("a", 255), Port: 1}
 	header, _ := AppendDatagram(nil, long, nil)
 	if len(header) != MaxDatagramHeaderLen {
 		t.Fatalf("longest header = %d bytes, want %d", len(header), MaxDatagramHeaderLen)
@@ -389,7 +391,7 @@ func TestDecodeAddr(t *testing.T) {
 	wire := append([]byte{3, 7}, "example80rest"...)
 	wire[9], wire[10] = 0, 80
 	addr, n, err := DecodeAddr(wire)
-	if err != nil || n != 11 || addr != (Addr{Name: "example", Port: 80}) {
+	if err != nil || n != 11 || addr != (netx.Addr{Name: "example", Port: 80}) {
 		t.Fatalf("DecodeAddr() = %v, %d, %v", addr, n, err)
 	}
 	for _, bad := range [][]byte{nil, {1, 127, 0, 0, 1, 0}, {4}, {3, 0, 0, 80}} {
@@ -399,7 +401,7 @@ func TestDecodeAddr(t *testing.T) {
 	}
 	// Every IP address is decoded as IP, in its IPv4 form when mapped.
 	port := []byte{0, 80}
-	for wire, want := range map[string]Addr{
+	for wire, want := range map[string]netx.Addr{
 		string(append(append([]byte{4}, netip.MustParseAddr("::ffff:127.0.0.1").AsSlice()...), port...)): {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
 		string(append([]byte{3, 9}, "127.0.0.1\x00\x50"...)):                                             {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},
 		string(append([]byte{3, 16}, "::ffff:127.0.0.1\x00\x50"...)):                                     {IP: netip.MustParseAddr("127.0.0.1"), Port: 80},

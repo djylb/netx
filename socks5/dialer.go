@@ -58,7 +58,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	default:
 		return nil, fmt.Errorf("socks5: network %q: %w", network, errors.ErrUnsupported)
 	}
-	dst, err := ParseAddr(address)
+	dst, err := netx.ParseAddr(address)
 	if err != nil {
 		return nil, fmt.Errorf("socks5: invalid target %q: %w", address, err)
 	}
@@ -88,18 +88,18 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 // ctx bounds the handshake as with netx.DoHandshake, and c has no deadline
 // set after a success. A non-success reply is returned as a *ReplyError. On
 // failure c is closed, as by netx.DoHandshake.
-func (d *Dialer) Handshake(ctx context.Context, c net.Conn, cmd Command, dst Addr) (Addr, error) {
+func (d *Dialer) Handshake(ctx context.Context, c net.Conn, cmd Command, dst netx.Addr) (netx.Addr, error) {
 	if d.SOCKS4 && cmd == CmdUDPAssociate {
 		_ = c.Close()
-		return Addr{}, fmt.Errorf("socks5: SOCKS4 %v: %w", cmd, errors.ErrUnsupported)
+		return netx.Addr{}, fmt.Errorf("socks5: SOCKS4 %v: %w", cmd, errors.ErrUnsupported)
 	}
-	var bound Addr
+	var bound netx.Addr
 	err := netx.DoHandshake(ctx, c, func() (err error) {
 		bound, err = d.request(c, cmd, dst)
 		return err
 	})
 	if err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	return bound, nil
 }
@@ -114,7 +114,7 @@ func (d *Dialer) dialProxy(ctx context.Context) (net.Conn, error) {
 
 // resolve looks dst's name up with d.Resolver, if set, in the address family
 // of network.
-func (d *Dialer) resolve(ctx context.Context, network string, dst Addr) (Addr, error) {
+func (d *Dialer) resolve(ctx context.Context, network string, dst netx.Addr) (netx.Addr, error) {
 	if d.Resolver == nil || dst.IP.IsValid() {
 		return dst, nil
 	}
@@ -127,9 +127,9 @@ func (d *Dialer) resolve(ctx context.Context, network string, dst Addr) (Addr, e
 	}
 	ip, err := lookupFirst(ctx, d.Resolver, family, dst.Name)
 	if err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
-	return Addr{IP: ip, Port: dst.Port}, nil
+	return netx.Addr{IP: ip, Port: dst.Port}, nil
 }
 
 // lookupFirst returns the first address of name in family.
@@ -145,10 +145,10 @@ func lookupFirst(ctx context.Context, r *net.Resolver, family, name string) (net
 }
 
 // request writes the request and reads the reply in d's protocol version.
-func (d *Dialer) request(c net.Conn, cmd Command, dst Addr) (Addr, error) {
+func (d *Dialer) request(c net.Conn, cmd Command, dst netx.Addr) (netx.Addr, error) {
 	if d.SOCKS4 {
 		if err := WriteRequest4(c, cmd, dst, d.Username); err != nil {
-			return Addr{}, err
+			return netx.Addr{}, err
 		}
 		return ReadReply4(c)
 	}
@@ -157,26 +157,26 @@ func (d *Dialer) request(c net.Conn, cmd Command, dst Addr) (Addr, error) {
 		methods = append(methods, MethodUserPass)
 	}
 	if err := WriteMethods(c, methods...); err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	method, err := ReadMethod(c)
 	if err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	switch {
 	case method == MethodNoAuth:
 	case method == MethodUserPass && d.Username != "":
 		if err := WriteUserPass(c, d.Username, d.Password); err != nil {
-			return Addr{}, err
+			return netx.Addr{}, err
 		}
 		if err := ReadUserPassStatus(c); err != nil {
-			return Addr{}, err
+			return netx.Addr{}, err
 		}
 	default:
-		return Addr{}, fmt.Errorf("socks5: server selected unoffered %v", method)
+		return netx.Addr{}, fmt.Errorf("socks5: server selected unoffered %v", method)
 	}
 	if err := WriteRequest(c, cmd, dst); err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	return ReadReply(c)
 }
@@ -210,7 +210,7 @@ func (d *Dialer) ListenPacket(ctx context.Context) (*UDPConn, error) {
 	}
 	// The address is left unspecified: the proxy takes it from the control
 	// connection, as a NAT may rewrite it.
-	announced := Addr{Port: uint16(pc.LocalAddr().(*net.UDPAddr).Port)}
+	announced := netx.Addr{Port: uint16(pc.LocalAddr().(*net.UDPAddr).Port)}
 	bound, err := d.Handshake(ctx, ctrl, CmdUDPAssociate, announced)
 	if err != nil {
 		_ = pc.Close()
@@ -230,7 +230,7 @@ func (d *Dialer) ListenPacket(ctx context.Context) (*UDPConn, error) {
 // relayAddr returns the address to send datagrams to from the bound address
 // of a UDP ASSOCIATE reply: a name resolved, and an unspecified address,
 // which servers often reply, replaced with the proxy's.
-func (d *Dialer) relayAddr(ctx context.Context, ctrl net.Conn, bound Addr) (netip.AddrPort, error) {
+func (d *Dialer) relayAddr(ctx context.Context, ctrl net.Conn, bound netx.Addr) (netip.AddrPort, error) {
 	if bound.Port == 0 {
 		return netip.AddrPort{}, fmt.Errorf("%w: UDP relay port 0", ErrInvalidAddr)
 	}
@@ -261,7 +261,7 @@ func (d *Dialer) relayAddr(ctx context.Context, ctrl net.Conn, bound Addr) (neti
 	if !ip.IsValid() {
 		// A control connection without an IP address, such as a tunneled
 		// stream, leaves the proxy's own address.
-		proxy, err := ParseAddr(d.ProxyAddr)
+		proxy, err := netx.ParseAddr(d.ProxyAddr)
 		if err != nil {
 			return netip.AddrPort{}, err
 		}
@@ -292,7 +292,7 @@ type UDPConn struct {
 
 // WriteTo sends p to dst through the proxy, which resolves a domain name. It
 // returns len(p) on success.
-func (u *UDPConn) WriteTo(p []byte, dst Addr) (int, error) {
+func (u *UDPConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 	bp := udpBufPool.Get().(*[]byte)
 	defer udpBufPool.Put(bp)
 	b, err := AppendDatagram((*bp)[:0], dst, p)
@@ -309,14 +309,14 @@ func (u *UDPConn) WriteTo(p []byte, dst Addr) (int, error) {
 // longer than p is truncated. Datagrams from other senders than the relay,
 // and malformed or fragmented ones, are dropped. After the association ends
 // it returns an error matching net.ErrClosed.
-func (u *UDPConn) ReadFrom(p []byte) (int, Addr, error) {
+func (u *UDPConn) ReadFrom(p []byte) (int, netx.Addr, error) {
 	bp := udpBufPool.Get().(*[]byte)
 	defer udpBufPool.Put(bp)
 	buf := *bp
 	for {
 		n, src, err := u.pc.ReadFromUDPAddrPort(buf)
 		if err != nil {
-			return 0, Addr{}, err
+			return 0, netx.Addr{}, err
 		}
 		if netutil.UnmapAddrPort(src) != u.relay {
 			continue
@@ -363,9 +363,10 @@ func (u *UDPConn) SetWriteDeadline(t time.Time) error { return u.pc.SetWriteDead
 
 // AsNetPacketConn returns u as a net.PacketConn, for code that sends and
 // receives with net.Addr. Its ReadFrom reports a source with an IP address as
-// a *net.UDPAddr and one with a domain name as an Addr. Its WriteTo takes an
-// Addr, which keeps a domain name for the proxy to resolve, or any net.Addr
-// whose String is "host:port", such as a *net.UDPAddr. Closing it closes u.
+// a *net.UDPAddr and one with a domain name as a netx.Addr. Its WriteTo
+// takes a netx.Addr, which keeps a domain name for the proxy to resolve, or
+// any net.Addr whose String is "host:port", such as a *net.UDPAddr. Closing
+// it closes u.
 func (u *UDPConn) AsNetPacketConn() net.PacketConn { return netPacketConn{u} }
 
 type netPacketConn struct{ *UDPConn }
@@ -382,9 +383,9 @@ func (c netPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 func (c netPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	dst, ok := addr.(Addr)
+	dst, ok := addr.(netx.Addr)
 	if !ok {
-		if dst = AddrFromNetAddr(addr); !dst.IP.IsValid() && dst.Name == "" {
+		if dst = netx.AddrFromNetAddr(addr); !dst.IP.IsValid() && dst.Name == "" {
 			return 0, ErrInvalidAddr
 		}
 	}

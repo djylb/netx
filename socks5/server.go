@@ -3,18 +3,16 @@ package socks5
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"io"
-	"maps"
 	"net"
 	"os"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/creds"
+	"github.com/djylb/netx/internal/serve"
 )
 
 // ErrServerClosed is returned by Serve after Close.
@@ -38,8 +36,8 @@ type Request struct {
 	Command Command
 	replies uint8 // replies sent; next to the bytes above, sharing one word
 	// Dst is the requested destination. For CmdUDPAssociate it is the address
-	// the client expects to send datagrams from, often the zero Addr.
-	Dst Addr
+	// the client expects to send datagrams from, often the zero netx.Addr.
+	Dst netx.Addr
 	// User is the identity returned by the authenticator, empty without
 	// authentication. For SOCKS4 it is what the NoAuth authenticator
 	// returned.
@@ -58,10 +56,10 @@ type Request struct {
 // are translated as by WriteReply4. A request gets one reply, except a BIND
 // request, which gets two: the address the server listens on for the peer,
 // and then the address of the peer that connected. A failure reply, which
-// usually carries the zero Addr, is the last one, and the connection is then
+// usually carries the zero netx.Addr, is the last one, and the connection is then
 // closed. Calls after the last reply return ErrReplied. Reply is not safe for
 // concurrent use.
-func (r *Request) Reply(code Reply, bound Addr) error {
+func (r *Request) Reply(code Reply, bound netx.Addr) error {
 	last := uint8(1)
 	if r.Command == CmdBind {
 		last = 2
@@ -148,19 +146,9 @@ func (a UserPassAuth) Authenticate(ctx context.Context, c net.Conn) (string, err
 // read once; later changes to it are not seen. Its Check can be called by a
 // Check of your own, such as one that also has rules per client address.
 func Credentials(accounts map[string]string) UserPassAuth {
-	digests := make(map[string][sha256.Size]byte, len(accounts))
-	for user, password := range accounts {
-		digests[user] = sha256.Sum256([]byte(password))
-	}
-	var unknown [sha256.Size]byte // no password has this digest
+	a := creds.New(accounts)
 	return UserPassAuth{Check: func(_ context.Context, _ net.Conn, user, password string) (bool, error) {
-		want, known := digests[user]
-		if !known {
-			want = unknown
-		}
-		got := sha256.Sum256([]byte(password))
-		match := subtle.ConstantTimeCompare(want[:], got[:]) == 1
-		return known && match, nil
+		return a.Check(user, password), nil
 	}}
 }
 
@@ -201,7 +189,7 @@ type Server struct {
 	// rejects. Like Allow, it sees IP addresses as IP and other names
 	// unresolved, so a policy on IP addresses must also check the addresses
 	// that names resolve to, in a DialPacket whose PacketConn resolves them.
-	AllowPacket func(req *Request, dst Addr) bool
+	AllowPacket func(req *Request, dst netx.Addr) bool
 	// OnError, if set, receives the errors that end connections accepted by
 	// Serve, with the client connection, and those that drop UDP datagrams,
 	// with the association's control connection. It is called from serving
@@ -274,7 +262,7 @@ type Server struct {
 	// UDPAddr returns the address a UDP ASSOCIATE reply tells the client to
 	// send to, given the association's socket address; nil uses that address
 	// with the control connection's local IP when it is unspecified.
-	UDPAddr func(req *Request, socket net.Addr) Addr
+	UDPAddr func(req *Request, socket net.Addr) netx.Addr
 	// DialPacket opens the outbound side of a UDP association; nil uses a new
 	// UDP socket from netx.ListenEphemeralUDP through NewPacketConn. That
 	// socket reaches IPv4 and IPv6 targets where the system has dual-stack
@@ -297,8 +285,7 @@ type Server struct {
 	// control connection; DefaultUDPIdleTimeout if not positive.
 	UDPIdleTimeout time.Duration
 
-	// Switches. The unexported flags follow them, so that the booleans
-	// share one word.
+	// Switches.
 
 	// SOCKS4 also serves SOCKS4 and SOCKS4a requests. They carry no
 	// credentials, so they are refused unless Auth has a MethodNoAuth
@@ -310,18 +297,8 @@ type Server struct {
 	// with the control connection, as RFC 1928 specifies.
 	UDPOutlivesControl bool
 
-	draining bool // Shutdown was called
-	closed   bool // Close was called
-	mu       sync.Mutex
-	ctx      context.Context // canceled by Close
-	cancel   context.CancelFunc
-	// Tracked by pointer, as in net/http, since the dynamic types of a
-	// net.Listener or a net.Conn need not be comparable.
-	listeners map[*net.Listener]struct{}
-	conns     map[*net.Conn]struct{}
-	drained   chan struct{} // closed when conns empties during Shutdown
-	shared    *udpRelay
-	closeDone chan struct{} // closed when the first Close has returned
+	life   serve.Tracker
+	shared *udpRelay // guarded by life's lock
 }
 
 // ListenAndServe listens on the TCP address addr, ":1080" when empty, and
@@ -345,35 +322,7 @@ func (s *Server) ListenAndServe(addr string) error {
 // Accept errors for which netx.IsAcceptRetryable reports true, such as
 // running out of file descriptors, are retried as netx.Accept does.
 func (s *Server) Serve(l net.Listener) error {
-	if !s.track(&l, true) {
-		_ = l.Close()
-		return ErrServerClosed
-	}
-	defer s.track(&l, false)
-	ctx := s.baseContext()
-	for {
-		c, err := netx.Accept(ctx, l)
-		if err != nil {
-			if s.stopping() {
-				return ErrServerClosed
-			}
-			return err
-		}
-		// Tracked before the goroutine starts, so that Shutdown, once it
-		// sees no connections, cannot miss one being started. One accepted
-		// just before Shutdown or Close closed the listener is refused,
-		// which is no failure.
-		if !s.trackConn(&c, true) {
-			_ = c.Close()
-			continue
-		}
-		go func() {
-			defer s.trackConn(&c, false)
-			if err := s.serveConn(ctx, c); err != nil {
-				s.onError(c, err)
-			}
-		}()
-	}
+	return s.life.Serve(l, ErrServerClosed, netx.Accept, s.serveConn, s.onError)
 }
 
 // ServeConn serves one client connection, as Handshake and ServeRequest do,
@@ -381,11 +330,11 @@ func (s *Server) Serve(l net.Listener) error {
 // the error that ended the exchange, if any. The connection counts in
 // ActiveConns until ServeConn returns.
 func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
-	if !s.trackConn(&c, true) {
+	if !s.life.TrackConn(&c, true) {
 		_ = c.Close()
 		return ErrServerClosed
 	}
-	defer s.trackConn(&c, false)
+	defer s.life.TrackConn(&c, false)
 	return s.serveConn(ctx, c)
 }
 
@@ -448,12 +397,11 @@ func (s *Server) ServeRequest(ctx context.Context, req *Request) error {
 // bindContext returns a context that also ends with Close, or ErrServerClosed
 // after Close.
 func (s *Server) bindContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
-	if s.isClosed() {
+	ctx, cancel, ok := s.life.Bind(ctx)
+	if !ok {
 		return nil, nil, ErrServerClosed
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(s.baseContext(), cancel)
-	return ctx, func() { stop(); cancel() }, nil
+	return ctx, cancel, nil
 }
 
 // handshake runs the handshake on c under HandshakeTimeout and ctx, and
@@ -517,7 +465,7 @@ func (s *Server) serveRequest(ctx context.Context, req *Request) error {
 // refuse replies code to req and returns err as a *ReplyError that carries
 // code, unless it already is one.
 func refuse(req *Request, code Reply, err error) error {
-	_ = req.Reply(code, Addr{})
+	_ = req.Reply(code, netx.Addr{})
 	if replyErr, ok := errors.AsType[*ReplyError](err); ok && replyErr.Reply == code {
 		return err
 	}
@@ -564,7 +512,7 @@ func (s *Server) handshake5(ctx context.Context, c net.Conn, first []byte) (*Req
 			code = ReplyAddrTypeNotSupported
 		}
 		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			_ = WriteReply(c, code, Addr{})
+			_ = WriteReply(c, code, netx.Addr{})
 		}
 		return nil, err
 	}
@@ -644,7 +592,7 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 	if err != nil {
 		return refuse(req, ReplyFor(err), err)
 	}
-	if err := req.Reply(ReplySucceeded, AddrFromNetAddr(target.LocalAddr())); err != nil {
+	if err := req.Reply(ReplySucceeded, netx.AddrFromNetAddr(target.LocalAddr())); err != nil {
 		_ = target.Close()
 		return err
 	}
@@ -670,18 +618,6 @@ func (s *Server) dial(ctx context.Context, req *Request) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", req.Dst.String())
 }
 
-func (s *Server) baseContext() context.Context {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ctx == nil {
-		s.ctx, s.cancel = context.WithCancel(context.Background())
-		if s.closed {
-			s.cancel()
-		}
-	}
-	return s.ctx
-}
-
 // Shutdown stops the server gracefully: it closes the listeners passed to
 // Serve, which then returns ErrServerClosed, makes ServeConn refuse new
 // connections, and waits until the connections being served end, the
@@ -689,43 +625,13 @@ func (s *Server) baseContext() context.Context {
 // When ctx ends first, Close ends the remaining connections and Shutdown
 // returns ctx's error too.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return s.Close() // waits for the Close in progress
-	}
-	s.draining = true
-	// Taken out, so that Close does not close them again.
-	listeners := slices.Collect(maps.Keys(s.listeners))
-	clear(s.listeners)
-	var drained chan struct{}
-	if len(s.conns) > 0 {
-		if s.drained == nil {
-			s.drained = make(chan struct{})
-		}
-		drained = s.drained
-	}
-	s.mu.Unlock()
-	var errs []error
-	for _, l := range listeners {
-		errs = append(errs, (*l).Close())
-	}
-	if drained != nil {
-		select {
-		case <-drained:
-		case <-ctx.Done():
-			errs = append(errs, ctx.Err())
-		}
-	}
-	return errors.Join(append(errs, s.Close())...)
+	return s.life.Shutdown(ctx, s.Close)
 }
 
 // ActiveConns returns the number of connections being served by Serve and
 // ServeConn, the control connections of UDP associations among them.
 func (s *Server) ActiveConns() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.conns)
+	return s.life.ActiveConns()
 }
 
 // Close stops the listeners passed to Serve, closes the connections being
@@ -734,91 +640,17 @@ func (s *Server) ActiveConns() int {
 // ErrServerClosed. Later calls, also of Shutdown, wait until the first has
 // finished and return nil.
 func (s *Server) Close() error {
-	s.mu.Lock()
-	if s.closeDone == nil {
-		s.closeDone = make(chan struct{})
-	}
-	done := s.closeDone
-	if s.closed {
-		s.mu.Unlock()
-		<-done // the first Close finishes its work before any call returns
+	return s.life.Close(func() error {
+		var shared *udpRelay
+		s.life.Locked(func(bool) { shared = s.shared })
+		if shared != nil {
+			return shared.close()
+		}
+		if s.UDPSocket != nil {
+			return s.UDPSocket.Close()
+		}
 		return nil
-	}
-	s.closed = true
-	defer close(done)
-	if s.cancel != nil {
-		s.cancel()
-	}
-	// Close outside the lock: closing a *tls.Conn can block for seconds while
-	// it sends close_notify, and serving goroutines need the lock to finish.
-	listeners := slices.Collect(maps.Keys(s.listeners))
-	conns := slices.Collect(maps.Keys(s.conns))
-	shared := s.shared
-	s.mu.Unlock()
-	var errs []error
-	for _, l := range listeners {
-		errs = append(errs, (*l).Close())
-	}
-	for _, c := range conns {
-		_ = (*c).Close()
-	}
-	if shared != nil {
-		errs = append(errs, shared.close())
-	} else if s.UDPSocket != nil {
-		errs = append(errs, s.UDPSocket.Close())
-	}
-	return errors.Join(errs...)
-}
-
-func (s *Server) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
-}
-
-// stopping reports whether Shutdown or Close was called.
-func (s *Server) stopping() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed || s.draining
-}
-
-func (s *Server) track(l *net.Listener, add bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if add {
-		if s.closed || s.draining {
-			return false
-		}
-		if s.listeners == nil {
-			s.listeners = make(map[*net.Listener]struct{})
-		}
-		s.listeners[l] = struct{}{}
-		return true
-	}
-	delete(s.listeners, l)
-	return true
-}
-
-func (s *Server) trackConn(c *net.Conn, add bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if add {
-		if s.closed || s.draining {
-			return false
-		}
-		if s.conns == nil {
-			s.conns = make(map[*net.Conn]struct{})
-		}
-		s.conns[c] = struct{}{}
-		return true
-	}
-	delete(s.conns, c)
-	if len(s.conns) == 0 && s.drained != nil {
-		close(s.drained)
-		s.drained = nil
-	}
-	return true
+	})
 }
 
 // onError passes err to OnError unless Close was called: Close ends the
@@ -826,7 +658,7 @@ func (s *Server) trackConn(c *net.Conn, add bool) bool {
 // hooks and dials, so whatever error they then end with, such as a hook's
 // own error for its cancelled context, comes from Close.
 func (s *Server) onError(c net.Conn, err error) {
-	if s.OnError != nil && !s.isClosed() {
+	if s.OnError != nil && !s.life.IsClosed() {
 		s.OnError(c, err)
 	}
 }

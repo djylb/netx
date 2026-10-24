@@ -44,20 +44,20 @@ func TestServerHandshakeCustomCommand(t *testing.T) {
 					done <- result{err: err}
 					return
 				}
-				bound := socks5.Addr{IP: netip.MustParseAddr("192.0.2.7"), Port: 4321}
+				bound := netx.Addr{IP: netip.MustParseAddr("192.0.2.7"), Port: 4321}
 				if err := req.Reply(socks5.ReplySucceeded, bound); err != nil {
 					done <- result{err: err}
 					return
 				}
 				buf := make([]byte, 5)
 				if _, err = io.ReadFull(req.Conn, buf); err == nil {
-					err = req.Reply(socks5.ReplySucceeded, socks5.Addr{IP: netip.MustParseAddr("192.0.2.8"), Port: 8})
+					err = req.Reply(socks5.ReplySucceeded, netx.Addr{IP: netip.MustParseAddr("192.0.2.8"), Port: 8})
 				}
-				done <- result{req: req, early: string(buf), err: err, replyErr: req.Reply(socks5.ReplySucceeded, socks5.Addr{})}
+				done <- result{req: req, early: string(buf), err: err, replyErr: req.Reply(socks5.ReplySucceeded, netx.Addr{})}
 			}()
 			_ = client.SetDeadline(time.Now().Add(5 * time.Second))
-			dst := socks5.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 80}
-			var bound socks5.Addr
+			dst := netx.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 80}
+			var bound netx.Addr
 			var err error
 			if socks4 {
 				// The early bytes come in the same write as the request, so
@@ -127,7 +127,7 @@ func TestServerServeRequestRefusesUnservedCommands(t *testing.T) {
 	}()
 	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
 	go func() {
-		_ = socks5.WriteRequest4(client, socks5.CmdUDPAssociate, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1")}, "")
+		_ = socks5.WriteRequest4(client, socks5.CmdUDPAssociate, netx.Addr{IP: netip.MustParseAddr("192.0.2.1")}, "")
 	}()
 	var replyErr *socks5.ReplyError
 	if _, err := socks5.ReadReply4(client); !errors.As(err, &replyErr) || replyErr.Reply != socks5.Reply4Rejected {
@@ -192,7 +192,7 @@ func TestServerRelaysEarlyData(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 	var msg bytes.Buffer
-	_ = socks5.WriteRequest4(&msg, socks5.CmdConnect, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1}, "")
+	_ = socks5.WriteRequest4(&msg, socks5.CmdConnect, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1}, "")
 	msg.WriteString("early")
 	if _, err := c.Write(msg.Bytes()); err != nil {
 		t.Fatal(err)
@@ -297,7 +297,7 @@ func TestDialerListenPacket(t *testing.T) {
 	if got := u.RelayAddr(); got != pc.LocalAddr().(*net.UDPAddr).AddrPort() {
 		t.Fatalf("RelayAddr() = %v, want %v", got, pc.LocalAddr())
 	}
-	if got, src := exchangeUDPConn(t, u, socks5.AddrFromNetAddr(echo), "direct"); got != "echo:direct" || src != socks5.AddrFromNetAddr(echo) {
+	if got, src := exchangeUDPConn(t, u, netx.AddrFromNetAddr(echo), "direct"); got != "echo:direct" || src != netx.AddrFromNetAddr(echo) {
 		t.Fatalf("reply = %q from %v", got, src)
 	}
 	if n := upstream.ActiveConns(); n != 1 {
@@ -318,7 +318,7 @@ func TestDialerListenPacket(t *testing.T) {
 			return d.ListenPacket(ctx)
 		},
 	})
-	ctl, relay := associate(t, chained, socks5.Addr{})
+	ctl, relay := associate(t, chained, netx.Addr{})
 	defer func() { _ = ctl.Close() }()
 	client := newUDPClient(t)
 	var got string
@@ -352,7 +352,7 @@ func TestDialerListenPacketEndsWithControl(t *testing.T) {
 			return
 		}
 		// An unspecified bound address stands for the proxy's.
-		_ = socks5.WriteReply(c, socks5.ReplySucceeded, socks5.Addr{Port: uint16(relay.LocalAddr().(*net.UDPAddr).Port)})
+		_ = socks5.WriteReply(c, socks5.ReplySucceeded, netx.Addr{Port: uint16(relay.LocalAddr().(*net.UDPAddr).Port)})
 		<-end
 	})
 	u, err := (&socks5.Dialer{ProxyAddr: addr}).ListenPacket(context.Background())
@@ -365,11 +365,11 @@ func TestDialerListenPacketEndsWithControl(t *testing.T) {
 	}
 	local := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(u.LocalAddr().(*net.UDPAddr).Port))
 	foreign := newUDPClient(t)
-	packet, _ := socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1}, []byte("forged"))
+	packet, _ := socks5.AppendDatagram(nil, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 1}, []byte("forged"))
 	if _, err := foreign.WriteToUDPAddrPort(packet, local); err != nil {
 		t.Fatal(err)
 	}
-	packet, _ = socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("192.0.2.2"), Port: 2}, []byte("genuine"))
+	packet, _ = socks5.AppendDatagram(nil, netx.Addr{IP: netip.MustParseAddr("192.0.2.2"), Port: 2}, []byte("genuine"))
 	if _, err := relay.WriteToUDPAddrPort(packet, local); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestDialerListenPacketSOCKS4(t *testing.T) {
 
 // exchangeUDPConn sends payload to dst through u until a reply comes, as a
 // loopback datagram can be lost on a busy host.
-func exchangeUDPConn(t *testing.T, u *socks5.UDPConn, dst socks5.Addr, payload string) (string, socks5.Addr) {
+func exchangeUDPConn(t *testing.T, u *socks5.UDPConn, dst netx.Addr, payload string) (string, netx.Addr) {
 	t.Helper()
 	buf := make([]byte, 2048)
 	for range 10 {
@@ -408,7 +408,7 @@ func exchangeUDPConn(t *testing.T, u *socks5.UDPConn, dst socks5.Addr, payload s
 			return string(buf[:n]), src
 		}
 	}
-	return "", socks5.Addr{}
+	return "", netx.Addr{}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -424,7 +424,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // Dialer.Handshake returns the bound address of the reply, in either
 // version, and leaves the connection open on a refusal.
 func TestDialerHandshakeBoundAddr(t *testing.T) {
-	bound := socks5.Addr{IP: netip.MustParseAddr("192.0.2.9"), Port: 5000}
+	bound := netx.Addr{IP: netip.MustParseAddr("192.0.2.9"), Port: 5000}
 	for _, tt := range []struct {
 		name  string
 		d     *socks5.Dialer
@@ -452,7 +452,7 @@ func TestDialerHandshakeBoundAddr(t *testing.T) {
 					defer func() { _ = server.Close() }()
 					tt.serve(server, rep)
 				}()
-				got, err := tt.d.Handshake(context.Background(), client, socks5.CmdConnect, socks5.Addr{Name: "example.com", Port: 80})
+				got, err := tt.d.Handshake(context.Background(), client, socks5.CmdConnect, netx.Addr{Name: "example.com", Port: 80})
 				var replyErr *socks5.ReplyError
 				switch {
 				case rep == socks5.ReplySucceeded && (err != nil || got != bound):
@@ -501,7 +501,7 @@ func TestServerHandshakeKeepsAuthenticatorTimeout(t *testing.T) {
 		done <- err
 	}()
 	d := &socks5.Dialer{Username: "alice", Password: "secret"}
-	if _, err := d.Handshake(context.Background(), client, socks5.CmdConnect, socks5.Addr{Name: "example.com", Port: 80}); !errors.Is(err, socks5.ErrAuthFailed) {
+	if _, err := d.Handshake(context.Background(), client, socks5.CmdConnect, netx.Addr{Name: "example.com", Port: 80}); !errors.Is(err, socks5.ErrAuthFailed) {
 		t.Fatalf("client Handshake() = %v, want ErrAuthFailed", err)
 	}
 	err := <-done
@@ -616,7 +616,7 @@ func TestServerServeConnContext(t *testing.T) {
 	defer cancel()
 	served := make(chan error, 1)
 	go func() { served <- s.ServeConn(ctx, server) }()
-	dst, _ := socks5.ParseAddr(target)
+	dst, _ := netx.ParseAddr(target)
 	if _, err := (&socks5.Dialer{}).Handshake(context.Background(), client, socks5.CmdConnect, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +645,7 @@ func TestServerHandleCustomCommand(t *testing.T) {
 		if req.Command != socks5.CmdBind {
 			return false, nil
 		}
-		if err := req.Reply(socks5.ReplySucceeded, socks5.Addr{IP: netip.MustParseAddr("192.0.2.3"), Port: 3}); err != nil {
+		if err := req.Reply(socks5.ReplySucceeded, netx.Addr{IP: netip.MustParseAddr("192.0.2.3"), Port: 3}); err != nil {
 			return true, err
 		}
 		close(entered)
@@ -665,7 +665,7 @@ func TestServerHandleCustomCommand(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	bound, err := (&socks5.Dialer{}).Handshake(context.Background(), c, socks5.CmdBind, socks5.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1})
+	bound, err := (&socks5.Dialer{}).Handshake(context.Background(), c, socks5.CmdBind, netx.Addr{IP: netip.MustParseAddr("198.51.100.1"), Port: 1})
 	if err != nil || bound.Port != 3 {
 		t.Fatalf("BIND reply = %v, %v", bound, err)
 	}
@@ -704,7 +704,7 @@ func TestServerHandleRefuses(t *testing.T) {
 		OnError: func(_ net.Conn, err error) { reported <- err },
 	})
 	c := handshake(t, addr)
-	if err := socks5.WriteRequest(c, socks5.CmdConnect, socks5.Addr{Name: "example.com", Port: 80}); err != nil {
+	if err := socks5.WriteRequest(c, socks5.CmdConnect, netx.Addr{Name: "example.com", Port: 80}); err != nil {
 		t.Fatal(err)
 	}
 	var replyErr *socks5.ReplyError
@@ -731,15 +731,15 @@ func TestServerRefusalKeepsCause(t *testing.T) {
 	})
 	for _, tt := range []struct {
 		cmd  socks5.Command
-		port uint16
 		code socks5.Reply
+		port uint16
 		want string
 	}{
-		{socks5.CmdConnect, 25, socks5.ReplyNotAllowed, "socks5: connection not allowed by ruleset: blocked by policy"},
-		{socks5.CmdBind, 80, socks5.ReplyCommandNotSupported, "socks5: command not supported: bind"},
+		{socks5.CmdConnect, socks5.ReplyNotAllowed, 25, "socks5: connection not allowed by ruleset: blocked by policy"},
+		{socks5.CmdBind, socks5.ReplyCommandNotSupported, 80, "socks5: command not supported: bind"},
 	} {
 		c := handshake(t, addr)
-		if err := socks5.WriteRequest(c, tt.cmd, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: tt.port}); err != nil {
+		if err := socks5.WriteRequest(c, tt.cmd, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: tt.port}); err != nil {
 			t.Fatal(err)
 		}
 		var replyErr *socks5.ReplyError
@@ -852,7 +852,7 @@ func TestUDPConnAsNetPacketConn(t *testing.T) {
 		t.Fatalf("WriteTo(unix address) = %v, want ErrInvalidAddr", err)
 	}
 	buf := make([]byte, 64)
-	for _, dst := range []net.Addr{echo, socks5.AddrFromNetAddr(echo)} {
+	for _, dst := range []net.Addr{echo, netx.AddrFromNetAddr(echo)} {
 		var n int
 		var src net.Addr
 		for range 10 {
@@ -871,7 +871,7 @@ func TestUDPConnAsNetPacketConn(t *testing.T) {
 			t.Fatalf("source = %#v, want the *net.UDPAddr %v", src, echo)
 		}
 	}
-	if got := socks5.AddrFromNetAddr(socks5.Addr{Name: "example.com", Port: 53}); got.Name != "example.com" || got.Port != 53 {
+	if got := netx.AddrFromNetAddr(netx.Addr{Name: "example.com", Port: 53}); got.Name != "example.com" || got.Port != 53 {
 		t.Fatalf("AddrFromNetAddr(Addr) = %v", got)
 	}
 }
@@ -891,7 +891,7 @@ func TestRequestReplyLimit(t *testing.T) {
 		req := &socks5.Request{Version: socks5.Version5, Command: tt.cmd, Conn: bufConn{&wire}}
 		n := 0
 		for i, code := range tt.codes {
-			err := req.Reply(code, socks5.Addr{})
+			err := req.Reply(code, netx.Addr{})
 			if (i < tt.want) != (err == nil) || err != nil && !errors.Is(err, socks5.ErrReplied) {
 				t.Fatalf("%v reply %d = %v", tt.cmd, i, err)
 			}
@@ -924,7 +924,7 @@ func TestServerHandleRepliedIsHandled(t *testing.T) {
 	reported := make(chan error, 1)
 	addr := serve(t, &socks5.Server{
 		Handle: func(_ context.Context, req *socks5.Request) (bool, error) {
-			return false, req.Reply(socks5.ReplyNotAllowed, socks5.Addr{})
+			return false, req.Reply(socks5.ReplyNotAllowed, netx.Addr{})
 		},
 		Dial: func(context.Context, *socks5.Request) (net.Conn, error) {
 			dialed <- struct{}{}
@@ -933,7 +933,7 @@ func TestServerHandleRepliedIsHandled(t *testing.T) {
 		OnError: func(_ net.Conn, err error) { reported <- err },
 	})
 	c := handshake(t, addr)
-	if err := socks5.WriteRequest(c, socks5.CmdConnect, socks5.Addr{Name: "example.com", Port: 80}); err != nil {
+	if err := socks5.WriteRequest(c, socks5.CmdConnect, netx.Addr{Name: "example.com", Port: 80}); err != nil {
 		t.Fatal(err)
 	}
 	var replyErr *socks5.ReplyError
@@ -1032,13 +1032,13 @@ func TestCredentials(t *testing.T) {
 
 // AddrFromNetAddr returns the zero Addr for nil pointers of any type.
 func TestAddrFromNilPointers(t *testing.T) {
-	for _, a := range []net.Addr{(*socks5.Addr)(nil), (*net.IPAddr)(nil), (*net.UnixAddr)(nil), (*net.TCPAddr)(nil)} {
-		if got := socks5.AddrFromNetAddr(a); got != (socks5.Addr{}) {
+	for _, a := range []net.Addr{(*netx.Addr)(nil), (*net.IPAddr)(nil), (*net.UnixAddr)(nil), (*net.TCPAddr)(nil)} {
+		if got := netx.AddrFromNetAddr(a); got != (netx.Addr{}) {
 			t.Errorf("AddrFromNetAddr(%T nil) = %v", a, got)
 		}
 	}
 	u := &socks5.UDPConn{}
-	if _, err := u.AsNetPacketConn().WriteTo(nil, (*socks5.Addr)(nil)); !errors.Is(err, socks5.ErrInvalidAddr) {
+	if _, err := u.AsNetPacketConn().WriteTo(nil, (*netx.Addr)(nil)); !errors.Is(err, socks5.ErrInvalidAddr) {
 		t.Fatalf("WriteTo(nil *Addr) = %v, want ErrInvalidAddr", err)
 	}
 }

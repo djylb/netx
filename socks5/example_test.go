@@ -32,7 +32,7 @@ func Example() {
 			return
 		}
 		fmt.Println("server:", cmd, dst)
-		_ = socks5.WriteReply(server, socks5.ReplySucceeded, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 40000})
+		_ = socks5.WriteReply(server, socks5.ReplySucceeded, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 40000})
 	}()
 
 	if err := socks5.WriteMethods(client, socks5.MethodNoAuth); err != nil {
@@ -41,7 +41,7 @@ func Example() {
 	if _, err := socks5.ReadMethod(client); err != nil {
 		log.Fatal(err)
 	}
-	dst, _ := socks5.ParseAddr("example.com:443")
+	dst, _ := netx.ParseAddr("example.com:443")
 	if err := socks5.WriteRequest(client, socks5.CmdConnect, dst); err != nil {
 		log.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func Example() {
 }
 
 func ExampleDecodeDatagram() {
-	packet, _ := socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("198.51.100.7"), Port: 53}, []byte("query"))
+	packet, _ := socks5.AppendDatagram(nil, netx.Addr{IP: netip.MustParseAddr("198.51.100.7"), Port: 53}, []byte("query"))
 	dst, n, err := socks5.DecodeDatagram(packet)
 	fmt.Println(dst, string(packet[n:]), err)
 	// Output: 198.51.100.7:53 query <nil>

@@ -8,6 +8,24 @@ import (
 // relayDirection copies src to dst for Relay and Copy, through f when it is
 // active.
 func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int64, error) {
+	// A RelayEnd is copied as its reader and writer are.
+	for {
+		e, ok := dst.(*RelayEnd)
+		if !ok || e == nil {
+			break
+		}
+		dst = e.Writer
+	}
+	for {
+		e, ok := src.(*RelayEnd)
+		if !ok || e == nil {
+			break
+		}
+		src = e.Reader
+	}
+	if c, ok := src.(*ChainReader); ok && c != nil {
+		return copyChain(ctx, dst, c, f)
+	}
 	e := newRelayEnds(dst, src)
 	s, d := &e.src, &e.dst
 	if !f.active() {
@@ -210,7 +228,7 @@ func copyStream(ctx context.Context, dst io.Writer, s *relaySource, f *RelayFlow
 // copyDatagrams copies each datagram that a Read of s returns to dst with
 // one Write, empty datagrams included, which io.Copy would drop.
 func copyDatagrams(ctx context.Context, dst io.Writer, s *relaySource, f *RelayFlow) (int64, error) {
-	if s.datagrams != nil && !s.prefixPending() {
+	if s.datagrams != nil && !s.prefixPending() && s.limit == nil {
 		return copySourceDatagrams(ctx, dst, s.datagrams, s.timeouts, f)
 	}
 	paced := f != nil && f.Wait != nil

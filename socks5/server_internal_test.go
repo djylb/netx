@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx"
 )
 
 // An association whose first-datagram timer fires before it is added to the
@@ -32,14 +34,13 @@ func TestServerUDPDoesNotKeepEndedAssociations(t *testing.T) {
 		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 		_ = WriteMethods(c, MethodNoAuth)
 		_, _ = ReadMethod(c)
-		_ = WriteRequest(c, CmdUDPAssociate, Addr{})
+		_ = WriteRequest(c, CmdUDPAssociate, netx.Addr{})
 		_, _ = ReadReply(c)
 		_, _ = c.Read(make([]byte, 1)) // until the server ends it
 		_ = c.Close()
 	}
-	s.mu.Lock()
-	r := s.shared
-	s.mu.Unlock()
+	var r *udpRelay
+	s.life.Locked(func(bool) { r = s.shared })
 	if r == nil {
 		t.Fatal("no shared relay")
 	}

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/djylb/netx"
@@ -190,4 +191,15 @@ func ExamplePacketListener() {
 			}
 		}()
 	}
+}
+
+// Convert the source of a datagram, as net.UDPConn.ReadFromUDPAddrPort
+// returns it, to an Addr; an IPv4 peer of a dual-stack socket comes as an
+// IPv4-mapped IPv6 address, and a link-local one with a zone.
+func ExampleAddrFromAddrPort() {
+	fmt.Println(netx.AddrFromAddrPort(netip.MustParseAddrPort("[::ffff:192.0.2.1]:53")))
+	fmt.Println(netx.AddrFromAddrPort(netip.MustParseAddrPort("[fe80::1%eth0]:5353")))
+	// Output:
+	// 192.0.2.1:53
+	// [fe80::1]:5353
 }

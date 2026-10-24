@@ -13,12 +13,15 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/proxyproto`  | PROXY protocol v1 and v2: build, decode, header-reading conn and listener    |
 | `github.com/djylb/netx/transparent` | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations   |
 | `github.com/djylb/netx/socks5`      | SOCKS5 and SOCKS4 codec, client dialer and a configurable server             |
+| `github.com/djylb/netx/httpproxy`   | HTTP proxy server: CONNECT tunnels and request forwarding                    |
+| `github.com/djylb/netx/httphead`    | HTTP/1.x head reader and parser: fields, body framing, request targets       |
 | `github.com/djylb/netx/proxydial`   | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`   |
 
 Each package depends only on the standard library and links only what it uses.
 `crypto/tls` adds a large amount of code to a binary as soon as it is
 imported, so only `tlsconn` and `proxydial` (for `https` proxies) import it; the
-root package, `proxyproto`, `transparent` and `socks5` stay small.
+root package, `proxyproto`, `transparent`, `socks5`, `httpproxy` and `httphead`
+stay small.
 
 ## Install
 
@@ -421,6 +424,45 @@ wrapped so that closing it also removes it, with no `remove` to call; Relay
 looks through the wrapper. Hooks such as `RelayFlow.Done` may call
 `CloseMembers` themselves.
 
+Exchanges over connections that carry more afterwards, such as an HTTP
+request and its response on a kept-alive connection, relay parts of them:
+
+```go
+// relayExchange relays a head and a body of n bytes from client to backend,
+// and back the response that next returns, leaving both connections open
+// for the next exchange when it ends well.
+func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n int64,
+	next func() (io.Reader, error), done func() error) error {
+	parts := []io.Reader{bytes.NewReader(head), &io.LimitedReader{R: client, N: n}}
+	request := &netx.ChainReader{Next: func() (io.Reader, error) {
+		if len(parts) == 0 {
+			return nil, nil
+		}
+		p := parts[0]
+		parts = parts[1:]
+		return p, nil
+	}}
+	_, _, err := netx.Relay(ctx,
+		&netx.RelayEnd{Reader: request, Writer: client, CloseFunc: done},
+		&netx.RelayEnd{Reader: &netx.ChainReader{Next: next}, Writer: backend, CloseFunc: done},
+		netx.WithRelayHalfClose())
+	return err
+}
+```
+
+- `RelayEnd{Reader, Writer, CloseWriteFunc, CloseFunc}` is an end made of
+  parts: Relay reads `Reader` and writes `Writer` as it would as ends of their
+  own, and calls the functions instead of closing, which leaves the
+  connections open after an exchange that ended well. A relay that stops
+  early closes its ends to end blocked reads and writes, so `CloseFunc` must
+  close then.
+- `ChainReader{Next}` reads parts one after another, asking for the next one
+  each time a part ends, so that a body can follow a head that tells its
+  length. Relay and `Copy` copy each part as a source of its own.
+- An `*io.LimitedReader` over a connection is copied as the connection is,
+  splicing at most `N` bytes, so a body of known length moves through the
+  kernel while the bytes after it stay unread.
+
 #### How Relay copies
 
 - On Linux and Android, a direction between two `*net.TCPConn`s, or between a
@@ -599,6 +641,28 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   `net.ListenUDP("udp", nil)` does, except that on macOS and iOS it never takes
   a port that another socket holds on one IPv4 address, such as `127.0.0.1`,
   which would receive the replies sent there.
+
+## Addresses
+
+`netx.Addr` is a destination as proxy requests name it: an IP address
+(`netip.Addr`) or a host name, and a port. `socks5` and `httpproxy` use it
+for request destinations, so one policy serves both.
+
+```go
+dst, _ := netx.ParseAddr("LOCALHOST:443") // {Name: "localhost", Port: 443}
+ip, _ := netx.ParseAddr("[::ffff:127.0.0.1]:80") // {IP: 127.0.0.1, Port: 80}
+fromName := netx.HostAddr("127.0.0.1.", 80)    // {IP: 127.0.0.1, Port: 80}
+```
+
+- `HostAddr(host, port)`, `ParseAddr`, `AddrFromAddrPort` and
+  `AddrFromNetAddr` normalise: every IP address goes into `IP` in one form,
+  IPv4-mapped IPv6 as IPv4 and without a zone, also when it comes as a name
+  that is an IP literal or one with a trailing dot; names are lowercased and
+  never resolved. A policy on IP addresses must therefore also check where
+  names resolve to, in the dialer, since some resolvers read `127.1` or
+  `0x7f.0.0.1` as addresses.
+- `String` gives `host:port` for `net.Dial`, `Host` the host alone, and the
+  zero `Addr` prints as `0.0.0.0:0`.
 
 ## Error Helpers
 
@@ -933,28 +997,28 @@ neither dial nor listen, and every message is written with a single `Write`.
 
 ```go
 // handshake runs the server side of a SOCKS5 CONNECT without authentication.
-func handshake(c net.Conn) (socks5.Addr, error) {
+func handshake(c net.Conn) (netx.Addr, error) {
 	methods, err := socks5.ReadMethods(c)
 	if err != nil {
-		return socks5.Addr{}, err
+		return netx.Addr{}, err
 	}
 	if !slices.Contains(methods, socks5.MethodNoAuth) {
 		_ = socks5.WriteMethod(c, socks5.MethodNoAcceptable)
-		return socks5.Addr{}, socks5.ErrNoAcceptableMethod
+		return netx.Addr{}, socks5.ErrNoAcceptableMethod
 	}
 	if err := socks5.WriteMethod(c, socks5.MethodNoAuth); err != nil {
-		return socks5.Addr{}, err
+		return netx.Addr{}, err
 	}
 	cmd, dst, err := socks5.ReadRequest(c)
 	switch {
 	case errors.Is(err, socks5.ErrAddrType):
-		_ = socks5.WriteReply(c, socks5.ReplyAddrTypeNotSupported, socks5.Addr{})
-		return socks5.Addr{}, err
+		_ = socks5.WriteReply(c, socks5.ReplyAddrTypeNotSupported, netx.Addr{})
+		return netx.Addr{}, err
 	case err != nil:
-		return socks5.Addr{}, err
+		return netx.Addr{}, err
 	case cmd != socks5.CmdConnect:
-		_ = socks5.WriteReply(c, socks5.ReplyCommandNotSupported, socks5.Addr{})
-		return socks5.Addr{}, fmt.Errorf("unsupported %v", cmd)
+		_ = socks5.WriteReply(c, socks5.ReplyCommandNotSupported, netx.Addr{})
+		return netx.Addr{}, fmt.Errorf("unsupported %v", cmd)
 	}
 	return dst, nil // dial dst, then socks5.WriteReply(c, socks5.ReplySucceeded, bound)
 }
@@ -966,13 +1030,14 @@ func udpRelay(packet []byte, exchange func(dst string, payload []byte) (net.Addr
 		return nil, err
 	}
 	from, answer := exchange(dst.String(), packet[n:])
-	return socks5.AppendDatagram(nil, socks5.AddrFromNetAddr(from), answer)
+	return socks5.AppendDatagram(nil, netx.AddrFromNetAddr(from), answer)
 }
 ```
 
-- `Addr` holds an IP address (`netip.Addr`) or a domain name, and a port.
-  IPv4-mapped addresses are sent as IPv4, zones are dropped, and the zero
-  `Addr` is sent as `0.0.0.0:0`.
+- Addresses are `netx.Addr` values, an IP address (`netip.Addr`) or a
+  domain name, and a port (see [Addresses](#addresses)). `AppendAddr`
+  encodes one: IPv4-mapped addresses are sent as IPv4, zones are dropped,
+  and the zero `Addr` is sent as `0.0.0.0:0`.
 - `ReadReply` returns a `*socks5.ReplyError` for a reply other than
   `ReplySucceeded`. `DecodeAddr` decodes an address embedded in another
   message. `DecodeDatagram` returns the address and the header length (the
@@ -1020,7 +1085,7 @@ your own.
 `ReadFrom`, accepting datagrams only from the proxy's relay. Closing it ends
 the association, and the proxy closing the control connection closes it.
 `AsNetPacketConn` adapts it to `net.PacketConn` for code that sends to and
-receives from `net.Addr` (`*net.UDPAddr` for IP sources, a `socks5.Addr` for
+receives from `net.Addr` (`*net.UDPAddr` for IP sources, a `netx.Addr` for
 names). Because it is a `socks5.PacketConn`, a `Server` can relay UDP through
 another proxy:
 
@@ -1146,6 +1211,167 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   credentials), and reserved bytes and the username/password version byte are
   not checked. A custom `MethodNoAuth` authenticator, such as an IP allowlist,
   still decides on those clients and on SOCKS4 ones.
+
+## HTTP Proxy
+
+`github.com/djylb/netx/httpproxy` is an HTTP/1.x proxy server. It serves
+`CONNECT` with a tunnel, and forwards requests for absolute `http` URIs
+(`GET http://example.com/ HTTP/1.1`), streaming bodies both ways, with
+several requests per client connection, also to different hosts, over
+connections to targets that it keeps for later requests. On Linux, tunnels
+and bodies of a known length are spliced. It parses HTTP with `httphead`
+rather than `net/http`, which would add about 1.7 MB and `crypto/tls` to a
+program (linux/amd64, stripped).
+
+```go
+func runHTTPProxy(ln net.Listener) error {
+	s := &httpproxy.Server{
+		Auth: []httpproxy.Authenticator{
+			httpproxy.Credentials(map[string]string{"alice": "secret"}),
+		},
+		Allow: func(ctx context.Context, req *httpproxy.Request) error {
+			if req.Dst.Port == 25 {
+				return &httpproxy.StatusError{Code: 403}
+			}
+			return nil
+		},
+		RelayOptions: func(*httpproxy.Request) []netx.RelayOption {
+			return []netx.RelayOption{netx.WithRelayIdleTimeout(5 * time.Minute)}
+		},
+	}
+	return s.Serve(ln)
+}
+```
+
+- `Server` has the shape of `socks5.Server`, so that one policy serves both
+  on one port: the hooks `Auth`, `Allow`, `Handle`, `Dial`, `RelayOptions`
+  and `OnError` have the same signatures over `*httpproxy.Request`, whose
+  `Dst` is a `netx.Addr`, `User` the authenticated identity and `Conn` the
+  client connection. `BasicAuth.Check` has the signature of
+  `socks5.UserPassAuth.Check`, so one function, such as
+  `socks5.Credentials(accounts).Check`, checks the clients of both.
+  `StatusError{Code, Err}` and `StatusFor(err)` are the counterparts of
+  `socks5.ReplyError` and `ReplyFor`: a dial timeout is `504`, a refused or
+  unreachable target `502`, and an `Allow` error `403` unless it carries
+  another code.
+- `Auth` lists authenticators by scheme; requests without credentials get
+  `407` with a `Proxy-Authenticate` challenge for each, on a connection that
+  stays open for the retry, unless the list holds a `NoAuth` authenticator,
+  which then decides on them. Every request is authenticated: a later
+  request of a kept-alive connection without the credentials is refused, and
+  only credentials identical to ones that passed are not checked again. Only
+  Basic is built in; Digest and other per-request schemes can be added as an
+  `Authenticator`, while connection-based ones such as NTLM are not
+  supported.
+- `RelayOptions` applies to the `netx.Relay` of every tunnel and of every
+  forwarded request, whose relay carries the request to the target and the
+  responses back, so `WithRelayFlows` paces and counts both exactly, per
+  `req.User`, also where bodies are spliced, and `WithRelayIdleTimeout`
+  bounds stalled bodies and the wait for a response. `OnDone(req, Result)`
+  reports each request's status, bytes each way, whether its target
+  connection was reused, and its error, for access logs.
+- Connections to targets are kept per reuse key, `Dst` and `User` by
+  default: a `Dial` that depends on more, such as a field, needs a
+  `ReuseKey`, which can also return false to keep none for a request.
+  `MaxIdleConnsPerKey` (16), `MaxIdleConns` (1024) and `IdleConnTimeout`
+  (90 s) bound them; a negative `MaxIdleConnsPerKey` keeps none. A kept
+  connection that the target closes, or that sends anything unasked, leaves
+  the pool at once, and a request that finds one dead before any response
+  is sent again on a new one only when it is idempotent and has no body;
+  nothing else is ever sent twice. A response with `Connection: close`, or
+  read until close, ends its target connection. `Shutdown` and `Close` close
+  the kept connections.
+- Forwarding follows RFC 9110 and 9112: the fields of one connection
+  (`Connection` and those it lists, `Keep-Alive`, `Proxy-Connection`,
+  `Proxy-Authorization`, `TE`, `Upgrade`) are removed, `Host` comes from the
+  URI, requests go out as HTTP/1.1, and the server writes the framing
+  itself, `Content-Length` or chunked, with the chunks of a chunked body
+  decoded strictly and encoded again, so that the target reads the body the
+  way the server did; trailers are passed on without fields that framing or
+  routing depend on. `Via` adds the proxy to `Via`, and `ForwardHeader` and
+  `ResponseHeader` can add fields such as `X-Forwarded-For` or `Forwarded`;
+  fields that could inject a line are refused. Interim responses such as
+  `100 Continue` are passed on to HTTP/1.1 clients; HTTP/1.0 clients, also
+  with `Connection: keep-alive`, get chunked responses without chunking and
+  responses read until close are re-chunked for HTTP/1.1 clients; transfer
+  codings before `chunked` in a response, such as `gzip, chunked`, are
+  passed on. `HEAD`, `1xx`, `204` and `304` responses have no body. `Upgrade`
+  requests, such as WebSocket, become a relay once the target switches
+  protocols. `TRACE` and `OPTIONS` with `Max-Forwards: 0` are answered by the
+  proxy, which counts other values down, and `OPTIONS *` is answered too.
+- `Intercept` forwards requests for a path, as clients send to the origin,
+  for connections redirected to the proxy: `httpproxy.HostDst` takes the
+  destination from `Host`, and a hook of your own can use the original
+  destination of a redirected connection.
+- Requests that could be read in two ways are refused and end the
+  connection: `Content-Length` with `Transfer-Encoding`, differing lengths,
+  transfer codings other than `chunked`, `Transfer-Encoding` in HTTP/1.0,
+  obsolete line folding, whitespace before a colon, control characters in
+  fields, two `Host` fields and user information in the URI. After a reply
+  that ends a connection while the client may still be sending, the server
+  reads on for up to 500 ms or 256 KiB, so that the reply is not lost to a
+  reset. Heads are bounded by `MaxHeaderBytes` (64 KiB), reading them by
+  `HandshakeTimeout`, idle kept-alive connections by `IdleTimeout`, and the
+  wait for a response head, if set, by `ResponseHeaderTimeout` (`504`).
+- For non-standard clients, `CONNECT` is also taken in lower case, without a
+  `Host` field and without a port (443), lines may end in LF alone, and
+  empty lines before a request are skipped.
+- The zero `Server` is an open proxy, as the zero `socks5.Server` is: serve it
+  only to trusted clients, or set `Auth` and `Allow`; as there, `Allow` sees
+  names unresolved, so check resolved addresses in `Dial`. `CONNECT` reaches
+  any port that `Allow` lets through.
+- `Dial` can reach targets through another proxy, such as a
+  `proxydial.HTTPDialer` or `socks5.Dialer`, which chains them.
+- `ServeConn(ctx, conn)` serves any `net.Conn`, such as a TLS connection or a
+  `netx.PrefixConn` from `netx.Peek`, so one port can serve SOCKS, HTTP
+  proxy requests and both over TLS:
+
+```go
+func serveMixed(ctx context.Context, c net.Conn, socks *socks5.Server, web *httpproxy.Server, cfg *tls.Config) {
+	c, first, err := netx.Peek(ctx, c, 1)
+	if err != nil || len(first) == 0 {
+		_ = c.Close()
+		return
+	}
+	switch first[0] {
+	case socks5.Version5, socks5.Version4:
+		_ = socks.ServeConn(ctx, c)
+	case 0x16: // TLS: an https proxy or SOCKS over TLS
+		if tc, err := tlsconn.Server(ctx, c, cfg); err == nil {
+			serveMixed(ctx, tc, socks, web, nil)
+		}
+	default:
+		_ = web.ServeConn(ctx, c)
+	}
+}
+```
+
+### HTTP heads
+
+`github.com/djylb/netx/httphead` reads and parses HTTP/1.x heads on its own,
+for sniffers and servers, with the standard library alone:
+
+```go
+head, err := httphead.Read(br, nil, 64<<10) // up to the empty line; the body stays in br
+req, err := httphead.ParseRequest(string(head), nil)
+target, err := httphead.ParseTarget(req.Method, req.Target)
+framing, n, err := httphead.RequestBody(req.Header, req.Minor)
+```
+
+- `Read` reads a head into a reused buffer, also with lines longer than the
+  reader's buffer, skipping empty lines before it; `ParseRequest`,
+  `ParseResponse` and `ParseHeader` split it into one string's substrings,
+  keeping the fields' order and names. They refuse what two readers could
+  read differently: CR inside a line, obsolete line folding, whitespace
+  before a colon, names that are not tokens and control characters in
+  values (`ErrMalformed`); versions other than 1.x give `ErrVersion`.
+- `RequestBody` and `ResponseBody` tell how a body is delimited, refusing
+  `Content-Length` with `Transfer-Encoding` in requests and differing
+  lengths, and `ParseChunkSize` reads chunk-size lines; `ParseTarget` splits
+  a request-target in any of its four forms.
+- `Header` has `Get`, `Values`, `Count`, `Has`, `HasToken`, `Add`, `Set` and
+  `Del`, and `AppendTo` writes it back, refusing fields that would add a
+  line.
 
 ## Upstream Proxies
 

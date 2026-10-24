@@ -113,7 +113,7 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 			}
 			// A full pipe is a full read, which the next piece reads
 			// without waiting.
-			want = min(want, p.size)
+			want = int(s.limited(int64(min(want, p.size))))
 			m, err := syscall.Splice(int(fd), nil, p.fds[1], nil, want, spliceMove|spliceNonblock)
 			switch err {
 			case syscall.EINTR:
@@ -125,6 +125,7 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 				return false
 			}
 			inPipe, spliceErr = max(int(m), 0), err
+			s.consumed(inPipe)
 			return true
 		}
 	}
@@ -166,6 +167,9 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 			if n, err = f.wait(ctx, maxSpliceSize); err != nil {
 				return written, true, err
 			}
+		}
+		if s.exhausted() {
+			return written, true, nil // the bound ends the source
 		}
 		want, noPipe, spliceErr = int(n), false, nil
 		if err := s.timeouts.refresh(); err != nil {

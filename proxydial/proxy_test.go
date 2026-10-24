@@ -213,7 +213,7 @@ func TestHTTPSProxyUsesTLS(t *testing.T) {
 
 // socksServer answers one SOCKS5 handshake. It accepts credentials alice/pw
 // when user/password authentication is offered.
-func socksServer(t *testing.T, reply socks5.Reply, requests chan<- socks5.Addr) string {
+func socksServer(t *testing.T, reply socks5.Reply, requests chan<- netx.Addr) string {
 	return serveOnce(t, func(c net.Conn) {
 		methods, err := socks5.ReadMethods(c)
 		if err != nil {
@@ -242,7 +242,7 @@ func socksServer(t *testing.T, reply socks5.Reply, requests chan<- socks5.Addr) 
 			return
 		}
 		requests <- dst
-		_ = socks5.WriteReply(c, reply, socks5.Addr{})
+		_ = socks5.WriteReply(c, reply, netx.Addr{})
 		if reply == socks5.ReplySucceeded {
 			echoAfter(c, "")
 		}
@@ -251,13 +251,13 @@ func socksServer(t *testing.T, reply socks5.Reply, requests chan<- socks5.Addr) 
 
 func TestSOCKS5(t *testing.T) {
 	for _, scheme := range []string{"socks5", "socks5h"} {
-		requests := make(chan socks5.Addr, 1)
+		requests := make(chan netx.Addr, 1)
 		addr := socksServer(t, socks5.ReplySucceeded, requests)
 		conn, err := mustDialer(t, scheme+"://alice:pw@"+addr).DialContext(context.Background(), "tcp", "example.com:443")
 		if err != nil {
 			t.Fatalf("%s DialContext() error = %v", scheme, err)
 		}
-		if got := <-requests; got != (socks5.Addr{Name: "example.com", Port: 443}) {
+		if got := <-requests; got != (netx.Addr{Name: "example.com", Port: 443}) {
 			t.Fatalf("%s request = %v, want example.com:443 by name", scheme, got)
 		}
 		_, _ = io.WriteString(conn, "ping")
@@ -270,7 +270,7 @@ func TestSOCKS5(t *testing.T) {
 }
 
 func TestSOCKS5Failures(t *testing.T) {
-	requests := make(chan socks5.Addr, 1)
+	requests := make(chan netx.Addr, 1)
 	addr := socksServer(t, socks5.ReplySucceeded, requests)
 	_, err := mustDialer(t, "socks5://alice:wrong@"+addr).DialContext(context.Background(), "tcp", "example.com:1")
 	if !errors.Is(err, socks5.ErrAuthFailed) {

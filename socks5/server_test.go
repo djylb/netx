@@ -131,7 +131,7 @@ func TestServerReplies(t *testing.T) {
 	// BIND and, without a UDP socket, UDP ASSOCIATE are not supported.
 	for _, cmd := range []socks5.Command{socks5.CmdBind, socks5.CmdUDPAssociate} {
 		c := handshake(t, addr)
-		if err := socks5.WriteRequest(c, cmd, socks5.Addr{}); err != nil {
+		if err := socks5.WriteRequest(c, cmd, netx.Addr{}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := socks5.ReadReply(c)
@@ -144,7 +144,7 @@ func TestServerReplies(t *testing.T) {
 
 func TestServerHooks(t *testing.T) {
 	type call struct {
-		dst  socks5.Addr
+		dst  netx.Addr
 		user string
 	}
 	calls := make(chan call, 1)
@@ -162,7 +162,7 @@ func TestServerHooks(t *testing.T) {
 		},
 	})
 	c := handshake(t, addr)
-	if err := socks5.WriteRequest(c, socks5.CmdConnect, socks5.Addr{Name: "virtual.example", Port: 9}); err != nil {
+	if err := socks5.WriteRequest(c, socks5.CmdConnect, netx.Addr{Name: "virtual.example", Port: 9}); err != nil {
 		t.Fatal(err)
 	}
 	bound, err := socks5.ReadReply(c)
@@ -290,7 +290,7 @@ func udpEcho(t *testing.T) *net.UDPAddr {
 
 // associate opens a UDP association announcing announced and returns the
 // control connection and the relay address.
-func associate(t *testing.T, addr string, announced socks5.Addr) (net.Conn, *net.UDPAddr) {
+func associate(t *testing.T, addr string, announced netx.Addr) (net.Conn, *net.UDPAddr) {
 	t.Helper()
 	c := handshake(t, addr)
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
@@ -307,9 +307,9 @@ func associate(t *testing.T, addr string, announced socks5.Addr) (net.Conn, *net
 
 // exchange sends payload to dst through relay from client and returns the
 // reply, or "" on timeout.
-func exchange(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UDPAddr, payload string) (string, socks5.Addr) {
+func exchange(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UDPAddr, payload string) (string, netx.Addr) {
 	t.Helper()
-	packet, _ := socks5.AppendDatagram(nil, socks5.AddrFromNetAddr(dst), []byte(payload))
+	packet, _ := socks5.AppendDatagram(nil, netx.AddrFromNetAddr(dst), []byte(payload))
 	if _, err := client.WriteToUDP(packet, relay); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func exchange(t *testing.T, client *net.UDPConn, relay *net.UDPAddr, dst *net.UD
 	_ = client.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	n, _, err := client.ReadFromUDP(buf)
 	if err != nil {
-		return "", socks5.Addr{}
+		return "", netx.Addr{}
 	}
 	src, h, err := socks5.DecodeDatagram(buf[:n])
 	if err != nil {
@@ -360,7 +360,7 @@ func TestServerUDPSharedSocket(t *testing.T) {
 	}
 	addr := serve(t, &socks5.Server{UDPSocket: pc})
 
-	ctl, relay := associate(t, addr, socks5.Addr{})
+	ctl, relay := associate(t, addr, netx.Addr{})
 	if relay.String() != pc.LocalAddr().String() {
 		t.Fatalf("relay address = %v, want the shared socket %v", relay, pc.LocalAddr())
 	}
@@ -372,8 +372,8 @@ func TestServerUDPSharedSocket(t *testing.T) {
 
 	// Two associations of the same IP that announced their sources.
 	a, b := newUDPClient(t), newUDPClient(t)
-	_, relayA := associate(t, addr, socks5.AddrFromNetAddr(a.LocalAddr()))
-	_, relayB := associate(t, addr, socks5.AddrFromNetAddr(b.LocalAddr()))
+	_, relayA := associate(t, addr, netx.AddrFromNetAddr(a.LocalAddr()))
+	_, relayB := associate(t, addr, netx.AddrFromNetAddr(b.LocalAddr()))
 	if got, _ := exchange(t, b, relayB, echo, "b"); got != "echo:b" {
 		t.Fatalf("announced b reply = %q", got)
 	}
@@ -382,8 +382,8 @@ func TestServerUDPSharedSocket(t *testing.T) {
 	}
 
 	// Two unannounced associations of one IP are ambiguous for a new source.
-	associate(t, addr, socks5.Addr{})
-	associate(t, addr, socks5.Addr{})
+	associate(t, addr, netx.Addr{})
+	associate(t, addr, netx.Addr{})
 	if got, _ := exchange(t, newUDPClient(t), relay, echo, "ambiguous"); got != "" {
 		t.Fatalf("ambiguous source got reply %q", got)
 	}
@@ -419,7 +419,7 @@ func TestServerUDPPerAssociationSocket(t *testing.T) {
 			return c, nil
 		},
 	})
-	ctl, relay := associate(t, addr, socks5.Addr{})
+	ctl, relay := associate(t, addr, netx.Addr{})
 	pc := <-sockets
 	if relay.String() != pc.LocalAddr().String() {
 		t.Fatalf("relay = %v, want the association socket %v", relay, pc.LocalAddr())
@@ -438,7 +438,7 @@ func TestServerUDPPerAssociationSocket(t *testing.T) {
 func TestServerUDPIdleTimeout(t *testing.T) {
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPIdleTimeout: 100 * time.Millisecond})
-	ctl, _ := associate(t, addr, socks5.Addr{})
+	ctl, _ := associate(t, addr, netx.Addr{})
 	_ = ctl.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("control Read() error = %v, want EOF after the idle timeout", err)
@@ -452,7 +452,7 @@ type memPacketConn struct {
 	once    sync.Once
 }
 
-func (m *memPacketConn) WriteTo(p []byte, dst socks5.Addr) (int, error) {
+func (m *memPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 	select {
 	case m.replies <- append([]byte(dst.String()+"|"), p...):
 	default:
@@ -460,12 +460,12 @@ func (m *memPacketConn) WriteTo(p []byte, dst socks5.Addr) (int, error) {
 	return len(p), nil
 }
 
-func (m *memPacketConn) ReadFrom(p []byte) (int, socks5.Addr, error) {
+func (m *memPacketConn) ReadFrom(p []byte) (int, netx.Addr, error) {
 	select {
 	case r := <-m.replies:
-		return copy(p, r), socks5.Addr{Name: "tunnel.example", Port: 7}, nil
+		return copy(p, r), netx.Addr{Name: "tunnel.example", Port: 7}, nil
 	case <-m.closed:
-		return 0, socks5.Addr{}, net.ErrClosed
+		return 0, netx.Addr{}, net.ErrClosed
 	}
 }
 
@@ -481,21 +481,21 @@ func TestServerUDPCustomEgress(t *testing.T) {
 		DialPacket: func(context.Context, *socks5.Request) (socks5.PacketConn, error) {
 			return &memPacketConn{replies: make(chan []byte, 8), closed: make(chan struct{})}, nil
 		},
-		AllowPacket: func(_ *socks5.Request, dst socks5.Addr) bool { return dst.Name != "blocked.example" },
-		UDPAddr: func(_ *socks5.Request, socket net.Addr) socks5.Addr {
-			return socks5.AddrFromNetAddr(socket)
+		AllowPacket: func(_ *socks5.Request, dst netx.Addr) bool { return dst.Name != "blocked.example" },
+		UDPAddr: func(_ *socks5.Request, socket net.Addr) netx.Addr {
+			return netx.AddrFromNetAddr(socket)
 		},
 	})
-	_, relay := associate(t, addr, socks5.Addr{})
+	_, relay := associate(t, addr, netx.Addr{})
 	client := newUDPClient(t)
-	send := func(dst socks5.Addr, payload string, wait time.Duration) (string, socks5.Addr) {
+	send := func(dst netx.Addr, payload string, wait time.Duration) (string, netx.Addr) {
 		packet, _ := socks5.AppendDatagram(nil, dst, []byte(payload))
 		_, _ = client.WriteToUDP(packet, relay)
 		buf := make([]byte, 2048)
 		_ = client.SetReadDeadline(time.Now().Add(wait))
 		n, _, err := client.ReadFromUDP(buf)
 		if err != nil {
-			return "", socks5.Addr{}
+			return "", netx.Addr{}
 		}
 		src, h, _ := socks5.DecodeDatagram(buf[:n])
 		return string(buf[h:n]), src
@@ -503,16 +503,16 @@ func TestServerUDPCustomEgress(t *testing.T) {
 	// Domain names reach the custom egress unresolved. A loopback datagram
 	// can be lost on a busy host, so it is sent again until answered.
 	var got string
-	var src socks5.Addr
+	var src netx.Addr
 	for range 5 {
-		if got, src = send(socks5.Addr{Name: "dns.example", Port: 53}, "q", time.Second); got != "" {
+		if got, src = send(netx.Addr{Name: "dns.example", Port: 53}, "q", time.Second); got != "" {
 			break
 		}
 	}
 	if got != "dns.example:53|q" || src.String() != "tunnel.example:7" {
 		t.Fatalf("reply = %q from %v", got, src)
 	}
-	if got, _ := send(socks5.Addr{Name: "blocked.example", Port: 53}, "q", 300*time.Millisecond); got != "" {
+	if got, _ := send(netx.Addr{Name: "blocked.example", Port: 53}, "q", 300*time.Millisecond); got != "" {
 		t.Fatalf("blocked destination got reply %q", got)
 	}
 }
@@ -607,7 +607,7 @@ func TestServerCloseDoesNotHoldLockWhileClosing(t *testing.T) {
 func TestServerLenientNegotiation(t *testing.T) {
 	target := echoTCP(t)
 	addr := serve(t, &socks5.Server{})
-	dst, _ := socks5.ParseAddr(target)
+	dst, _ := netx.ParseAddr(target)
 	connect := func(methods []byte, auth bool) net.Conn {
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
@@ -629,7 +629,7 @@ func TestServerLenientNegotiation(t *testing.T) {
 			}
 		}
 		// A non-zero reserved byte in the request.
-		req, _ := dst.AppendBinary([]byte{5, byte(socks5.CmdConnect), 0x7f})
+		req, _ := socks5.AppendAddr([]byte{5, byte(socks5.CmdConnect), 0x7f}, dst)
 		_, _ = c.Write(req)
 		if _, err := socks5.ReadReply(c); err != nil {
 			t.Fatalf("methods %v: reply error = %v", methods, err)
@@ -646,7 +646,7 @@ func TestServerUDPOutlivesControl(t *testing.T) {
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	const idle = time.Second
 	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPOutlivesControl: true, UDPIdleTimeout: idle})
-	ctl, relay := associate(t, addr, socks5.Addr{})
+	ctl, relay := associate(t, addr, netx.Addr{})
 	client := newUDPClient(t)
 	_ = ctl.(*net.TCPConn).CloseWrite()
 	_ = ctl.Close()

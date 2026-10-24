@@ -1,6 +1,10 @@
 package socks5
 
-import "io"
+import (
+	"io"
+
+	"github.com/djylb/netx"
+)
 
 // ReadMethods reads a client's version identifier/method selection message
 // and returns the offered methods.
@@ -124,29 +128,29 @@ func ReadUserPassStatus(r io.Reader) error {
 // answer commands the server does not implement with
 // ReplyCommandNotSupported. ErrAddrType is answered with
 // ReplyAddrTypeNotSupported. The reserved byte is ignored.
-func ReadRequest(r io.Reader) (Command, Addr, error) {
+func ReadRequest(r io.Reader) (Command, netx.Addr, error) {
 	var hdr [3]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return 0, Addr{}, err
+		return 0, netx.Addr{}, err
 	}
 	if hdr[0] != Version5 {
-		return 0, Addr{}, ErrVersion
+		return 0, netx.Addr{}, ErrVersion
 	}
 	addr, err := ReadAddr(r)
 	if err != nil {
-		return 0, Addr{}, err
+		return 0, netx.Addr{}, err
 	}
 	return Command(hdr[1]), addr, nil
 }
 
 // WriteRequest writes a client request for cmd to dst.
-func WriteRequest(w io.Writer, cmd Command, dst Addr) error {
+func WriteRequest(w io.Writer, cmd Command, dst netx.Addr) error {
 	return writeMessage(w, byte(cmd), dst)
 }
 
 // WriteReply writes a server reply carrying the bound address. Failure
-// replies usually carry the zero Addr.
-func WriteReply(w io.Writer, rep Reply, bound Addr) error {
+// replies usually carry the zero netx.Addr.
+func WriteReply(w io.Writer, rep Reply, bound netx.Addr) error {
 	return writeMessage(w, byte(rep), bound)
 }
 
@@ -154,29 +158,29 @@ func WriteReply(w io.Writer, rep Reply, bound Addr) error {
 // than ReplySucceeded is returned as a *ReplyError, also when its address,
 // which servers often leave unset, cannot be read. The reserved byte is
 // ignored.
-func ReadReply(r io.Reader) (Addr, error) {
+func ReadReply(r io.Reader) (netx.Addr, error) {
 	var hdr [3]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	if hdr[0] != Version5 {
-		return Addr{}, ErrVersion
+		return netx.Addr{}, ErrVersion
 	}
 	addr, err := ReadAddr(r)
 	if rep := Reply(hdr[1]); rep != ReplySucceeded {
 		return addr, &ReplyError{Reply: rep}
 	}
 	if err != nil {
-		return Addr{}, err
+		return netx.Addr{}, err
 	}
 	return addr, nil
 }
 
 // writeMessage writes a request or reply: version, code, reserved byte and
 // address.
-func writeMessage(w io.Writer, code byte, addr Addr) error {
+func writeMessage(w io.Writer, code byte, addr netx.Addr) error {
 	var buf [3 + MaxAddrLen]byte
-	msg, err := addr.AppendBinary(append(buf[:0], Version5, code, 0))
+	msg, err := AppendAddr(append(buf[:0], Version5, code, 0), addr)
 	if err != nil {
 		return err
 	}

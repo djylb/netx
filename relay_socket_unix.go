@@ -86,6 +86,9 @@ func socketSource(s *relaySource) relaySocket {
 // report a clean end instead, and the error of the wait itself, as for a
 // closed connection or a passed deadline, as a read would.
 func (s *streamSocket) wait() (bool, error) {
+	if s.src.exhausted() {
+		return true, nil // the bound ends the source
+	}
 	if s.src.prefixPending() {
 		return false, nil
 	}
@@ -110,6 +113,10 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 		n, err := s.src.r.Read(b)
 		return n, false, err
 	}
+	if s.src.exhausted() {
+		return 0, false, io.EOF
+	}
+	b = b[:s.src.limited(int64(len(b)))]
 	if err := s.src.timeouts.refresh(); err != nil {
 		return 0, false, err
 	}
@@ -125,6 +132,7 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 	case s.n == 0 && len(b) > 0:
 		return 0, false, io.EOF
 	}
+	s.src.consumed(s.n)
 	return s.n, false, nil
 }
 

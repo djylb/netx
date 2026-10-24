@@ -34,6 +34,8 @@ package socks5
 import (
 	"errors"
 	"strconv"
+
+	"github.com/djylb/netx"
 )
 
 // Version5 is the version byte of SOCKS5 messages.
@@ -168,8 +170,9 @@ var (
 	// ErrAddrType reports an address type other than IPv4, IPv6 or domain
 	// name. A server answers it with ReplyAddrTypeNotSupported.
 	ErrAddrType = errors.New("socks5: unsupported address type")
-	// ErrInvalidAddr reports an address that cannot be encoded or parsed.
-	ErrInvalidAddr = errors.New("socks5: invalid address")
+	// ErrInvalidAddr reports an address that cannot be encoded or parsed;
+	// it is netx.ErrInvalidAddr.
+	ErrInvalidAddr = netx.ErrInvalidAddr
 	// ErrNoAcceptableMethod is returned by ReadMethod when the server accepts
 	// none of the offered methods.
 	ErrNoAcceptableMethod = errors.New("socks5: no acceptable authentication method")

@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"reflect"
 	"runtime"
+	"strings"
 )
 
 // ContextDialer dials connections. *net.Dialer implements it.
@@ -117,4 +118,23 @@ func Splices(dst, src any) bool {
 func IsStreamUnix(c *net.UnixConn) bool {
 	addr := c.LocalAddr()
 	return addr != nil && addr.Network() == "unix"
+}
+
+// HostIP returns the IP address that a requested host name stands for when
+// it is an IP literal, also with one trailing dot as in "127.0.0.1.", which
+// some resolvers connect to as that address: IPv4-mapped IPv6 addresses as
+// IPv4 and without a zone, so that address policies see every form of an
+// address in one. Other names, which are left to the resolver, report false.
+func HostIP(name string) (netip.Addr, bool) {
+	// Only a name that starts with a digit or holds a colon can be an IP
+	// literal; skipping the parse for the others spares an error for each.
+	host := strings.TrimSuffix(name, ".")
+	if host == "" || !(host[0] >= '0' && host[0] <= '9' || strings.IndexByte(host, ':') >= 0) {
+		return netip.Addr{}, false
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ip.Unmap().WithZone(""), true
 }

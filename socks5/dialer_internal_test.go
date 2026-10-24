@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+
+	"github.com/djylb/netx"
 )
 
 // remoteConn is a connection with only a remote address.
@@ -47,7 +49,7 @@ func TestDialerRelayAddr(t *testing.T) {
 		{"172.17.0.2:7000", nil, "172.17.0.2:7000"},
 		{"0.0.0.0:7000", nil, "192.0.2.80:7000"}, // the proxy's own address
 	} {
-		bound, err := ParseAddr(tt.bound)
+		bound, err := netx.ParseAddr(tt.bound)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -57,7 +59,7 @@ func TestDialerRelayAddr(t *testing.T) {
 			t.Errorf("relayAddr(%s, remote %v) = %v, %v; want %s", tt.bound, tt.remote, got, err, tt.want)
 		}
 	}
-	if _, err := (&Dialer{}).relayAddr(context.Background(), remoteConn{remote: public}, Addr{}); err == nil {
+	if _, err := (&Dialer{}).relayAddr(context.Background(), remoteConn{remote: public}, netx.Addr{}); err == nil {
 		t.Error("relayAddr() accepted port 0")
 	}
 }

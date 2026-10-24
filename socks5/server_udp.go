@@ -18,14 +18,14 @@ import (
 
 // PacketConn is the outbound side of a UDP association: it sends the client's
 // datagrams to their destinations and receives the replies. Implementations
-// may forward the datagrams elsewhere, such as through a tunnel; Addr keeps
+// may forward the datagrams elsewhere, such as through a tunnel; netx.Addr keeps
 // domain names unresolved for that purpose.
 type PacketConn interface {
 	// WriteTo sends p to dst. It must not retain p, which the caller reuses
 	// once WriteTo returns.
-	WriteTo(p []byte, dst Addr) (int, error)
+	WriteTo(p []byte, dst netx.Addr) (int, error)
 	// ReadFrom reads the next reply and returns its source.
-	ReadFrom(p []byte) (n int, src Addr, err error)
+	ReadFrom(p []byte) (n int, src netx.Addr, err error)
 	// Close ends the association's outbound side and unblocks ReadFrom.
 	Close() error
 }
@@ -61,7 +61,7 @@ type udpPacketConn struct {
 	names    map[string]dnsEntry
 }
 
-func (u *udpPacketConn) WriteTo(p []byte, dst Addr) (int, error) {
+func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 	ip := dst.IP
 	if !ip.IsValid() {
 		var err error
@@ -120,12 +120,12 @@ func (u *udpPacketConn) lookup(name string) (netip.Addr, error) {
 	return ip.Unmap(), nil
 }
 
-func (u *udpPacketConn) ReadFrom(p []byte) (int, Addr, error) {
+func (u *udpPacketConn) ReadFrom(p []byte) (int, netx.Addr, error) {
 	n, ap, err := u.c.ReadFromUDPAddrPort(p)
 	if err != nil {
-		return n, Addr{}, err
+		return n, netx.Addr{}, err
 	}
-	return n, Addr{IP: ap.Addr().Unmap(), Port: ap.Port()}, nil
+	return n, netx.AddrFromAddrPort(ap), nil
 }
 
 func (u *udpPacketConn) Close() error {
@@ -182,18 +182,26 @@ func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
 
 // sharedRelay returns the relay of UDPSocket, starting it on first use.
 func (s *Server) sharedRelay() (*udpRelay, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, ErrServerClosed
+	var (
+		r   *udpRelay
+		err error
+	)
+	s.life.Locked(func(closed bool) {
+		switch {
+		case closed:
+			err = ErrServerClosed
+		case s.shared == nil:
+			s.shared = s.newUDPRelay(s.UDPSocket)
+		}
+		if err == nil && s.shared.stopped() {
+			err = errUDPRelayStopped
+		}
+		r = s.shared
+	})
+	if err != nil {
+		return nil, err
 	}
-	if s.shared == nil {
-		s.shared = s.newUDPRelay(s.UDPSocket)
-	}
-	if s.shared.stopped() {
-		return nil, errUDPRelayStopped
-	}
-	return s.shared, nil
+	return r, nil
 }
 
 // errUDPRelayStopped refuses a UDP association whose socket has stopped,
@@ -474,13 +482,13 @@ func (s *Server) dialPacket(ctx context.Context, req *Request) (PacketConn, erro
 	return NewPacketConn(c), nil
 }
 
-func (s *Server) udpAddr(req *Request, socket net.Addr) Addr {
+func (s *Server) udpAddr(req *Request, socket net.Addr) netx.Addr {
 	if s.UDPAddr != nil {
 		return s.UDPAddr(req, socket)
 	}
-	addr := AddrFromNetAddr(socket)
+	addr := netx.AddrFromNetAddr(socket)
 	if !addr.IP.IsValid() || addr.IP.IsUnspecified() {
-		if local := AddrFromNetAddr(req.Conn.LocalAddr()); local.IP.IsValid() {
+		if local := netx.AddrFromNetAddr(req.Conn.LocalAddr()); local.IP.IsValid() {
 			addr.IP = local.IP
 		}
 	}

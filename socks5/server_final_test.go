@@ -29,7 +29,7 @@ func TestServerUDPExactAnnouncementTakesOnlyItsSource(t *testing.T) {
 	}
 	addr := serve(t, &socks5.Server{UDPSocket: pc})
 	victim, attacker := newUDPClient(t), newUDPClient(t)
-	ctl, relay := associate(t, addr, socks5.AddrFromNetAddr(victim.LocalAddr()))
+	ctl, relay := associate(t, addr, netx.AddrFromNetAddr(victim.LocalAddr()))
 	defer func() { _ = ctl.Close() }()
 
 	if got, _ := exchange(t, attacker, relay, echo, "attacker"); got != "" {
@@ -49,7 +49,7 @@ func TestServerUDPStoppedSharedSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := serve(t, &socks5.Server{UDPSocket: pc})
-	waiting, _ := associate(t, addr, socks5.Addr{})
+	waiting, _ := associate(t, addr, netx.Addr{})
 	defer func() { _ = waiting.Close() }()
 	_ = pc.Close()
 
@@ -59,7 +59,7 @@ func TestServerUDPStoppedSharedSocket(t *testing.T) {
 	}
 	for deadline := time.Now().Add(2 * time.Second); ; {
 		c := handshake(t, addr)
-		if err := socks5.WriteRequest(c, socks5.CmdUDPAssociate, socks5.Addr{}); err != nil {
+		if err := socks5.WriteRequest(c, socks5.CmdUDPAssociate, netx.Addr{}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := socks5.ReadReply(c)
@@ -112,7 +112,7 @@ func TestServerSOCKS4BufferedRequestKeepsEarlyData(t *testing.T) {
 
 	var req bytes.Buffer
 	ap := netip.MustParseAddrPort(target)
-	if err := socks5.WriteRequest4(&req, socks5.CmdConnect, socks5.Addr{IP: ap.Addr(), Port: ap.Port()}, "a-fairly-long-user-id"); err != nil {
+	if err := socks5.WriteRequest4(&req, socks5.CmdConnect, netx.Addr{IP: ap.Addr(), Port: ap.Port()}, "a-fairly-long-user-id"); err != nil {
 		t.Fatal(err)
 	}
 	req.WriteString("early")
@@ -154,7 +154,7 @@ func TestServeDoesNotReportConnectionsEndedByClose(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { _ = s.Serve(ln); close(done) }()
-	ctl, _ := associate(t, ln.Addr().String(), socks5.Addr{})
+	ctl, _ := associate(t, ln.Addr().String(), netx.Addr{})
 	defer func() { _ = ctl.Close() }()
 	c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).Dial("tcp", echoTCP(t))
 	if err != nil {

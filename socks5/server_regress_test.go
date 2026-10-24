@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/socks5"
 )
 
@@ -33,7 +34,7 @@ func (a checkNoAuth) Authenticate(context.Context, net.Conn) (string, error) {
 func TestServerNoAuthAuthenticatorDecides(t *testing.T) {
 	target := echoTCP(t)
 	deny := serve(t, &socks5.Server{SOCKS4: true, Auth: []socks5.Authenticator{checkNoAuth{err: errors.New("not allowed")}}})
-	dst, _ := socks5.ParseAddr(target)
+	dst, _ := netx.ParseAddr(target)
 
 	// A NoAuth method, an empty list and an unknown method all reach it.
 	for _, methods := range [][]byte{{byte(socks5.MethodNoAuth)}, {}, {byte(socks5.MethodGSSAPI)}} {
@@ -123,7 +124,7 @@ func TestServerUDPIgnoresForeignAnnouncement(t *testing.T) {
 	handlers := make(chan string, 1)
 	s := &socks5.Server{
 		UDPSocket: pc,
-		AllowPacket: func(req *socks5.Request, _ socks5.Addr) bool {
+		AllowPacket: func(req *socks5.Request, _ netx.Addr) bool {
 			handlers <- req.Conn.RemoteAddr().String()
 			return false
 		},
@@ -132,11 +133,11 @@ func TestServerUDPIgnoresForeignAnnouncement(t *testing.T) {
 	go func() { _ = s.Serve(ln6) }()
 	t.Cleanup(func() { _ = s.Close() })
 
-	victim, _ := associate(t, ln6.Addr().String(), socks5.Addr{})
-	attacker, _ := associate(t, ln.Addr().String(), socks5.AddrFromNetAddr(victimUDP.LocalAddr()))
+	victim, _ := associate(t, ln6.Addr().String(), netx.Addr{})
+	attacker, _ := associate(t, ln.Addr().String(), netx.AddrFromNetAddr(victimUDP.LocalAddr()))
 	defer func() { _ = attacker.Close() }()
 
-	packet, _ := socks5.AppendDatagram(nil, socks5.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 9}, []byte("victim"))
+	packet, _ := socks5.AppendDatagram(nil, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 9}, []byte("victim"))
 	relay := pc.LocalAddr().(*net.UDPAddr)
 	if _, err := victimUDP.WriteToUDP(packet, relay); err != nil {
 		t.Fatal(err)
@@ -167,7 +168,7 @@ func TestServerCloseEndsOutlivingAssociation(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ln) }()
-	ctl, relay := associate(t, ln.Addr().String(), socks5.Addr{})
+	ctl, relay := associate(t, ln.Addr().String(), netx.Addr{})
 	client := newUDPClient(t)
 	if got, _ := exchange(t, client, relay, echo, "before"); got != "echo:before" {
 		t.Fatalf("reply = %q", got)
@@ -185,7 +186,7 @@ func (noAddrConn) RemoteAddr() net.Addr { return nil }
 
 // associateWithoutAddr sends a UDP ASSOCIATE announcing announced over a
 // control connection without a remote address and returns the reply.
-func associateWithoutAddr(t *testing.T, s *socks5.Server, announced socks5.Addr) (socks5.Addr, error) {
+func associateWithoutAddr(t *testing.T, s *socks5.Server, announced netx.Addr) (netx.Addr, error) {
 	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
@@ -212,11 +213,11 @@ func TestServerUDPWithoutRemoteAddr(t *testing.T) {
 	s := &socks5.Server{UDPSocket: pc}
 	defer func() { _ = s.Close() }()
 	var replyErr *socks5.ReplyError
-	if _, err := associateWithoutAddr(t, s, socks5.Addr{}); !errors.As(err, &replyErr) {
+	if _, err := associateWithoutAddr(t, s, netx.Addr{}); !errors.As(err, &replyErr) {
 		t.Fatalf("unannounced UDP ASSOCIATE reply error = %v, want a refusal", err)
 	}
 	client := newUDPClient(t)
-	relay, err := associateWithoutAddr(t, s, socks5.AddrFromNetAddr(client.LocalAddr()))
+	relay, err := associateWithoutAddr(t, s, netx.AddrFromNetAddr(client.LocalAddr()))
 	if err != nil {
 		t.Fatalf("announced UDP ASSOCIATE reply error = %v", err)
 	}
@@ -234,7 +235,7 @@ func TestServerUDPOwnSocketWithoutRemoteAddr(t *testing.T) {
 		return net.ListenPacket("udp", "127.0.0.1:0")
 	}}
 	defer func() { _ = s.Close() }()
-	bound, err := associateWithoutAddr(t, s, socks5.Addr{})
+	bound, err := associateWithoutAddr(t, s, netx.Addr{})
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE reply error = %v", err)
 	}
@@ -338,7 +339,7 @@ func TestServerAllowSeesEveryIPForm(t *testing.T) {
 	target := netip.MustParseAddrPort(echoTCP(t))
 	ip, port := target.Addr(), target.Port()
 	loopback := netip.MustParsePrefix("127.0.0.0/8")
-	seen := make(chan socks5.Addr, 1)
+	seen := make(chan netx.Addr, 1)
 	addr := serve(t, &socks5.Server{
 		SOCKS4: true,
 		Allow: func(_ context.Context, req *socks5.Request) error {
@@ -374,7 +375,7 @@ func TestServerAllowSeesEveryIPForm(t *testing.T) {
 		if desc == "refused without code" {
 			continue
 		}
-		if got := <-seen; got != (socks5.Addr{IP: ip, Port: port}) {
+		if got := <-seen; got != (netx.Addr{IP: ip, Port: port}) {
 			t.Errorf("%s: Allow saw IP %v, Name %q", desc, got.IP, got.Name)
 		}
 	}
@@ -391,7 +392,7 @@ func TestServerAllowSeesEveryIPForm(t *testing.T) {
 			t.Errorf("SOCKS4a CONNECT to %q allowed", host)
 		}
 		_ = c.Close()
-		if got := <-seen; got != (socks5.Addr{IP: ip, Port: port}) {
+		if got := <-seen; got != (netx.Addr{IP: ip, Port: port}) {
 			t.Errorf("SOCKS4a %q: Allow saw IP %v, Name %q", host, got.IP, got.Name)
 		}
 	}
@@ -430,7 +431,7 @@ func TestServerUDPKeepsAssociationAfterUndeliverableReply(t *testing.T) {
 			}
 		},
 	})
-	ctl, relay := associate(t, addr, socks5.Addr{})
+	ctl, relay := associate(t, addr, netx.Addr{})
 	client := newUDPClient(t)
 	if got, _ := exchange(t, client, relay, echo, strings.Repeat("x", 1500)); got != "" {
 		t.Fatalf("oversized reply delivered: %d bytes", len(got))
@@ -501,12 +502,12 @@ func TestServerUDPAnnouncedPortWithoutAddress(t *testing.T) {
 	echo := udpEcho(t)
 	for _, tt := range []struct {
 		name     string
-		announce func(port uint16) socks5.Addr
+		announce func(port uint16) netx.Addr
 	}{
-		{"exact address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
-		{"unspecified address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
-		{"name", func(p uint16) socks5.Addr { return socks5.Addr{Name: "0", Port: p} }},
-		{"private address", func(p uint16) socks5.Addr { return socks5.Addr{IP: netip.MustParseAddr("192.168.1.5"), Port: p} }},
+		{"exact address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
+		{"unspecified address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
+		{"name", func(p uint16) netx.Addr { return netx.Addr{Name: "0", Port: p} }},
+		{"private address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("192.168.1.5"), Port: p} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -550,7 +551,7 @@ func TestServerUDPIdleClosesControlWithoutDeadlines(t *testing.T) {
 		}
 		served <- s.ServeConn(context.Background(), noDeadlineConn{c})
 	}()
-	ctl, _ := associate(t, ln.Addr().String(), socks5.Addr{})
+	ctl, _ := associate(t, ln.Addr().String(), netx.Addr{})
 	defer func() { _ = ctl.Close() }()
 	_ = ctl.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -763,8 +764,8 @@ func TestServerUDPAnnouncedPendingDoesNotBlockUnannounced(t *testing.T) {
 	}
 	addr := serve(t, &socks5.Server{UDPSocket: pc})
 	a, b := newUDPClient(t), newUDPClient(t)
-	_, _ = associate(t, addr, socks5.AddrFromNetAddr(a.LocalAddr()))
-	_, relayB := associate(t, addr, socks5.Addr{})
+	_, _ = associate(t, addr, netx.AddrFromNetAddr(a.LocalAddr()))
+	_, relayB := associate(t, addr, netx.Addr{})
 	if got, _ := exchange(t, b, relayB, echo, "b"); got != "echo:b" {
 		t.Fatalf("reply = %q, want %q", got, "echo:b")
 	}

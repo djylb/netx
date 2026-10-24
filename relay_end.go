@@ -25,6 +25,9 @@ type relaySource struct {
 	prefixes []*PrefixConn
 	// datagrams hands base's datagrams over, or is nil.
 	datagrams datagramSource
+	// limit is the *io.LimitedReader that the source is, whose bound a
+	// read beneath it keeps and counts down.
+	limit *io.LimitedReader
 	// bottom is where the look through this package's connections ended,
 	// which datagram looks at further.
 	bottom      any
@@ -98,6 +101,11 @@ func (s *relaySource) init(r io.Reader) {
 	s.r, s.base = r, r
 	s.timeouts, s.prefixes = s.timeoutsBuf[:0], s.prefixesBuf[:0]
 	var v any = r
+	if lr, ok := r.(*io.LimitedReader); ok && lr != nil && lr.R != nil {
+		// Read through, and beneath it within its bound.
+		s.limit = lr
+		s.base, v = lr.R, lr.R
+	}
 	passing := true
 	for range maxUnwrapDepth {
 		info, ok := layerOf(v)
@@ -162,6 +170,24 @@ func (s *relaySource) readsDatagrams() bool {
 func readsDatagrams(r io.Reader) bool {
 	return newRelaySource(r).readsDatagrams()
 }
+
+// limited caps n to the bytes left within the source's bound, if it has one.
+func (s *relaySource) limited(n int64) int64 {
+	if s.limit != nil {
+		return min(n, max(s.limit.N, 0))
+	}
+	return n
+}
+
+// consumed counts n bytes read beneath the source's bound down.
+func (s *relaySource) consumed(n int) {
+	if s.limit != nil {
+		s.limit.N -= int64(n)
+	}
+}
+
+// exhausted reports whether the source's bound is used up.
+func (s *relaySource) exhausted() bool { return s.limit != nil && s.limit.N <= 0 }
 
 // prefixPending reports whether a PrefixConn around base still holds prefix
 // bytes.

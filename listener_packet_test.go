@@ -673,8 +673,10 @@ func acceptWithin(t *testing.T, l *PacketListener) net.Conn {
 // feedPacketConn is a PacketConn whose datagrams, from any source, the test
 // feeds in.
 type feedPacketConn struct {
-	in     chan feedDatagram
-	read   atomic.Int64
+	in chan feedDatagram
+	// last is closed by the read after the one that returned it: the read
+	// loop dispatches a datagram before it reads the next.
+	last   chan struct{}
 	closed chan struct{}
 	once   sync.Once
 }
@@ -682,6 +684,7 @@ type feedPacketConn struct {
 type feedDatagram struct {
 	from netip.AddrPort
 	data []byte
+	done chan struct{} // set by feed
 }
 
 func newFeedPacketConn() *feedPacketConn {
@@ -689,9 +692,14 @@ func newFeedPacketConn() *feedPacketConn {
 }
 
 func (c *feedPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	// Only the read loop calls ReadFrom, so last needs no lock.
+	if c.last != nil {
+		close(c.last)
+		c.last = nil
+	}
 	select {
 	case d := <-c.in:
-		defer c.read.Add(1)
+		c.last = d.done
 		return copy(b, d.data), net.UDPAddrFromAddrPort(d.from), nil
 	case <-c.closed:
 		return 0, nil, net.ErrClosed
@@ -702,9 +710,13 @@ func (c *feedPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 // read has begun.
 func (c *feedPacketConn) feed(t *testing.T, d feedDatagram) {
 	t.Helper()
-	n := c.read.Load()
+	d.done = make(chan struct{})
 	c.in <- d
-	waitUntil(t, func() bool { return c.read.Load() > n })
+	select {
+	case <-d.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read loop did not dispatch the datagram")
+	}
 }
 
 func (c *feedPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
@@ -735,13 +747,13 @@ func TestPacketListenerMaxConnsSpoofedFlood(t *testing.T) {
 		return netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)}), uint16(1000+i))
 	}
 	for i := range 500 {
-		pc.feed(t, feedDatagram{src(i), []byte("x")})
+		pc.feed(t, feedDatagram{from: src(i), data: []byte("x")})
 	}
 	if n, f := l.conns.Len(), filtered.Load(); n != limit || f != limit {
 		t.Fatalf("%d connections after the flood, the filter ran %d times; want %d of each", n, f, limit)
 	}
 	c := acceptWithin(t, l)
-	pc.feed(t, feedDatagram{src(0), []byte("y")})
+	pc.feed(t, feedDatagram{from: src(0), data: []byte("y")})
 	buf := make([]byte, 4)
 	for _, want := range []string{"x", "y"} {
 		if n, err := c.Read(buf); err != nil || string(buf[:n]) != want {
@@ -752,7 +764,7 @@ func TestPacketListenerMaxConnsSpoofedFlood(t *testing.T) {
 		t.Fatalf("Dial() at the limit = %v, want ErrPacketConnLimit", err)
 	}
 	_ = c.Close()
-	pc.feed(t, feedDatagram{src(600), []byte("z")})
+	pc.feed(t, feedDatagram{from: src(600), data: []byte("z")})
 	if n := l.conns.Len(); n != limit {
 		t.Fatalf("%d connections after a place was freed, want %d", n, limit)
 	}
