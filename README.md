@@ -9,7 +9,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | Package                               | Contents                                                                          |
 |---------------------------------------|-----------------------------------------------------------------------------------|
 | `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory/UDP listeners, error helpers       |
-| `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, self-signed certs, pins, certs       |
+| `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, certs, pins, uploaded-cert checks    |
 | `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
 | `github.com/djylb/netx/transparent`   | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations        |
 | `github.com/djylb/netx/socks5`        | SOCKS5 and SOCKS4 codec, client dialer and a configurable server                  |
@@ -20,13 +20,15 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/wsconn`        | WebSocket: handshakes, messages, stream `net.Conn`, permessage-deflate            |
 | `github.com/djylb/netx/wsconn/wshttp` | WebSocket for `net/http` handlers, also over HTTP/2                               |
 | `github.com/djylb/netx/proxydial`     | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`        |
+| `github.com/djylb/netx/safedial`      | dialing and UDP relaying limited by a destination policy, rebinding-safe          |
 
 Each package depends only on the standard library and links only what it uses.
 `crypto/tls` adds a large amount of code to a binary as soon as it is
 imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
 `httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
 them link anyway) import it; the root package, `proxyproto`, `transparent`,
-`socks5`, `httpproxy`, `httphead`, `forwarded` and `wsconn` stay small.
+`socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn` and `safedial` stay
+small.
 `forwarded` does not import `net/http`: it takes a header as the
 `map[string][]string` that `http.Header` is.
 
@@ -247,6 +249,132 @@ _, err := store.AddFiles("wildcard", "/etc/certs/wildcard/fullchain.pem", "/etc/
 store.SetDefault("wildcard")
 srv := &http.Server{TLSConfig: &tls.Config{GetCertificate: store.GetCertificate}}
 ```
+
+#### Checking uploaded certificates
+
+For servers that take certificates from users, `tlsconn` parses and checks
+them, tells which names they cover, and has the user prove that they hold
+the private key:
+
+```go
+// claim checks an uploaded certificate and key against roots and returns
+// the names, of those the user asks for, that it covers. The user must still
+// prove possession of the key before getting them.
+func claim(certData, keyData []byte, roots *x509.CertPool, domain string, asked []string) (tls.Certificate, []string, error) {
+	cert, err := tlsconn.ParseKeyPair(certData, keyData)
+	if err != nil {
+		return tls.Certificate{}, nil, err // ErrKeyMismatch, ErrEncryptedKey, ...
+	}
+	chain := []*x509.Certificate{cert.Leaf}
+	for _, der := range cert.Certificate[1:] {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return tls.Certificate{}, nil, err
+		}
+		chain = append(chain, c)
+	}
+	// Fails unless the certificate covers domain itself: ErrOnlySubdomains
+	// for one that covers only names under it, ErrExpired, ErrSelfSigned, ...
+	coverage, err := tlsconn.VerifyDomain(chain, domain, tlsconn.VerifyOptions{Roots: roots})
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	var granted []string
+	for _, name := range asked {
+		if coverage.Covers(name) { // each name exactly, never the subtree
+			granted = append(granted, name)
+		}
+	}
+	return cert, granted, nil
+}
+
+// prove has the user sign a challenge with the certificate's key.
+func prove(challenger *tlsconn.Challenger, leaf *x509.Certificate, userKey crypto.Signer) error {
+	const purpose = "claim example.com for user 42"
+	challenge, err := challenger.Challenge(purpose) // sent to the user
+	if err != nil {
+		return err
+	}
+	sig, err := tlsconn.SignPossession(userKey, purpose, challenge) // on the user's side
+	if err != nil {
+		return err
+	}
+	return challenger.Verify(leaf.PublicKey, purpose, challenge, sig)
+}
+```
+
+- `ParseKeyPair` takes the chain, leaf first, as PEM (text around the blocks,
+  such as OpenSSL's attributes, and other block types are skipped) or DER,
+  and one private key in PKCS #1, PKCS #8 or SEC 1 form (RSA, ECDSA,
+  Ed25519); both may be in one file. It checks that the key's public key
+  equals the leaf's and returns a `tls.Certificate` with its `Leaf` set.
+  `ParseCertificates`, `ParsePrivateKey` and `MatchKey` do the steps alone.
+  Errors are typed: `ErrNoCertificates`, `ErrInvalidCertificate`,
+  `ErrNoPrivateKey`, `ErrMultipleKeys`, `ErrEncryptedKey`, `ErrInvalidKey`,
+  `ErrUnsupportedKey` and `ErrKeyMismatch`. Bound the upload's size before
+  parsing.
+- `VerifyChain` (or `VerifyCertificate` for a `tls.Certificate`) verifies the
+  leaf against `Roots`, with the rest of the
+  uploaded chain, in any order, as intermediates, at `Time` (zero for now),
+  for `KeyUsages` (server authentication by default). Uploaded certificates
+  are never trusted as roots. Its errors tell apart `ErrExpired`,
+  `ErrNotYetValid`, `ErrSelfSigned` (which also matches
+  `ErrUnknownAuthority`), `ErrUnknownAuthority`, `ErrKeyUsage` and
+  `ErrInvalidChain`. `IsSelfSigned` checks one certificate.
+- **Set `Roots` for uploaded certificates**, such as a CA bundle loaded with
+  `AppendCertsFromPEM`. With nil `Roots`, Windows, macOS and iOS hand the
+  chain to the platform verifier, which may fetch the issuer URLs
+  (Authority Information Access) named in the certificate, so an uploader
+  could make the server send requests to hosts of their choosing, internal
+  ones included. An explicit pool runs the Go verifier, which fetches
+  nothing. `x509.SystemCertPool()` does not avoid this: on those systems it
+  holds no certificates and delegates to the platform verifier too.
+- `Covers(cert, name)` and `CertNames(cert)` follow RFC 6125 and RFC 9525:
+  only subject alternative names count, never the common name; a DNS name
+  covers itself; `*.example.com` covers `a.example.com`, but neither
+  `example.com` nor `a.b.example.com`; wildcards must be the whole leftmost
+  label over a base of two labels or more, so `*.com`, `f*.example.com` and
+  `a.*.example.com` cover nothing (and are listed in `Names.Invalid`); IP
+  addresses match IP address names only. Names are compared by
+  `CanonicalName`: lowercase, without a trailing dot, international labels
+  as A-labels (`bücher.test` is `xn--bcher-kva.test`). `Names.Covers`
+  answers by binary search; `Covers` checks a certificate without
+  allocating.
+- `VerifyDomain(chain, domain, opts)` verifies the chain and requires the
+  certificate to cover the domain itself (`Apex`, exactly or by a wildcard
+  for its parent, then with `ApexByWildcard`). One that covers only names
+  under it, such as `me.example.net` asked about `example.net`, fails with
+  `ErrOnlySubdomains`, and one that covers nothing with `ErrNotCovered`;
+  both come with the coverage, so accepting subdomains is an explicit choice.
+  `Names.Under(domain)` gives the same `DomainCoverage` without checks:
+  `Apex`, exact `Subdomains` and `Wildcards`. It is a list of names, never a
+  subtree: a certificate for `*.example.com` does not cover `example.com` or
+  `a.b.example.com`, and one for `example.com` covers nothing else, so grant
+  each name that `DomainCoverage.Covers` reports, not the domain's
+  descendants. A self-signed certificate proves nothing about a domain, and
+  fails `VerifyDomain` unless the roots trust it.
+- A certificate is public, so a user also proves that they hold its key. A
+  `Challenger` issues challenges bound to a purpose (the action, the user,
+  the domain), each holding its expiry (`TTL`, 5 minutes by default) and 128
+  random bits under an HMAC-SHA-256 key of its own, so issuing stores
+  nothing. The user signs with `SignPossession`: RSA-PSS with SHA-256,
+  ECDSA with SHA-256, SHA-384 or SHA-512 for P-256, P-384 or P-521, or
+  Ed25519, over a message with a fixed context, the purpose and the
+  challenge, so the signature is good for nothing else. `Verify` checks the
+  challenge, its expiry and the signature against the leaf's public key,
+  and accepts each challenge once: it keeps accepted ones until they expire,
+  at most `MaxUsed` (65536 by default), and fails closed with
+  `ErrTooManyChallenges` rather than forget one. Expiry runs on the
+  `Challenger`'s own monotonic clock, so setting the wall clock back cannot
+  revive a used challenge. Make one with `NewChallenger`; the zero value
+  fails with `ErrNoChallenger`. A challenge verifies only on
+  the `Challenger` that issued it and not after a restart; servers behind a
+  load balancer route answers back, or use `VerifyPossession` with
+  challenges kept in their shared store. Rate-limit proofs per user, since any
+  self-signed key can make one.
+- `Summarize` describes a certificate for display: subject, issuer, serial
+  number, names, validity, fingerprint, key type and size, and whether it is
+  self-signed or a CA.
 
 ### Framed messages
 
@@ -1784,3 +1912,93 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
   `*proxydial.Bypass`, whose `Proxy` field holds `FromURL`'s dialer
   (`b.Proxy.(*proxydial.HTTPDialer)` to set `Header`). `Bypass` and
   `ParseNoProxy` also work with other dialers.
+
+## Destination Policies
+
+`github.com/djylb/netx/safedial` dials, and sends datagrams to, only the
+destinations a policy allows, for a program that connects on behalf of a
+party it trusts less: a tunnel client that a server tells where to connect,
+a proxy, or a webhook sender. The check binds to the address actually
+dialed, so DNS rebinding and later re-resolution cannot get around it.
+
+```go
+d := &safedial.Dialer{
+	// nil Policy: DefaultPolicy, global unicast addresses only.
+	Policy: safedial.All(
+		safedial.DenyPorts(25),
+		safedial.Any(
+			// Names under corp.example may resolve to private addresses,
+			// not to loopback, link-local (metadata) or other ones.
+			safedial.All(
+				safedial.AllowNames("corp.example"),
+				safedial.AllowScopes(netx.ScopePrivate, netx.ScopeGlobal),
+			),
+			safedial.DefaultPolicy(),
+		),
+	),
+}
+client := &http.Client{Transport: &http.Transport{DialContext: d.DialContext}} // no Proxy
+
+_, err := d.DialContext(ctx, "tcp", "127.1:6379")
+var denied *safedial.DeniedError
+if errors.As(err, &denied) { // errors.Is(err, safedial.ErrDenied) too
+	log.Printf("refused %v: %v", denied.Target, denied.Reason) // 127.0.0.1:6379: loopback
+}
+```
+
+- `Dialer` is a `netx.ContextDialer` with `Forward` (zero `net.Dialer` if
+  nil), `Resolver` (`*net.Resolver` or anything with `LookupNetIP`), `Policy`,
+  `Stagger` and `VerifyRemoteAddr`. It parses the target with `ParseTarget`:
+  IP literals in every form, bracketed, IPv4-mapped (unmapped), zoned (the
+  zone kept apart, in `Target.Zone`, and used to dial) or with a trailing
+  dot, are checked as addresses, and so are the legacy IPv4 forms that
+  system resolvers read as addresses (`127.1`, `2130706433`, `0x7f.0.0.1`,
+  `0177.0.0.1`), parsed as `inet_aton` does (`ParseLegacyIPv4`). Hosts that
+  are no plain host name, such as ones with spaces, non-ASCII bytes, a
+  numeric last label or an empty host, fail with `netx.ErrInvalidAddr`
+  before any resolver sees them.
+- A host name is checked by name first (so `DenyNames` refuses it without a
+  lookup), resolved once, and every address is unmapped and checked; only the
+  allowed ones are dialed, as IP literals, interleaved by family and raced
+  through `netx.RaceDialer.DialAny` as Happy Eyeballs does. A name is never
+  resolved twice per dial, CNAMEs do not matter since the final addresses are
+  checked, and an HTTP client's redirects dial, and are checked, again.
+  `Lookup` returns the addresses `DialContext` would dial. `VerifyRemoteAddr`
+  closes a connection whose `RemoteAddr` is not the address dialed, for a
+  `Forward` that might connect elsewhere.
+- Not covered: an upstream proxy that resolves names itself. Give an
+  `http.Transport` that dials with a `Dialer` no `Proxy`; a proxy dialer as
+  `Forward` receives IP addresses only, which reach what they reach from the
+  proxy's network.
+- A `Policy` (`Check(Target) error`, or a `PolicyFunc`) sees a name before
+  it is resolved (`Addr` invalid) and each address with the name. Building
+  blocks: `DefaultPolicy` (`AllowScopes(netx.ScopeGlobal)`: no loopback,
+  private, link-local, shared CGNAT, unspecified, multicast, broadcast,
+  documentation, benchmarking, reserved, nor NAT64/6to4/Teredo addresses
+  embedding them), `AllowScopes`, `DenyScopes`, `AllowPrefixes`,
+  `DenyPrefixes` (binary search over merged prefixes; an invalid prefix fails
+  closed), `AllowPorts`, `DenyPorts`, `AllowPortRange`, `DenyPortRange`,
+  `AllowNames` and `DenyNames` (`example.com` matches it and its subdomains,
+  `*.example.com` only subdomains; internationalised patterns match in
+  their punycode form, and a `DenyNames` pattern that is no host name
+  refuses every name), and `All`/`Any` to combine them. An allowed name
+  reaches whatever its DNS points to, so pair `AllowNames` with the scopes
+  or prefixes its names may reach; name rules do not stop another name or
+  an IP address that reaches the same host. A target with neither an
+  address nor a name, such as a `*net.UDPAddr` without an IP, is always
+  refused, as sockets send it to the local host. A
+  refusal is a `*DeniedError` with the `Target` and the `Reason`
+  (`ErrScope`, `ErrPrefix`, `ErrPort`, `ErrName`, `ErrRemoteMismatch` or the
+  policy's own), matching `ErrDenied`.
+- UDP: `DialContext` takes `udp`, `udp4` and `udp6`. For relays that send
+  to many destinations, `WrapPacketConn` wraps a `net.PacketConn` (checking
+  `WriteTo` and `WriteToUDPAddrPort`) and `WrapAddrPacketConn` a
+  `socks5.PacketConn`-shaped connection, which the result is too, so it fits
+  a `socks5.Server`'s `DialPacket` or a `DatagramRelay`. Replies from any
+  source are delivered (full cone). Names are resolved by the wrapper itself,
+  never by the wrapped connection: cached for a minute (failures five seconds,
+  1024 names), and datagrams wait for a lookup without blocking `WriteTo`,
+  within 64 lookups, 16 datagrams per name and 256 KiB (`ErrLookupBusy`
+  beyond). `Close` cancels the lookups.
+- Checking an IP destination, with `Dialer.Check` or a datagram through
+  either wrapper, does not allocate with the policies of this package.

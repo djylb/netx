@@ -40,6 +40,7 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/httprewrite", true, false}, // net/http links crypto/tls
 		{module + "/wsconn", false, false},     // httphead; wsconn/deps_test.go checks the rest
 		{module + "/wsconn/wshttp", true, false},
+		{module + "/safedial", false, false},
 	}
 	internal, err := exec.Command(goCmd, "list", module+"/internal/...").Output()
 	if err != nil {

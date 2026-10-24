@@ -1,8 +1,9 @@
 // Package dgram holds the machinery of the listeners that demultiplex one
 // datagram socket into connections, one per peer or flow: pooled datagram
 // buffers, a per-connection queue with a read deadline, the table of
-// connections with its accept backlog, limit and idle sweep, and the backoff
-// of a read loop. It depends on the standard library alone, so that the leaf
+// connections with its accept backlog, limit and idle sweep, the backoff
+// of a read loop, and the lookups of the host names that datagrams are sent
+// to, which hold the datagrams meanwhile. It depends on the standard library alone, so that the leaf
 // packages can use it, and has no package initialisation beyond its pools.
 package dgram
 

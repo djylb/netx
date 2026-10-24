@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/dgram"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -29,12 +30,10 @@ type PacketConn interface {
 	Close() error
 }
 
-// How long NewPacketConn reuses a resolved name, and a failed lookup, so
-// that datagrams to a name that does not resolve do not each wait for DNS.
-const (
-	dnsCacheTTL   = time.Minute
-	dnsFailureTTL = 5 * time.Second
-)
+// ErrLookupBusy drops a datagram to a name that a PacketConn of
+// NewPacketConn is looking up, or is to look up, while it holds as many
+// datagrams, or runs as many lookups, as it may.
+var ErrLookupBusy = errors.New("socks5: too many datagrams wait for name lookups")
 
 // NewPacketConn returns a PacketConn that sends and receives through c,
 // resolving domain names with net.DefaultResolver and caching the results for
@@ -52,18 +51,12 @@ const (
 // then end, each within DefaultDialTimeout also with a resolver that does
 // not see the cancellation at once.
 func NewPacketConn(c *net.UDPConn) PacketConn {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &udpPacketConn{
-		c: c, resolver: net.DefaultResolver, ctx: ctx, cancel: cancel,
-		names:   make(map[string]dnsEntry),
-		lookups: make(map[string]*nameLookup),
-	}
-}
-
-type dnsEntry struct {
-	ip      netip.Addr
-	err     error
-	expires time.Time
+	u := &udpPacketConn{c: c, resolver: net.DefaultResolver}
+	u.names = dgram.NewLookups(DefaultDialTimeout, ErrLookupBusy, u.lookup,
+		func(p []byte, _ string, ip netip.Addr, port uint16) {
+			_, _ = c.WriteToUDPAddrPort(p, netip.AddrPortFrom(ip, port))
+		})
+	return u
 }
 
 // ipResolver looks up the addresses of a name, as *net.Resolver does.
@@ -74,12 +67,7 @@ type ipResolver interface {
 type udpPacketConn struct {
 	c        *net.UDPConn
 	resolver ipResolver
-	ctx      context.Context // canceled by Close, ending lookups
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	names    map[string]dnsEntry
-	lookups  map[string]*nameLookup // by name, while it is looked up
-	held     int                    // bytes of the datagrams in lookups
+	names    *dgram.Lookups[netip.Addr]
 }
 
 func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
@@ -91,7 +79,7 @@ func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 			held bool
 			err  error
 		)
-		if ip, held, err = u.route(p, dst); err != nil {
+		if ip, held, err = u.names.Route(p, dst.Name, dst.Port); err != nil {
 			return 0, err
 		} else if held {
 			return len(p), nil
@@ -100,37 +88,8 @@ func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 	return u.c.WriteToUDPAddrPort(p, netip.AddrPortFrom(ip, dst.Port))
 }
 
-func (u *udpPacketConn) resolve(name string) (netip.Addr, error) {
-	if name == "" {
-		return netip.IPv4Unspecified(), nil
-	}
-	u.mu.Lock()
-	entry, ok := u.names[name]
-	u.mu.Unlock()
-	if ok && time.Now().Before(entry.expires) {
-		return entry.ip, entry.err
-	}
-	ip, err := u.lookup(name)
-	if u.ctx.Err() != nil {
-		return netip.Addr{}, net.ErrClosed
-	}
-	ttl := dnsCacheTTL
-	if err != nil {
-		ttl = dnsFailureTTL
-	}
-	u.mu.Lock()
-	if len(u.names) >= 1024 {
-		clear(u.names)
-	}
-	// The lookup may have taken seconds; the entry lasts from its end.
-	u.names[name] = dnsEntry{ip: ip, err: err, expires: time.Now().Add(ttl)}
-	u.mu.Unlock()
-	return ip, err
-}
-
-func (u *udpPacketConn) lookup(name string) (netip.Addr, error) {
-	ctx, cancel := context.WithTimeout(u.ctx, DefaultDialTimeout)
-	defer cancel()
+// lookup resolves name to one address, IPv4 if it has one.
+func (u *udpPacketConn) lookup(ctx context.Context, name string) (netip.Addr, error) {
 	ips, err := u.resolver.LookupNetIP(ctx, "ip", name)
 	if err != nil {
 		return netip.Addr{}, err
@@ -157,7 +116,7 @@ func (u *udpPacketConn) ReadFrom(p []byte) (int, netx.Addr, error) {
 }
 
 func (u *udpPacketConn) Close() error {
-	u.cancel()
+	u.names.Close()
 	return u.c.Close()
 }
 

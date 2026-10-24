@@ -1,7 +1,7 @@
 // Package netutil holds the small helpers that the packages of this module
-// share: address normalisation, the splice decision and the ContextDialer
-// interface. It depends on the standard library alone, so that the leaf
-// packages can use it.
+// share: address normalisation, the splice decision, the ContextDialer
+// interface and the A-labels of internationalised names. It depends on the
+// standard library alone, so that the leaf packages can use it.
 package netutil
 
 import (

@@ -10,6 +10,13 @@
 // choosing, else by their file's path (AddFiles) or fingerprint (CertID);
 // give certificates that get renewed a stable ID, such as their domain.
 //
+// For certificates that users upload, it parses chains and private keys and
+// checks that they match (ParseKeyPair), verifies chains with typed errors
+// (VerifyChain), tells which names a certificate covers by the rules of
+// RFC 9525 (Covers, CertNames, VerifyDomain), has a user prove that they hold
+// a certificate's private key (Challenger, SignPossession) and describes
+// certificates for display (Summarize).
+//
 // It is separate from the netx root package because importing crypto/tls
 // adds a large amount of code to a binary even when no handshake runs.
 package tlsconn

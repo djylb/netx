@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/internal/dgram"
 )
 
 // fakeStream is the relay's end of a message-preserving stream: the test
@@ -404,9 +405,7 @@ func waitLookups(t *testing.T, u *udpPacketConn) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		u.mu.Lock()
-		n := len(u.lookups)
-		u.mu.Unlock()
+		n := u.names.Running()
 		if n == 0 {
 			return
 		}
@@ -417,14 +416,15 @@ func waitLookups(t *testing.T, u *udpPacketConn) {
 	}
 }
 
-// NewPacketConn holds a bounded number of datagrams for lookups, and Close
-// ends the lookups and drops their datagrams.
+// NewPacketConn fails datagrams beyond the bounds of its lookups, which
+// internal/dgram tests, with ErrLookupBusy, and Close ends the lookups and
+// drops their datagrams.
 func TestPacketConnLookupBounds(t *testing.T) {
 	checkGoroutines(t)
 	res := &fakeResolver{slow: make(chan struct{})}
 	out, _ := newEgress(t, res)
 	slow := netx.Addr{Name: "slow.test", Port: 9}
-	for i := range maxLookupQueue {
+	for i := range dgram.MaxLookupQueue {
 		if n, err := out.WriteTo([]byte("x"), slow); n != 1 || err != nil {
 			t.Fatalf("WriteTo %d = %d, %v; want it held", i, n, err)
 		}
@@ -432,47 +432,13 @@ func TestPacketConnLookupBounds(t *testing.T) {
 	if _, err := out.WriteTo([]byte("x"), slow); !errors.Is(err, ErrLookupBusy) {
 		t.Fatalf("WriteTo beyond the queue error = %v, want ErrLookupBusy", err)
 	}
-	// Other names, each with its own lookup, until the bytes run out.
-	big := make([]byte, 60000)
-	held := 0
-	for i := 0; ; i++ {
-		_, err := out.WriteTo(big, netx.Addr{Name: "slow-big" + strconv.Itoa(i), Port: 9})
-		if err != nil {
-			if !errors.Is(err, ErrLookupBusy) {
-				t.Fatal(err)
-			}
-			break
-		}
-		held++
-	}
-	if want := (maxLookupHeldLen - maxLookupQueue) / len(big); held != want {
-		t.Fatalf("%d large datagrams held, want %d", held, want)
-	}
-	// Then names until the lookups run out.
-	for i := 0; ; i++ {
-		_, err := out.WriteTo([]byte("x"), netx.Addr{Name: "slow" + strconv.Itoa(i), Port: 9})
-		if err != nil {
-			if !errors.Is(err, ErrLookupBusy) {
-				t.Fatal(err)
-			}
-			break
-		}
-	}
-	out.mu.Lock()
-	n := len(out.lookups)
-	out.mu.Unlock()
-	if n != maxLookups {
-		t.Fatalf("%d lookups run, want %d", n, maxLookups)
-	}
 	_ = out.Close()
 	if _, err := out.WriteTo([]byte("x"), netx.Addr{Name: "fast.test", Port: 9}); !netx.IsClosed(err) {
 		t.Fatalf("WriteTo after Close error = %v, want net.ErrClosed", err)
 	}
 	waitLookups(t, out)
-	out.mu.Lock()
-	defer out.mu.Unlock()
-	if out.held != 0 {
-		t.Fatalf("%d bytes held after Close", out.held)
+	if n := out.names.Held(); n != 0 {
+		t.Fatalf("%d bytes held after Close", n)
 	}
 }
 
