@@ -76,11 +76,9 @@ func ResponseBody(method string, code int, h Header) (Framing, int64, string, er
 	case err != nil && te == "":
 		return 0, 0, "", err
 	case te != "":
-		codings, last := te, te
+		codings, last := "", te
 		if i := strings.LastIndexByte(te, ','); i >= 0 {
 			codings, last = TrimOWS(te[:i]), TrimOWS(te[i+1:])
-		} else {
-			codings = ""
 		}
 		for t := range Tokens(codings) {
 			if strings.EqualFold(t, "chunked") {

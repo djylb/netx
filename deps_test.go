@@ -9,8 +9,9 @@ import (
 
 // TestPackageDependencies checks what the README promises: every package
 // depends on the standard library and this module alone, crypto/tls is
-// linked only by tlsconn and proxydial, and httphead, proxyproto, tlsconn
-// and transparent depend on the standard library and this module's internal
+// linked only by tlsconn, proxydial, and httprewrite and wsconn/wshttp
+// through net/http, and forwarded, httphead, proxyproto, tlsconn and
+// transparent depend on the standard library and this module's internal
 // packages alone, which depend on the standard library alone.
 func TestPackageDependencies(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
@@ -35,6 +36,10 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/httphead", false, true},
 		{module + "/tlsconn", true, true},
 		{module + "/proxydial", true, false},
+		{module + "/forwarded", false, true},
+		{module + "/httprewrite", true, false}, // net/http links crypto/tls
+		{module + "/wsconn", false, false},     // httphead; wsconn/deps_test.go checks the rest
+		{module + "/wsconn/wshttp", true, false},
 	}
 	internal, err := exec.Command(goCmd, "list", module+"/internal/...").Output()
 	if err != nil {

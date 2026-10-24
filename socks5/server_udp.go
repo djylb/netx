@@ -3,7 +3,6 @@ package socks5
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -41,9 +40,24 @@ const (
 // resolving domain names with net.DefaultResolver and caching the results for
 // a minute, and failed lookups for five seconds. Close ends the lookups in
 // progress. Replies from any source are delivered, as with a full-cone NAT.
+//
+// WriteTo does not wait for a lookup: a datagram to a name that is not
+// cached is copied and held until the name resolves, and then sent, in
+// order with the later datagrams to the name, or dropped if it does not
+// resolve; WriteTo reports the cached failure for the datagrams that follow.
+// The lookups of up to 64 names run at once, each holding up to 16
+// datagrams, and up to 256 KiB of datagrams are held in all; WriteTo fails
+// with ErrLookupBusy for a datagram beyond these bounds, which drops it, as
+// a full socket buffer would. Close cancels the lookups, whose goroutines
+// then end, each within DefaultDialTimeout also with a resolver that does
+// not see the cancellation at once.
 func NewPacketConn(c *net.UDPConn) PacketConn {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &udpPacketConn{c: c, resolver: net.DefaultResolver, ctx: ctx, cancel: cancel, names: make(map[string]dnsEntry)}
+	return &udpPacketConn{
+		c: c, resolver: net.DefaultResolver, ctx: ctx, cancel: cancel,
+		names:   make(map[string]dnsEntry),
+		lookups: make(map[string]*nameLookup),
+	}
 }
 
 type dnsEntry struct {
@@ -52,21 +66,35 @@ type dnsEntry struct {
 	expires time.Time
 }
 
+// ipResolver looks up the addresses of a name, as *net.Resolver does.
+type ipResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
 type udpPacketConn struct {
 	c        *net.UDPConn
-	resolver *net.Resolver
+	resolver ipResolver
 	ctx      context.Context // canceled by Close, ending lookups
 	cancel   context.CancelFunc
 	mu       sync.Mutex
 	names    map[string]dnsEntry
+	lookups  map[string]*nameLookup // by name, while it is looked up
+	held     int                    // bytes of the datagrams in lookups
 }
 
 func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
 	ip := dst.IP
-	if !ip.IsValid() {
-		var err error
-		if ip, err = u.resolve(dst.Name); err != nil {
+	if !ip.IsValid() && dst.Name == "" {
+		ip = netip.IPv4Unspecified()
+	} else if !ip.IsValid() {
+		var (
+			held bool
+			err  error
+		)
+		if ip, held, err = u.route(p, dst); err != nil {
 			return 0, err
+		} else if held {
+			return len(p), nil
 		}
 	}
 	return u.c.WriteToUDPAddrPort(p, netip.AddrPortFrom(ip, dst.Port))
@@ -517,77 +545,23 @@ func (a *association) bind(c net.Conn) {
 	a.conn = c
 	a.pending.Stop()
 	a.mu.Unlock()
-	go a.clientToTarget(c)
-	go a.targetToClient(c)
-}
-
-// udpBufPool holds the buffers of the UDP relay goroutines, which fit the
-// largest datagram with its header, so that short associations do not each
-// allocate them.
-var udpBufPool = sync.Pool{New: func() any {
-	b := make([]byte, MaxDatagramHeaderLen+65535)
-	return &b
-}}
-
-func (a *association) clientToTarget(c net.Conn) {
-	defer a.close()
-	bp := udpBufPool.Get().(*[]byte)
-	defer udpBufPool.Put(bp)
-	buf := *bp
-	for {
-		n, err := c.Read(buf)
-		if err != nil {
-			return
-		}
-		dst, h, err := DecodeDatagram(buf[:n])
-		if err != nil || a.s.AllowPacket != nil && !a.s.AllowPacket(a.req, dst) {
-			continue
-		}
-		if _, err := a.out.WriteTo(buf[h:n], dst); err != nil {
-			if netx.IsClosed(err) {
-				return
-			}
-			if a.s.OnError != nil {
-				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp send to %v: %w", dst, err))
-			}
-		}
+	d := &datagramRelay{stream: c, out: a.out}
+	if a.s.AllowPacket != nil {
+		d.allow = func(dst netx.Addr) bool { return a.s.AllowPacket(a.req, dst) }
 	}
-}
-
-func (a *association) targetToClient(c net.Conn) {
-	defer a.close()
-	// Replies are read in place after room for the longest header, which is
-	// then written just before the payload, so they are not copied.
-	bp := udpBufPool.Get().(*[]byte)
-	defer udpBufPool.Put(bp)
-	packet := *bp
-	payload := packet[MaxDatagramHeaderLen:]
-	var hdr [MaxDatagramHeaderLen]byte
-	for {
-		n, src, err := a.out.ReadFrom(payload)
-		if err != nil {
-			if a.s.OnError != nil && !netx.IsClosed(err) && !errors.Is(err, io.EOF) {
-				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp receive: %w", err))
-			}
-			return
-		}
-		h, err := AppendDatagram(hdr[:0], src, nil)
-		if err != nil {
-			continue
-		}
-		start := MaxDatagramHeaderLen - len(h)
-		copy(packet[start:], h)
-		if _, err := c.Write(packet[start : MaxDatagramHeaderLen+n]); err != nil {
-			if netx.IsClosed(err) || errors.Is(err, os.ErrDeadlineExceeded) {
-				return
-			}
-			// One undeliverable reply, such as one too large once wrapped,
-			// does not end the association.
-			if a.s.OnError != nil {
-				a.s.onError(a.req.Conn, fmt.Errorf("socks5: udp reply from %v: %w", src, err))
-			}
-		}
+	if a.s.OnError != nil {
+		d.onError = func(err error) { a.s.onError(a.req.Conn, err) }
 	}
+	go func() {
+		defer a.close()
+		_ = d.requests()
+	}()
+	go func() {
+		defer a.close()
+		if err := d.replies(); err != nil && d.onError != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+			d.onError(err)
+		}
+	}()
 }
 
 func (a *association) close() {

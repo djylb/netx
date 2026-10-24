@@ -6,22 +6,29 @@ Requires Go 1.26. Every package builds on all major Go ports, including
 Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
 return an error matching `errors.ErrUnsupported` where they are not available.
 
-| Package                             | Contents                                                                     |
-|-------------------------------------|------------------------------------------------------------------------------|
-| `github.com/djylb/netx`             | conn wrappers, `Relay`, `ConnGroup`, in-memory/UDP listeners, error helpers  |
-| `github.com/djylb/netx/tlsconn`     | bounded TLS handshakes, TLS over any dialer, self-signed certs, pins, certs  |
-| `github.com/djylb/netx/proxyproto`  | PROXY protocol v1 and v2: build, decode, header-reading conn and listener    |
-| `github.com/djylb/netx/transparent` | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations   |
-| `github.com/djylb/netx/socks5`      | SOCKS5 and SOCKS4 codec, client dialer and a configurable server             |
-| `github.com/djylb/netx/httpproxy`   | HTTP proxy server: CONNECT tunnels and request forwarding                    |
-| `github.com/djylb/netx/httphead`    | HTTP/1.x head reader and parser: fields, body framing, request targets       |
-| `github.com/djylb/netx/proxydial`   | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`   |
+| Package                               | Contents                                                                          |
+|---------------------------------------|-----------------------------------------------------------------------------------|
+| `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory/UDP listeners, error helpers       |
+| `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, self-signed certs, pins, certs       |
+| `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
+| `github.com/djylb/netx/transparent`   | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations        |
+| `github.com/djylb/netx/socks5`        | SOCKS5 and SOCKS4 codec, client dialer and a configurable server                  |
+| `github.com/djylb/netx/httpproxy`     | HTTP proxy server: CONNECT tunnels and request forwarding                         |
+| `github.com/djylb/netx/httphead`      | HTTP/1.x head reader and parser: fields, body framing, request targets            |
+| `github.com/djylb/netx/forwarded`     | real client address behind trusted proxies: X-Forwarded-For, X-Real-IP, Forwarded |
+| `github.com/djylb/netx/httprewrite`   | header templates and rules for reverse proxies, redirect rewriting                |
+| `github.com/djylb/netx/wsconn`        | WebSocket: handshakes, messages, stream `net.Conn`, permessage-deflate            |
+| `github.com/djylb/netx/wsconn/wshttp` | WebSocket for `net/http` handlers, also over HTTP/2                               |
+| `github.com/djylb/netx/proxydial`     | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`        |
 
 Each package depends only on the standard library and links only what it uses.
 `crypto/tls` adds a large amount of code to a binary as soon as it is
-imported, so only `tlsconn` and `proxydial` (for `https` proxies) import it; the
-root package, `proxyproto`, `transparent`, `socks5`, `httpproxy` and `httphead`
-stay small.
+imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
+`httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
+them link anyway) import it; the root package, `proxyproto`, `transparent`,
+`socks5`, `httpproxy`, `httphead`, `forwarded` and `wsconn` stay small.
+`forwarded` does not import `net/http`: it takes a header as the
+`map[string][]string` that `http.Header` is.
 
 ## Install
 
@@ -664,6 +671,36 @@ fromName := netx.HostAddr("127.0.0.1.", 80)    // {IP: 127.0.0.1, Port: 80}
 - `String` gives `host:port` for `net.Dial`, `Host` the host alone, and the
   zero `Addr` prints as `0.0.0.0:0`.
 
+### Address scopes
+
+`ScopeOf` classifies an IP address by the IANA IPv4 and IPv6 Special-Purpose
+Address Registries, and `IsGlobal` reports whether it is globally reachable
+unicast:
+
+```go
+if !netx.IsGlobal(candidate.Addr()) {
+	return // not worth offering to a peer on the Internet
+}
+switch netx.ScopeOf(addr) {
+case netx.ScopePrivate, netx.ScopeShared, netx.ScopeLinkLocal:
+	// on the local network or behind carrier-grade NAT
+}
+```
+
+- Scopes: `ScopeInvalid`, `ScopeUnspecified`, `ScopeLoopback`,
+  `ScopeLinkLocal`, `ScopePrivate` (RFC 1918, fc00::/7, 64:ff9b:1::/48),
+  `ScopeShared` (100.64.0.0/10), `ScopeMulticast`, `ScopeBroadcast`,
+  `ScopeDocumentation`, `ScopeBenchmarking`, `ScopeReserved` and
+  `ScopeGlobal`.
+- IPv4-mapped addresses are classified as IPv4; zones are ignored. Globally
+  reachable entries inside reserved blocks, such as the PCP and TURN anycast
+  addresses 192.0.0.9 and 2001:1::1, are global; IPv6 outside 2000::/3 that
+  no entry names is reserved.
+- 6to4 (2002::/16), Teredo (2001::/32) and NAT64 (64:ff9b::/96) addresses
+  are global when the IPv4 addresses they embed are, else reserved.
+- It is a table lookup indexed by the first byte: 2–7 ns for most addresses,
+  no allocation.
+
 ## Error Helpers
 
 ```go
@@ -1163,7 +1200,9 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   clients. `socks5.ListenAssociationUDP` is such a `ListenUDP`, on the
   address the client reached the server at.
   Replies from any source are relayed (full cone), and a reply that cannot be
-  delivered is reported to `OnError` and dropped. An association ends with its
+  delivered is reported to `OnError` and dropped.
+  Datagrams to names do not hold up the others while the names are looked
+  up (see `NewPacketConn`). An association ends with its
   control connection, or after `UDPIdleTimeout`, which closes the control
   connection; `UDPOutlivesControl` keeps it for clients that close the control
   connection early.
@@ -1211,6 +1250,60 @@ func runSOCKS(ln net.Listener, udp net.PacketConn) error {
   credentials), and reserved bytes and the username/password version byte are
   not checked. A custom `MethodNoAuth` authenticator, such as an IP allowlist,
   still decides on those clients and on SOCKS4 ones.
+
+### UDP relay
+
+`socks5.DatagramRelay` relays UDP ASSOCIATE datagrams (RFC 1928 section 7
+headers) between a stream that carries them one per message, such as a
+`netx.FramedConn` made with `netx.WithFramedDatagrams` over a tunnel, and a
+`socks5.PacketConn` that sends them on. It is the UDP half of a server
+whose clients reach it through such a stream, for example the egress end of
+a tunnel:
+
+```go
+func serveUDPTunnel(ctx context.Context, tunnel net.Conn) error {
+	udp, err := netx.ListenEphemeralUDP(ctx, nil)
+	if err != nil {
+		_ = tunnel.Close()
+		return err
+	}
+	r := &socks5.DatagramRelay{
+		Allow:       func(dst netx.Addr) bool { return dst.Port != 25 },
+		IdleTimeout: 3 * time.Minute,
+	}
+	framed := netx.NewFramedConn(tunnel, netx.WithFramedDatagrams(), netx.WithFramedReadBuffer(16<<10))
+	return r.Relay(ctx, framed, socks5.NewPacketConn(udp))
+}
+```
+
+- Each datagram read from the stream is decoded and its payload sent to its
+  destination; each reply is written back with one `Write`, headed by its
+  source. With a `NewPacketConn` egress, one socket sends everything, so the
+  relay behaves as a full-cone NAT: every destination sees the same source
+  address and port, and replies from any address and port are delivered,
+  including from peers that were never sent to.
+- Datagrams with a fragment number other than 0 are dropped (fragmentation is
+  not supported), as are truncated ones and ones longer than any UDP datagram
+  (`ErrDatagramTooLarge`); `OnError` receives the reason. A failed send, or a
+  reply the stream does not take, is reported and dropped without ending the
+  relay.
+- Hooks: `Allow` (drop by destination; names arrive unresolved), `Sent` and
+  `Received` (destination or source and payload length, for counting),
+  `OnError` and `IdleTimeout` (ends with `netx.ErrRelayIdle`).
+- `Relay` returns when `ctx` ends (`context.Cause(ctx)`), when the stream
+  reaches EOF or either side is closed (`nil`), on an error of either side,
+  or when idle, and it closes both sides. Each direction reuses one buffer;
+  datagrams to IP addresses are relayed without copying or allocating.
+- `socks5.Server` serves its UDP associations with the same relay.
+
+`NewPacketConn` resolves names without blocking `WriteTo`: a datagram to a
+name that is not cached is held while the name is looked up and then sent,
+in order with the later datagrams to that name, while datagrams to other
+destinations pass meanwhile. Results are cached for a minute and failures
+for five seconds, which `WriteTo` then reports. Up to 64 names are looked
+up at once, each holding up to 16 datagrams and 256 KiB in all; datagrams
+beyond that are dropped with `ErrLookupBusy`, as a full socket buffer would
+drop them. Replies always carry the IP address they came from.
 
 ## HTTP Proxy
 
@@ -1372,6 +1465,236 @@ framing, n, err := httphead.RequestBody(req.Header, req.Minor)
 - `Header` has `Get`, `Values`, `Count`, `Has`, `HasToken`, `Add`, `Set` and
   `Del`, and `AppendTo` writes it back, refusing fields that would add a
   line.
+
+## Real client addresses
+
+`forwarded.Resolver` finds the client of a request behind trusted proxies.
+It starts at the TCP peer and, while the hop it is at is trusted, steps to
+the address that hop recorded, from the right, so that addresses a client
+prepends are never read:
+
+```go
+trusted, err := forwarded.ParsePrefixSet("10.0.0.0/8", "fd00::/8")
+r := &forwarded.Resolver{Trusted: trusted} // X-Forwarded-For
+
+func handler(w http.ResponseWriter, req *http.Request) {
+	peer, _ := forwarded.ParseNode(req.RemoteAddr)
+	c := r.Resolve(peer, req.Header)
+	log.Println(c.Addr.Addr(), c.Proto, c.Host) // client, scheme and host it used
+}
+```
+
+- `Header` picks the one field the proxies set: `HeaderXForwardedFor`
+  (all field lines, comma lists), `HeaderForwarded` (RFC 7239: quoted values,
+  IPv6 in brackets, ports, obfuscated identifiers and `unknown`) or
+  `HeaderXRealIP`; `Name` reads another field with the same syntax, such as
+  `Cf-Connecting-Ip`. Fields of the other kinds are ignored, as a client may
+  have sent them.
+- `Client` holds the address (IPv4 for IPv4-mapped, port 0 when none was
+  recorded), the number of trusted hops, the scheme and host from the
+  element that names the client (Forwarded) or from X-Forwarded-Proto and
+  X-Forwarded-Host (only when the peer is trusted), and `Opaque` when a
+  trusted proxy recorded an obfuscated or unparsable hop, in which case the
+  address is that proxy's.
+- Forwarded is parsed from the right as well, so that elements a trusted
+  proxy appends are read even after a malformed or hostile one.
+- `PrefixSet` is built once, merges overlapping prefixes and looks addresses
+  up by binary search (3.5 ns in 1000 prefixes). `Resolve` does not
+  allocate: 15 ns for an untrusted peer, 80–250 ns through one or more
+  proxies.
+- `AppendXForwardedFor`, `AppendForwarded` and `AppendElement` format the
+  fields a proxy passes on.
+
+## Header rewriting
+
+`httprewrite` compiles templates with variables in the style of common
+reverse proxies once and expands them per request, and applies rules that
+set, add or delete fields:
+
+```go
+rules, err := httprewrite.ParseRules(`
+X-Forwarded-For: ${proxy_add_x_forwarded_for}
+X-Forwarded-Proto: ${forwarded_proto}
+X-Real-IP: ${remote_addr}
+X-Internal-Token: ${unset}
+`, nil)
+rw := &httprewrite.Rewriter{
+	Request:   rules,
+	Redirects: []httprewrite.Redirect{{To: httprewrite.MustCompile("${forwarded_proto}://${http_host}", nil)}},
+	Resolver:  &forwarded.Resolver{Trusted: trusted},
+}
+proxy := &httputil.ReverseProxy{
+	Rewrite: func(pr *httputil.ProxyRequest) {
+		pr.SetURL(backend)
+		if err := rw.Rewrite(pr); err != nil {
+			log.Print(err)
+		}
+	},
+	ModifyResponse: rw.ModifyResponse,
+}
+```
+
+- Built-in variables cover the scheme, host, method, request URI, path,
+  query, client and TCP peer addresses, local address, forwarding fields
+  with this hop appended, the families `http_NAME`, `upstream_http_NAME`,
+  `cookie_NAME` and `arg_NAME`, the response status and the time. `Vars`
+  add the program's own, reading `Context.Data`. Unknown variables are
+  compile errors; `$$` is a literal `$`.
+- An expansion that would put a control character such as CR, LF or NUL in a
+  field value fails, so that no variable, such as the decoded path, can
+  inject a field. Values are used as written, without HTML unescaping.
+- A rule whose value expands to nothing deletes the field, so that
+  `Upgrade: ${http_upgrade}` sends none for ordinary requests; `${unset}`
+  deletes it always. Rules on `Host` set the request's Host.
+- Redirects rewrite `Location` and the URL of `Refresh`; an empty `From`
+  matches the backend's own origin.
+- Use ReverseProxy's `Rewrite`, not `Director`: hop-by-hop fields are removed
+  after `Director`, so rules on them would be lost. In `Rewrite`, variables
+  read the inbound request, which still holds Connection, Upgrade and the
+  client's forwarding fields.
+- Expanding into a buffer does not allocate; a template that is a literal or
+  a single field such as `${http_host}` expands to a string without
+  allocating.
+
+## WebSocket
+
+`github.com/djylb/netx/wsconn` implements WebSocket (RFC 6455) for tunnels,
+proxies and message channels: the opening handshake on both sides, a
+message API, and `StreamConn`, a `net.Conn` that carries a byte stream over
+binary messages. permessage-deflate (RFC 7692) is optional. It reads
+handshakes with `httphead` and links neither `net/http` nor `crypto/tls`;
+`wsconn/wshttp` upgrades the requests of a `net/http` handler, also over
+HTTP/2.
+
+```go
+// serveTunnel accepts WebSocket tunnels on raw connections, such as those
+// a port multiplexer hands over, and relays each to a backend.
+func serveTunnel(ctx context.Context, raw net.Conn, backend string) {
+	c, err := wsconn.Accept(ctx, raw, &wsconn.ServerOptions{CheckOrigin: wsconn.AnyOrigin})
+	if err != nil {
+		return // answered with 4xx and closed
+	}
+	tunnel := wsconn.NewStreamConn(c) // RemoteAddr keeps the port
+	dst, err := net.Dial("tcp", backend)
+	if err != nil {
+		_ = c.CloseWithStatus(wsconn.StatusTryAgainLater, "backend down")
+		return
+	}
+	_, _, _ = netx.Relay(ctx, tunnel, dst)
+}
+
+// dialTunnel reaches a wss URL through a TLS dialer that verifies the
+// server, over an upstream proxy if forward is one.
+func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (net.Conn, error) {
+	d := &wsconn.Dialer{
+		ClientOptions: wsconn.ClientOptions{Host: "tunnel.example.com"},
+		Forward:       forward,
+		TLS:           &tlsconn.Dialer{Forward: forward, Config: &tls.Config{}},
+	}
+	c, _, err := d.Dial(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	return wsconn.NewStreamConn(c), nil
+}
+```
+
+- Servers: `Accept(ctx, conn, opts)` reads the request itself;
+  `AcceptRequest(ctx, conn, br, req, opts)` takes one already read with
+  `httphead`, with the reader that holds what the client sent after it, so
+  that one port can serve WebSocket and plain HTTP; `CheckRequest` and
+  `Handshake.Accept` split the two steps, as `wshttp.Upgrade(w, r, opts)`
+  does, which answers refusals through the `ResponseWriter`, hijacks on
+  success, sends the fields of `w.Header()` with the 101 response and lets
+  the handler return. Refused requests get 400, 403, 405, 426 (with
+  `Sec-WebSocket-Version: 13`), 431, 500 (a response field of `Header`
+  that cannot be sent) or 505, or the 4xx or 5xx status of a
+  `*HandshakeError` from `CheckOrigin`. `CheckOrigin` defaults to
+  same-origin and accepts requests without `Origin`; `Subprotocols` are
+  chosen by the server's preference; `Conn.Request()` keeps the request,
+  for authentication or the fields that carry a client address.
+- Clients: `Client(ctx, conn, url, opts)` runs the handshake over a
+  connection the caller dialed, such as one through a proxy, already under
+  TLS for `wss`; `Dialer.Dial` dials `ws` URLs with `Forward` and `wss` URLs
+  with `TLS`, such as a `tlsconn.Dialer`, whose certificate verification is
+  on unless its config turns it off, and fails with `ErrNoTLSDialer`
+  without one. `Host` overrides the request's Host field, and `Header` adds
+  fields; the handshake's own fields are refused. A refused handshake is a
+  `*HandshakeError` with the status and the response.
+- Handshakes are bounded by the context, or `HandshakeTimeout` (10s), and
+  close the connection on failure, as the other handshakes of this module
+  do.
+- Messages: `ReadMessage`, `AppendMessage` (into a reused buffer, without
+  allocating), `NextReader`, `WriteMessage` and `NextWriter` (frames of up to
+  32 KiB, or what a larger `Write` gets), text and binary. `ReadLimit`
+  (4 MiB, after decompression) bounds messages: kept small because deflate
+  inflates about 1000:1, so with compression a few kilobytes on the wire
+  make a message of the limit; a `StreamConn` reads without it, as it holds
+  no message in memory.
+- Concurrency: one goroutine reads; writes may come from any number of
+  goroutines and are serialised frame by frame, with the frames of one
+  message never interleaved with another's, while control frames go out
+  between them. Pings are answered while reading, without waiting for a
+  write in progress: the pong is queued and sent by the writer that holds
+  the connection, or, when none does, by the reader within the close
+  timeout and its read deadline, so that a peer that pings and never reads
+  cannot hold the reader; such a pong is dropped. `OnPing` and `OnPong`
+  observe them, such as to extend a read deadline. A peer that does not
+  read stalls writes until the buffers fill, so servers that write, also
+  only now and then, need write deadlines as well as read deadlines.
+- Close sends a close frame, waits for the peer's, reading and discarding
+  messages itself when no read is in progress, and closes the connection,
+  all within `CloseTimeout` (5s), also when a write is blocked, which then
+  fails; so the connection does not end with a reset that could lose data
+  in flight. A peer's close frame is answered at once and read as a
+  `*CloseError` with its code and reason; the server then closes the
+  connection beneath first. WebSocket has no half-close: a close frame ends
+  both directions.
+- `StreamConn`: each `Write` is one binary message of one frame, `Read`
+  crosses message bounds and also takes text messages; close codes 1000,
+  1001 and none, and a peer that just closes the connection between
+  frames, end the stream with `io.EOF`. Deadlines are the connection's; a
+  read or write cut short by one leaves the connection usable, unless it
+  wrote part of a frame, or of a fragmented message, or read part of a
+  compressed message.
+- Writes: a server copies at most 32 KiB of a payload, a frame that fits
+  the write buffer goes out with its header in one write and a larger one
+  with writev on TCP and Unix connections; a client masks into the pooled
+  write buffer. Idle connections hold only their read buffer (4 KiB).
+- Validation follows RFC 6455 strictly where a lax reading could be
+  abused: reserved bits and opcodes, the masking direction, control frames
+  of at most 125 bytes that are not fragmented, fragment order, close codes
+  and UTF-8 in text messages (checked as it arrives) and close reasons fail
+  the connection with 1002, 1007 or 1009. It is lenient where the RFC
+  allows: non-minimal payload lengths, any letter case in handshake tokens,
+  a missing Host field.
+- Compression: `Compression{Level, Threshold}` offers or accepts
+  permessage-deflate without context takeover in both directions, so that
+  a connection keeps no compressor state between messages; offers that
+  need a window smaller than 32 KiB, which compress/flate cannot produce,
+  are declined. Messages under `Threshold` (128 bytes) go out uncompressed.
+- WebSocket over HTTP/2 (RFC 8441): `wshttp.Upgrade` also accepts an
+  extended CONNECT, answers it with 200 and runs the connection over the
+  stream, many to one HTTP/2 connection. `net/http` accepts extended
+  CONNECT only when the program starts with `GODEBUG=http2xconnect=1` in
+  its environment; without it everything is HTTP/1.1 as before. A stream
+  lives only as long as its handler, so `wshttp.Serve(w, r, opts, fn)` runs
+  `fn` and closes the connection when it returns, and with `Upgrade` the
+  handler waits for `wshttp.Done(c)`; the end of the stream or of the
+  HTTP/2 connection closes the WebSocket connection. On a server's
+  stream, an expired write deadline resets the stream and an expired read
+  deadline ends its reading for good; on a client's stream either resets
+  it. `wshttp.Dialer` dials over HTTP/2 with a `Transport` that can send
+  the `:protocol` pseudo-field, which `net/http`'s cannot, and falls back
+  to HTTP/1.1 only through its `HTTP1` dialer, within one handshake
+  timeout; URL credentials go out as Basic on both. `CheckRequest`, `Handshake.ResponseHeader`, `Handshake.NewConn`,
+  `ClientOptions.ExtendedConnectHeader` and `ExtendedConnectClient` serve
+  other HTTP/2 stacks; `NewConn` wraps a connection whose handshake was done
+  otherwise.
+- The masking keys and handshake keys come from the runtime's ChaCha8
+  generator, and the accept key's SHA-1 is computed in the package, as
+  `crypto/sha1` would add about 176 KB of FIPS code to a program
+  (linux/amd64, stripped).
 
 ## Upstream Proxies
 

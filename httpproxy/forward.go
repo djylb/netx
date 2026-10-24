@@ -224,7 +224,7 @@ func (sc *serverConn) exchange(ctx context.Context, req *Request, up *upConn, po
 	}
 	switch {
 	case err != nil && x.interrupted.Load() && x.respDone.Load():
-		err = nil // the rest of the request was cut off on purpose
+		// The rest of the request was cut off on purpose.
 	case err != nil:
 		return false, err
 	case x.failed != nil:

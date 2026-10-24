@@ -129,7 +129,7 @@ func HostIP(name string) (netip.Addr, bool) {
 	// Only a name that starts with a digit or holds a colon can be an IP
 	// literal; skipping the parse for the others spares an error for each.
 	host := strings.TrimSuffix(name, ".")
-	if host == "" || !(host[0] >= '0' && host[0] <= '9' || strings.IndexByte(host, ':') >= 0) {
+	if host == "" || (host[0] < '0' || host[0] > '9') && strings.IndexByte(host, ':') < 0 {
 		return netip.Addr{}, false
 	}
 	ip, err := netip.ParseAddr(host)

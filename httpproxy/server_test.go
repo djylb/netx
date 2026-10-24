@@ -308,7 +308,7 @@ func TestOriginRequestsNeedHandle(t *testing.T) {
 		"GET ftp://example.com/ HTTP/1.1\r\n\r\n",
 	} {
 		code, _ := rawStatus(t, addr, raw)
-		if code != 400 && code != 407 && !(code == 200 && strings.HasPrefix(raw, "OPTIONS * ")) {
+		if code != 400 && code != 407 && (code != 200 || !strings.HasPrefix(raw, "OPTIONS * ")) {
 			t.Errorf("%q = %d, want 400 or 407, or 200 for OPTIONS *", raw, code)
 		}
 	}
