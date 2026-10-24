@@ -82,13 +82,20 @@ func TestCopyLimitedConn(t *testing.T) {
 		dst, sink := tcpPair(t)
 		go func() { _, _ = io.WriteString(w, strings.Repeat("x", 100000)+"rest") }()
 		src := &io.LimitedReader{R: NewPrefixConn(r, []byte("pre")), N: 100003}
+		// Read while Copy writes: a small socket buffer, as on js/wasm,
+		// would otherwise block the copy.
+		got := make([]byte, 100003)
+		read := make(chan error, 1)
+		go func() {
+			_ = sink.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, err := io.ReadFull(sink, got)
+			read <- err
+		}()
 		n, err := Copy(context.Background(), dst, src, flow)
 		if err != nil || n != 100003 {
 			t.Fatalf("Copy = %d, %v", n, err)
 		}
-		_ = sink.SetReadDeadline(time.Now().Add(5 * time.Second))
-		got := make([]byte, n)
-		if _, err := io.ReadFull(sink, got); err != nil || !bytes.HasPrefix(got, []byte("prexxx")) {
+		if err := <-read; err != nil || !bytes.HasPrefix(got, []byte("prexxx")) {
 			t.Fatalf("copied %q..., %v", got[:6], err)
 		}
 		_ = r.SetReadDeadline(time.Now().Add(5 * time.Second))
