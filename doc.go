@@ -39,7 +39,8 @@
 // PROXY protocol headers, transparent accepts transparently redirected TCP
 // connections and UDP datagrams, socks5 implements SOCKS5 and SOCKS4 with a client dialer and a
 // configurable server, httpproxy is an HTTP proxy server of the same shape,
-// httphead parses HTTP/1.x heads, and proxydial dials through HTTP CONNECT,
+// httphead parses HTTP/1.x heads, duplex joins a read half and a write half
+// into a connection, and proxydial dials through HTTP CONNECT,
 // SOCKS5 and SOCKS4 proxies, also over TLS.
 //
 // Every package depends only on the standard library, and only tlsconn and

@@ -10,7 +10,7 @@ import (
 // TestPackageDependencies checks what the README promises: every package
 // depends on the standard library and this module alone, crypto/tls is
 // linked only by tlsconn, proxydial, and httprewrite and wsconn/wshttp
-// through net/http, and forwarded, httphead, proxyproto, tlsconn and
+// through net/http, and duplex, forwarded, httphead, proxyproto, tlsconn and
 // transparent depend on the standard library and this module's internal
 // packages alone, which depend on the standard library alone.
 func TestPackageDependencies(t *testing.T) {
@@ -29,6 +29,7 @@ func TestPackageDependencies(t *testing.T) {
 	}
 	rules := []pkgRule{
 		{module, false, false},
+		{module + "/duplex", false, true},
 		{module + "/proxyproto", false, true},
 		{module + "/transparent", false, true},
 		{module + "/socks5", false, false},

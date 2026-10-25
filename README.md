@@ -9,6 +9,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | Package                               | Contents                                                                          |
 |---------------------------------------|-----------------------------------------------------------------------------------|
 | `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory/UDP listeners, error helpers       |
+| `github.com/djylb/netx/duplex`        | a read half and a write half as one `net.Conn`, with half-closes and hot swaps    |
 | `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, certs, pins, uploaded-cert checks    |
 | `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
 | `github.com/djylb/netx/transparent`   | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations        |
@@ -26,9 +27,9 @@ Each package depends only on the standard library and links only what it uses.
 `crypto/tls` adds a large amount of code to a binary as soon as it is
 imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
 `httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
-them link anyway) import it; the root package, `proxyproto`, `transparent`,
-`socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn` and `safedial` stay
-small.
+them link anyway) import it; the root package, `duplex`, `proxyproto`,
+`transparent`, `socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn` and
+`safedial` stay small.
 `forwarded` does not import `net/http`: it takes a header as the
 `map[string][]string` that `http.Header` is.
 
@@ -878,6 +879,115 @@ not exist), not unreachable, and canceled contexts and operations are
 returns that information as fields, for structured logs, and its `String`
 formats them as the line above; `errno_name`/`ErrnoName` are given only for errnos the classifiers
 recognise, others appear as the number alone.
+
+## Joining halves
+
+`duplex.Join(r, w)` makes a `net.Conn` of any reader and writer, such as the
+response and request bodies of one HTTP exchange, two one-way pipes, or
+standard input and output, so that code written for connections can use
+them:
+
+```go
+// over runs proto over one streamed HTTP request to a server that answers
+// before the request ends: what proto writes is the request body and what
+// it reads the response body.
+func over(ctx context.Context, url string, proto func(net.Conn) error) error {
+	uplink, body := io.Pipe()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, uplink)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	c := duplex.Join(resp.Body, body)
+	defer c.Close()
+	return proto(c)
+}
+```
+
+- `CloseRead` stops the read half and `CloseWrite` the write half, with
+  their `CloseRead` or `CloseWrite` methods, or else `Close`; `Close` closes
+  both. A value that is both halves is closed once, and stays open until
+  both directions are closed when it can only be closed whole. Afterwards
+  reads or writes in that direction return `net.ErrClosed`.
+- Deadlines go to halves with `SetReadDeadline`, `SetWriteDeadline` or
+  `SetDeadline`. Setting one for a half without them returns an error
+  matching `errors.ErrUnsupported`; the connection does not emulate them,
+  since a read that cannot be interrupted would need a goroutine that
+  outlives it.
+- Addresses come from the halves that have them, else are `duplex`. A nil
+  read half reads `io.EOF`, a nil write half fails writes with
+  `errors.ErrUnsupported`.
+- `WriteTo` and `ReadFrom` hand copies to the halves, so `io.Copy` and
+  `netx.Relay` splice between sockets beneath the connection as they would
+  between the sockets themselves. Read and Write do not allocate.
+
+A `duplex.Writer` is a write half whose stream can be swapped, and a
+`duplex.Reader` a read half that reads one stream after another, for a
+stream that its sender moves from one channel to the next, such as from one
+upload request to another or to a new connection after a reconnect. The
+sender swaps; the receiver only appends each channel as it arrives:
+
+```go
+// The sender's uplink: writes go to the current upload.
+up := new(duplex.Writer)
+if err := up.Swap(ctx, firstUpload); err != nil {
+	return err
+}
+c := duplex.Join(downlink, up)
+
+// Later, from the code that rotates uploads: Swap waits for the write in
+// progress, holds back the next ones, switches, and closes the first upload,
+// which ends its body for the receiver.
+err := up.Swap(ctx, nextUpload)
+```
+
+```go
+// The receiver: each upload handler appends its body to the session and
+// returns once the session has read it. Reads go on from one body to the
+// next in order and wait for the next while there is none.
+func (s *session) upload(w http.ResponseWriter, r *http.Request) {
+	done, err := s.in.Append(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusGone)
+		return
+	}
+	select {
+	case <-done:
+	case <-r.Context().Done():
+	}
+}
+```
+
+- Every `Write` goes whole to one stream, and the old stream gets nothing
+  after the swap, so a receiver that reads each channel to its end and then
+  the next reads the bytes in the order they were written. The receiver
+  must append the channels in the order of the swaps; a sender with several
+  goroutines that swap opens each channel and swaps to it under one lock.
+- Swap dials nothing: the sender opens the next channel first, while writes
+  go on into the old one. When its context ends first, Swap leaves both
+  streams as they were.
+- The receiver learns of a swap only from the old stream ending, so each
+  stream must end cleanly when closed, as a request body or a pipe does. A
+  receiver that has not appended the next channel yet loses nothing: the
+  sender's writes wait in that channel's transport and reads wait for the
+  `Append`, so both sides should bound the wait with deadlines. A sender
+  that must know the old channel was read takes that from its transport,
+  such as the response to the old upload.
+- `Reader` closes each stream it has read to its end and moves on. While it
+  has none, reads wait for `Append`, the read deadline or `Close`; after
+  `End` they return `io.EOF` once the streams appended before it are read.
+  An error other than `io.EOF` is returned and leaves the stream current.
+- Both own their streams: `Swap` closes the stream it replaces, and `Close`
+  closes the current one, or the ones left. A `Writer` without a stream yet
+  holds writes back until the first `Swap`. Deadlines apply to the waits
+  and to every stream that has deadline methods.
+- Their Read and Write do not allocate, and the plain `Conn` does not pay
+  for them. A `Writer` copies through `Write`, so that a copy into it never
+  holds up a swap; a `Reader` copies each stream through its own `WriteTo`
+  or the destination's `ReadFrom`.
 
 ## PROXY Protocol
 
