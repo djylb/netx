@@ -35,6 +35,9 @@
 // the writers, though: servers need write deadlines as well as read
 // deadlines.
 //
+// CloseWrite sends a close frame and leaves the closing handshake to the
+// reader, as a half-close of the writing direction.
+//
 // Close sends a close frame and waits, up to Options.CloseTimeout, for the
 // peer's, reading and discarding messages if no read is in progress, so
 // that the connection does not end with a reset that could lose data in

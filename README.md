@@ -1886,8 +1886,9 @@ func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (ne
   fails; so the connection does not end with a reset that could lose data
   in flight. A peer's close frame is answered at once and read as a
   `*CloseError` with its code and reason; the server then closes the
-  connection beneath first. WebSocket has no half-close: a close frame ends
-  both directions.
+  connection beneath first. `CloseWrite` sends the close frame alone, as a
+  half-close: no message can be written after it, and reads go on until
+  the peer's close frame, which ends the connection.
 - `StreamConn`: each `Write` is one binary message of one frame, `Read`
   crosses message bounds and also takes text messages; close codes 1000,
   1001 and none, and a peer that just closes the connection between

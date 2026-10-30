@@ -335,6 +335,73 @@ func TestCloseHandshake(t *testing.T) {
 	}
 }
 
+// CloseWrite half-closes: the peer reads the close frame, can still send
+// messages until it closes in turn, and its close frame ends the
+// connection on both sides.
+func TestCloseWrite(t *testing.T) {
+	for _, initiator := range []string{"server", "client"} {
+		t.Run(initiator, func(t *testing.T) {
+			srv, cli := pair(t, nil, nil)
+			a, b := srv, cli
+			if initiator == "client" {
+				a, b = cli, srv
+			}
+			if err := a.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.CloseWrite(); err != nil {
+				t.Fatalf("second CloseWrite: %v", err)
+			}
+			if err := a.WriteMessage(Binary, []byte("late")); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("write after CloseWrite: %v", err)
+			}
+			// b answers the close frame while it reads; a reads on until
+			// then. A client waits for the server to end the connection.
+			got := make(chan error, 2)
+			for _, c := range []*Conn{a, b} {
+				go func() {
+					_, _, err := c.ReadMessage()
+					got <- err
+				}()
+			}
+			for range 2 {
+				var ce *CloseError
+				if err := <-got; !errors.As(err, &ce) || ce.Code != StatusNormalClosure {
+					t.Fatalf("read %v", err)
+				}
+			}
+			for _, c := range []*Conn{a, b} {
+				select {
+				case <-c.done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("connection not closed")
+				}
+			}
+		})
+	}
+}
+
+// After CloseWrite the messages the peer sent before its close frame are
+// read.
+func TestCloseWriteReadsOn(t *testing.T) {
+	srv, cli := pair(t, nil, nil)
+	if err := cli.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.WriteMessage(Binary, []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	if _, p, err := cli.ReadMessage(); err != nil || string(p) != "after" {
+		t.Fatalf("read %q, %v", p, err)
+	}
+	if _, _, err := srv.ReadMessage(); err == nil {
+		t.Fatal("server read no close frame")
+	}
+	if err := cli.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Close returns within the close timeout when a write is blocked because
 // the peer does not read, and the write fails.
 func TestCloseWithBlockedWriter(t *testing.T) {

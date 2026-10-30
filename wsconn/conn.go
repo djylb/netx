@@ -654,6 +654,21 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 	return nil
 }
 
+// CloseWrite sends a close frame with StatusNormalClosure, after which
+// messages can no longer be written, and leaves the rest of the closing
+// handshake to the reader: reads go on until the peer's close frame,
+// which ends the connection, and Close may follow at any time. A message
+// that a writer from NextWriter has not finished fails. The close timeout
+// bounds the write, also one in progress; when it is negative, the frame
+// is sent only when no write is in progress, as Close sends it. A close
+// frame sent before makes it return nil.
+func (c *Conn) CloseWrite() error {
+	if c.closing.Load() {
+		return fmt.Errorf("wsconn: close write: %w", net.ErrClosed)
+	}
+	return c.sendClose(StatusNormalClosure, "", time.Now().Add(c.closeTimeout.Abs()))
+}
+
 // awaitPeer waits for the end of the closing handshake until deadline: for
 // the reader to get the peer's close frame, or, while no read is in
 // progress, it reads itself, discarding messages.
