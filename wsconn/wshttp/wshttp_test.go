@@ -92,6 +92,83 @@ func TestUpgradeRefusesPlainRequests(t *testing.T) {
 	}
 }
 
+// Check writes nothing: a handler decides on a valid handshake and either
+// answers it with Accept or serves the request otherwise.
+func TestCheckThenAccept(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hs, err := wshttp.Check(w, r, &wsconn.ServerOptions{Subprotocols: []string{"echo"}})
+		if err != nil || hs.Subprotocol == "" || r.Header.Get("X-Pass") == "" {
+			http.Error(w, "elsewhere", http.StatusTeapot)
+			return
+		}
+		c, err := wshttp.Accept(w, r, hs)
+		if err != nil {
+			return
+		}
+		typ, p, err := c.ReadMessage()
+		if err == nil {
+			_ = c.WriteMessage(typ, p)
+		}
+		_ = c.Close()
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	for _, tc := range []struct {
+		name   string
+		header httphead.Header
+		protos []string
+		ok     bool
+	}{
+		{"accepted", httphead.Header{{Name: "X-Pass", Value: "1"}}, []string{"echo"}, true},
+		{"undecided", nil, []string{"echo"}, false},
+		{"no subprotocol", httphead.Header{{Name: "X-Pass", Value: "1"}}, []string{"other"}, false},
+	} {
+		d := &wsconn.Dialer{ClientOptions: wsconn.ClientOptions{Subprotocols: tc.protos, Header: tc.header}}
+		c, resp, err := d.Dial(ctx, url)
+		if !tc.ok {
+			if err == nil || resp == nil || resp.Code != http.StatusTeapot {
+				t.Fatalf("%s: %v %+v", tc.name, err, resp)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		_ = c.WriteMessage(wsconn.Binary, []byte("x"))
+		if _, p, err := c.ReadMessage(); err != nil || string(p) != "x" {
+			t.Fatalf("%s: %q %v", tc.name, p, err)
+		}
+		_ = c.Close()
+	}
+	// A plain request is refused by Check with the status to answer with.
+	rec := httptest.NewRecorder()
+	if _, err := wshttp.Check(rec, httptest.NewRequest("GET", "/", nil), nil); err == nil || rec.Body.Len() != 0 {
+		t.Fatalf("plain request: %v, wrote %q", err, rec.Body.String())
+	}
+}
+
+// Accept on a ResponseWriter that cannot be hijacked writes nothing and
+// returns a 500 handshake error.
+func TestAcceptWithoutHijacker(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Sec-WebSocket-Version", "13")
+	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	rec := httptest.NewRecorder()
+	hs, err := wshttp.Check(rec, r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = wshttp.Accept(rec, r, hs)
+	var he *wsconn.HandshakeError
+	if !errors.As(err, &he) || he.Status != http.StatusInternalServerError || rec.Body.Len() != 0 || rec.Flushed {
+		t.Fatalf("%v, wrote %q", err, rec.Body.String())
+	}
+}
+
 func TestRequest(t *testing.T) {
 	r := httptest.NewRequest("GET", "/a?b=c", nil)
 	r.Header.Set("X-A", "1")

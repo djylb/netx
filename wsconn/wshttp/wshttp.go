@@ -1,7 +1,9 @@
 // Package wshttp connects package wsconn to net/http: Upgrade and Serve
-// turn the requests of a handler into WebSocket connections, and Dialer
-// dials WebSocket over HTTP/2. It is a package of its own so that programs
-// that use wsconn without net/http do not link net/http.
+// turn the requests of a handler into WebSocket connections, Check and
+// Accept do the same in two steps for a handler that decides on a request
+// before anything is answered, and Dialer dials WebSocket over HTTP/2. It
+// is a package of its own so that programs that use wsconn without
+// net/http do not link net/http.
 //
 // # HTTP/2
 //
@@ -45,9 +47,9 @@ import (
 	"github.com/djylb/netx/wsconn"
 )
 
-// Upgrade upgrades the request r to a WebSocket connection, as
-// wsconn.CheckRequest and Handshake.Accept do: a request that it refuses
-// is answered through w with its status and an error is returned.
+// Upgrade upgrades the request r to a WebSocket connection, as Check and
+// Accept do: a request that it refuses is answered through w with its
+// status and an error is returned.
 //
 // An HTTP/1.1 request is answered with 101 and hijacked: the connection
 // then belongs to the returned Conn, or is closed after a failure, the
@@ -62,12 +64,43 @@ import (
 // r.Header and r.Host are seen by opts.CheckOrigin as the fields of a
 // wsconn request, with Host first.
 func Upgrade(w http.ResponseWriter, r *http.Request, opts *wsconn.ServerOptions) (*wsconn.Conn, error) {
+	hs, err := Check(w, r, opts)
+	if err == nil {
+		var c *wsconn.Conn
+		if c, err = Accept(w, r, hs); err == nil {
+			return c, nil
+		}
+	}
+	var he *wsconn.HandshakeError
+	if errors.As(err, &he) {
+		if he.Status == http.StatusUpgradeRequired {
+			if !extendedConnect(r) {
+				w.Header().Set("Upgrade", "websocket")
+			}
+			w.Header().Set("Sec-WebSocket-Version", "13")
+		}
+		http.Error(w, he.Msg, he.Status)
+	}
+	return nil, err
+}
+
+// Check checks the request r as an opening handshake, as
+// wsconn.CheckRequest does, and writes nothing to w: a request it refuses
+// is a *wsconn.HandshakeError with the status to answer with, which the
+// caller sends, or else serves r as another request. A request that is
+// neither HTTP/1.1 nor an HTTP/2 extended CONNECT is refused with 505.
+// The fields of w.Header() and of opts.Header, as they are when Check is
+// called, go out with the response of Accept. opts may be nil.
+//
+// Check lets a handler decide on a valid handshake before anything is
+// answered, such as by its subprotocol or by an authorization, and answer
+// it with Accept.
+func Check(w http.ResponseWriter, r *http.Request, opts *wsconn.ServerOptions) (*wsconn.Handshake, error) {
 	if opts == nil {
 		opts = &wsconn.ServerOptions{}
 	}
-	extended := r.ProtoMajor == 2 && r.Method == http.MethodConnect && r.Header.Get(":protocol") != ""
+	extended := extendedConnect(r)
 	if r.ProtoMajor != 1 && !extended {
-		http.Error(w, "WebSocket needs HTTP/1.1, or HTTP/2 extended CONNECT", http.StatusHTTPVersionNotSupported)
 		return nil, &wsconn.HandshakeError{Status: http.StatusHTTPVersionNotSupported, Msg: r.Proto + " request"}
 	}
 	if !extended && len(w.Header()) > 0 {
@@ -82,28 +115,22 @@ func Upgrade(w http.ResponseWriter, r *http.Request, opts *wsconn.ServerOptions)
 		}
 		opts = &o
 	}
-	req := Request(r)
-	hs, err := wsconn.CheckRequest(req, opts)
-	if err != nil {
-		var he *wsconn.HandshakeError
-		if errors.As(err, &he) {
-			if he.Status == http.StatusUpgradeRequired {
-				if !extended {
-					w.Header().Set("Upgrade", "websocket")
-				}
-				w.Header().Set("Sec-WebSocket-Version", "13")
-			}
-			http.Error(w, he.Msg, he.Status)
-		}
-		return nil, err
-	}
-	if extended {
+	return wsconn.CheckRequest(Request(r), opts)
+}
+
+// Accept answers the handshake hs, which Check returned for r, and returns
+// the connection, as Upgrade does after its check. When the response
+// cannot be sent, because w cannot be hijacked or a response field is
+// invalid, it returns a *wsconn.HandshakeError with status 500 and nothing
+// is written, so that the caller can answer r otherwise. Once an HTTP/1.1
+// connection was hijacked, a failure closes it.
+func Accept(w http.ResponseWriter, r *http.Request, hs *wsconn.Handshake) (*wsconn.Conn, error) {
+	if hs.ExtendedConnect {
 		return acceptStream(w, r, hs)
 	}
 	conn, brw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
-		http.Error(w, "connection cannot be upgraded", http.StatusInternalServerError)
-		return nil, err
+		return nil, &wsconn.HandshakeError{Status: http.StatusInternalServerError, Msg: "connection cannot be upgraded: " + err.Error()}
 	}
 	var br *bufio.Reader
 	if brw != nil {
@@ -113,6 +140,11 @@ func Upgrade(w http.ResponseWriter, r *http.Request, opts *wsconn.ServerOptions)
 		br = brw.Reader
 	}
 	return hs.Accept(r.Context(), conn, br)
+}
+
+// extendedConnect reports whether r is an HTTP/2 extended CONNECT.
+func extendedConnect(r *http.Request) bool {
+	return r.ProtoMajor == 2 && r.Method == http.MethodConnect && r.Header.Get(":protocol") != ""
 }
 
 // Serve upgrades r as Upgrade does and runs fn with the connection on the
@@ -154,12 +186,14 @@ func Done(c *wsconn.Conn) <-chan struct{} {
 // acceptStream answers an extended CONNECT with 200 and returns the
 // connection over its stream.
 func acceptStream(w http.ResponseWriter, r *http.Request, hs *wsconn.Handshake) (*wsconn.Conn, error) {
-	h := w.Header()
-	for _, f := range hs.ResponseHeader() {
+	fields := hs.ResponseHeader()
+	for _, f := range fields {
 		if !httphead.ValidFieldName(f.Name) || !httphead.ValidFieldValue(f.Value) {
-			http.Error(w, "invalid response field", http.StatusInternalServerError)
-			return nil, errors.New("wshttp: invalid response field " + strconv.Quote(f.Name))
+			return nil, &wsconn.HandshakeError{Status: http.StatusInternalServerError, Msg: "invalid response field " + strconv.Quote(f.Name)}
 		}
+	}
+	h := w.Header()
+	for _, f := range fields {
 		h.Add(f.Name, f.Value)
 	}
 	rc := http.NewResponseController(w)

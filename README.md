@@ -1844,7 +1844,12 @@ func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (ne
   `Handshake.Accept` split the two steps, as `wshttp.Upgrade(w, r, opts)`
   does, which answers refusals through the `ResponseWriter`, hijacks on
   success, sends the fields of `w.Header()` with the 101 response and lets
-  the handler return. Refused requests get 400, 403, 405, 426 (with
+  the handler return. `wshttp.Check(w, r, opts)` and
+  `wshttp.Accept(w, r, hs)` are its two steps for a handler that decides
+  on a valid request before anything is answered, such as by its
+  subprotocol or an authorization: `Check` writes nothing, and a refusal
+  or a decision against the request leaves the handler free to serve it
+  as another request. Refused requests get 400, 403, 405, 426 (with
   `Sec-WebSocket-Version: 13`), 431, 500 (a response field of `Header`
   that cannot be sent) or 505, or the 4xx or 5xx status of a
   `*HandshakeError` from `CheckOrigin`. `CheckOrigin` defaults to
