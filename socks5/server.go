@@ -13,6 +13,8 @@ import (
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/creds"
 	"github.com/djylb/netx/internal/serve"
+
+	"github.com/djylb/timeshim"
 )
 
 // ErrServerClosed is returned by Serve after Close.
@@ -284,6 +286,8 @@ type Server struct {
 	// direction, or without a first datagram, for this long, and closes its
 	// control connection; DefaultUDPIdleTimeout if not positive.
 	UDPIdleTimeout time.Duration
+	// Clock tells the time of UDPIdleTimeout; the system clock if nil.
+	Clock timeshim.Clock
 
 	// Switches.
 

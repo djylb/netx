@@ -3,6 +3,8 @@ package dgram
 import (
 	"sync"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // Release gives back a buffer of one of the shared pools or of a Queue,
@@ -18,15 +20,36 @@ func Release(bp *[]byte) {
 	}
 }
 
-// clockBase anchors the monotonic clock offsets that activity tracking
-// stores in atomics, so that a step of the wall clock neither stretches nor
-// cuts an idle period.
-var clockBase = time.Now()
-
-// Mono returns t as a monotonic offset from a fixed point in nanoseconds.
-func Mono(t time.Time) int64 {
-	return int64(t.Sub(clockBase))
+// Epoch tells the time of a clock as nanoseconds since the clock's time when
+// the Epoch was made, for activity tracking in atomics. Each component takes
+// the epoch of the clock it is given, so that a clock of any time, such as a
+// fake one at the zero time, counts right, and a step of the system's wall
+// clock neither stretches nor cuts an idle period.
+type Epoch struct {
+	clock timeshim.Clock
+	base  time.Time
 }
+
+// NewEpoch returns the epoch of c, or of the system clock when c is nil, at
+// its time now.
+func NewEpoch(c timeshim.Clock) *Epoch {
+	c = timeshim.Or(c)
+	return &Epoch{clock: c, base: c.Now()}
+}
+
+// RealEpoch is the epoch of the system clock that components without a
+// clock of their own share; it is the one time base of activity tracking
+// on the system clock.
+var RealEpoch = NewEpoch(nil)
+
+// Clock returns the clock of e.
+func (e *Epoch) Clock() timeshim.Clock { return e.clock }
+
+// Now returns the clock's time as nanoseconds since the epoch.
+func (e *Epoch) Now() int64 { return e.At(e.clock.Now()) }
+
+// At returns t, a time of the clock, as nanoseconds since the epoch.
+func (e *Epoch) At(t time.Time) int64 { return int64(t.Sub(e.base)) }
 
 // Past is a deadline long passed, which interrupts blocked I/O.
 var Past = time.Unix(1, 0)

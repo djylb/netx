@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 const (
@@ -137,6 +139,9 @@ type CertStore struct {
 	// handshake or a background goroutine, and may call the store's
 	// methods.
 	OnError func(err *CertError)
+	// Clock tells the time of the checks, refreshes and certificate
+	// validity; the system clock if nil.
+	Clock timeshim.Clock
 
 	addMu     sync.RWMutex
 	byID      map[string]*storeCert
@@ -152,8 +157,6 @@ type CertStore struct {
 	entries   map[string]*list.Element
 	lru       list.List // of *storeEntry, most recently used first
 	lastSweep time.Time
-
-	now func() time.Time // time.Now when nil; set by tests
 }
 
 // CertSource is how a certificate came into a CertStore.
@@ -327,7 +330,7 @@ func (s *CertStore) AddFiles(id, certFile, keyFile string, names ...string) (str
 	if id == "" {
 		id = filepath.Clean(certFile)
 	}
-	now := s.clock()
+	now := s.now()
 	src := &fileSource{certFile: certFile, keyFile: keyFile, checkedAt: now, forcedAt: now}
 	cert, err := src.read()
 	if err != nil {
@@ -386,7 +389,7 @@ func (s *CertStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 }
 
 func (s *CertStore) certificate(ctx context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	now := s.clock()
+	now := s.now()
 	s.checkFilesIfDue(now)
 	if s.Select != nil {
 		id, err := s.Select(hello)
@@ -508,7 +511,7 @@ func localIP(hello *tls.ClientHelloInfo) string {
 // returns the default.
 func (s *CertStore) Match(name string) []CertInfo {
 	name = normalizeName(name)
-	now := s.clock()
+	now := s.now()
 	var infos []CertInfo
 	if name != "" {
 		s.addMu.RLock()
@@ -558,7 +561,7 @@ func (s *CertStore) Match(name string) []CertInfo {
 
 // List returns the added certificates, ordered by ID.
 func (s *CertStore) List() []CertInfo {
-	now := s.clock()
+	now := s.now()
 	s.addMu.RLock()
 	infos := make([]CertInfo, 0, len(s.byID))
 	for _, c := range s.byID {
@@ -602,7 +605,7 @@ func loadedInfo(name string, cert *tls.Certificate, now time.Time) CertInfo {
 // returns once done.
 func (s *CertStore) CheckFiles() {
 	s.checkMu.Lock()
-	errs := s.syncFiles(s.clock(), true)
+	errs := s.syncFiles(s.now(), true)
 	s.checkMu.Unlock()
 	s.reportAll(errs)
 }
@@ -706,7 +709,7 @@ func (s *CertStore) issued(leaf *x509.Certificate, chain [][]byte) bool {
 			intermediates.AddCert(c)
 		}
 	}
-	at := s.clock()
+	at := s.now()
 	if at.Before(leaf.NotBefore) || !at.Before(leaf.NotAfter) {
 		at = leaf.NotBefore
 	}
@@ -869,9 +872,4 @@ func (s *CertStore) report(err *CertError) {
 	}
 }
 
-func (s *CertStore) clock() time.Time {
-	if s.now != nil {
-		return s.now()
-	}
-	return time.Now()
-}
+func (s *CertStore) now() time.Time { return timeshim.Or(s.Clock).Now() }

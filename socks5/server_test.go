@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/nettest"
 	"github.com/djylb/netx/socks5"
+
+	"github.com/djylb/timeshim"
 )
 
 // serve runs s on a loopback listener and returns its address.
@@ -437,9 +440,24 @@ func TestServerUDPPerAssociationSocket(t *testing.T) {
 
 func TestServerUDPIdleTimeout(t *testing.T) {
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
-	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPIdleTimeout: 100 * time.Millisecond})
+	const idle = time.Minute
+	fake := timeshim.NewFake(time.Now())
+	addr := serve(t, &socks5.Server{UDPSocket: pc, UDPIdleTimeout: idle, Clock: fake})
 	ctl, _ := associate(t, addr, netx.Addr{})
-	_ = ctl.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// The association's timer for its first datagram, and the sweep of the
+	// relay's listener.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := fake.WaitPending(ctx, 2); err != nil {
+		t.Fatalf("%d timers, want 2: %v", fake.Pending(), err)
+	}
+	fake.Advance(idle - time.Nanosecond)
+	_ = ctl.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("control Read() error = %v before the idle timeout, want a timeout", err)
+	}
+	fake.Advance(time.Nanosecond)
+	_ = ctl.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := ctl.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("control Read() error = %v, want EOF after the idle timeout", err)
 	}

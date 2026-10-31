@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 func newTestChallenger(t testing.TB, opts ChallengerOptions) *Challenger {
@@ -135,10 +137,8 @@ func TestPossessionChallengeForms(t *testing.T) {
 }
 
 func TestPossessionExpiry(t *testing.T) {
-	c := newTestChallenger(t, ChallengerOptions{TTL: time.Minute, MaxUsed: 2})
-	var now atomic.Int64
-	now.Store(time.Now().UnixNano())
-	c.now = func() time.Time { return time.Unix(0, now.Load()) }
+	fake := timeshim.NewFake(time.Now())
+	c := newTestChallenger(t, ChallengerOptions{TTL: time.Minute, MaxUsed: 2, Clock: fake})
 	key := testECKey(t, elliptic.P256())
 	prove := func() error {
 		challenge, err := c.Challenge("p")
@@ -167,7 +167,7 @@ func TestPossessionExpiry(t *testing.T) {
 	if err := prove(); !errors.Is(err, ErrTooManyChallenges) {
 		t.Fatalf("Verify() past MaxUsed = %v", err)
 	}
-	now.Add(int64(time.Minute))
+	fake.Advance(time.Minute)
 	if err := c.Verify(key.Public(), "p", old, oldSig); !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("Verify(expired) = %v", err)
 	}

@@ -1,6 +1,8 @@
 # netx
 
-Reusable Go networking helpers with no third-party dependencies.
+Reusable Go networking helpers with no third-party dependencies; the one
+module they use is [timeshim](https://github.com/djylb/timeshim), an
+injectable clock that itself uses only the standard library.
 
 Requires Go 1.26. Every package builds on all major Go ports, including
 Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
@@ -23,7 +25,8 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/proxydial`     | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`        |
 | `github.com/djylb/netx/safedial`      | dialing and UDP relaying limited by a destination policy, rebinding-safe          |
 
-Each package depends only on the standard library and links only what it uses.
+Each package depends only on the standard library and timeshim, and links only
+what it uses.
 `crypto/tls` adds a large amount of code to a binary as soon as it is
 imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
 `httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
@@ -829,6 +832,25 @@ case netx.ScopePrivate, netx.ScopeShared, netx.ScopeLinkLocal:
   are global when the IPv4 addresses they embed are, else reserved.
 - It is a table lookup indexed by the first byte: 2–7 ns for most addresses,
   no allocation.
+
+## Clocks
+
+What times out or expires in the background takes a `timeshim.Clock`
+(`github.com/djylb/timeshim`), so that tests can move time instead of
+waiting for it. `timeshim.Real` is the system clock; `timeshim.NewFake(t)`
+returns a clock that moves only by `Advance`, which runs the `AfterFunc`
+calls that come due in its own goroutine. A nil `Clock` means
+`timeshim.Real`, so the default behaviour does not change.
+
+- `WithRelayClock`, `WithPacketClock` and `transparent.WithFlowClock` time
+  the idle timeouts of `Relay`, `PacketListener` and `FlowListener`.
+- `socks5.DatagramRelay.Clock` times `IdleTimeout`, and `socks5.Server.Clock`
+  the idle timeouts of UDP associations.
+- `tlsconn.CertStore.Clock`, `tlsconn.CertFiles.Clock` and
+  `tlsconn.ChallengerOptions.Clock` time file checks, refreshes,
+  certificate validity and challenge expiry.
+
+Socket deadlines and dial and handshake timeouts stay on the system clock.
 
 ## Error Helpers
 

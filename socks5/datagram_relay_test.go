@@ -18,6 +18,8 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/dgram"
+
+	"github.com/djylb/timeshim"
 )
 
 // fakeStream is the relay's end of a message-preserving stream: the test
@@ -569,24 +571,37 @@ func TestDatagramRelayDoneContext(t *testing.T) {
 }
 
 // IdleTimeout ends a relay without datagrams, and datagrams keep it going.
+// waitPending waits until c has n pending timers, for at most 5s.
+func waitPending(t *testing.T, c *timeshim.Fake, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := c.WaitPending(ctx, n); err != nil {
+		t.Fatalf("%d timers, want %d: %v", c.Pending(), n, err)
+	}
+}
+
 func TestDatagramRelayIdleTimeout(t *testing.T) {
 	checkGoroutines(t)
 	out, _ := newEgress(t, nil)
 	echo, _ := echoUDP(t, newLoopbackUDP(t))
 	s := newFakeStream()
-	const idle = 150 * time.Millisecond
-	done := runRelay(t, t.Context(), &DatagramRelay{IdleTimeout: idle}, s, out)
-	start := time.Now()
-	for time.Since(start) < 2*idle {
+	const idle = time.Minute
+	fake := timeshim.NewFake(time.Now())
+	done := runRelay(t, t.Context(), &DatagramRelay{IdleTimeout: idle, Clock: fake}, s, out)
+	waitPending(t, fake, 1)
+	for range 4 {
+		fake.Advance(idle / 2)
 		s.send(t, echo, "keep")
-		s.recv(t)
-		time.Sleep(idle / 5)
+		s.recv(t) // the reply was relayed, which counts, at this time
 	}
+	fake.Advance(idle - time.Nanosecond)
 	select {
 	case err := <-done:
 		t.Fatalf("Relay() = %v while active", err)
 	default:
 	}
+	fake.Advance(time.Nanosecond)
 	if err := waitRelay(t, done); !errors.Is(err, netx.ErrRelayIdle) {
 		t.Fatalf("Relay() = %v, want netx.ErrRelayIdle", err)
 	}

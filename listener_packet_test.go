@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/timeshim"
 )
 
 func newUDPListener(t *testing.T, opts ...PacketListenerOption) *PacketListener {
@@ -246,20 +247,68 @@ func TestPacketListenerQueueDropsOverflow(t *testing.T) {
 	}
 }
 
+// waitPending waits until c has n pending timers, for at most 5s.
+func waitPending(t *testing.T, c *timeshim.Fake, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := c.WaitPending(ctx, n); err != nil {
+		t.Fatalf("%d timers, want %d: %v", c.Pending(), n, err)
+	}
+}
+
+// sweep advances c by every n times, each time waiting until the idle sweep
+// that it starts has finished and waits on c again.
+func sweep(t *testing.T, c *timeshim.Fake, every time.Duration, n int) {
+	t.Helper()
+	for range n {
+		waitPending(t, c, 1)
+		c.Advance(every)
+		waitPending(t, c, 1)
+	}
+}
+
+// isOpen reports whether a connection without queued datagrams is open: a
+// Read past its deadline times out, where one of a closed connection
+// returns io.EOF.
+func isOpen(t *testing.T, c net.Conn) bool {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now()); errors.Is(err, net.ErrClosed) {
+		return false // the idle timeout closed it
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Read(make([]byte, 1))
+	if err := c.SetReadDeadline(time.Time{}); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() error = %v", err)
+	}
+	return !errors.Is(err, io.EOF)
+}
+
 func TestPacketListenerIdleTimeout(t *testing.T) {
-	l := newUDPListener(t, WithPacketIdleTimeout(80*time.Millisecond))
+	const idle, every = time.Minute, 15 * time.Second // a sweep every idle/4
+	fake := timeshim.NewFake(time.Now())
+	l := newUDPListener(t, WithPacketIdleTimeout(idle), WithPacketClock(fake))
 	a := dialUDP(t, l)
 	send(t, l, a, "x")
-	// Before Accept, where the idle time starts, so that a slow host
-	// cannot make it look early.
-	start := time.Now()
-	c := acceptWithin(t, l)
+	c := acceptWithin(t, l) // the idle time starts here
 	_, _ = c.Read(make([]byte, 1))
-	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-		t.Fatalf("Read() error = %v, want EOF after the idle timeout", err)
+	sweep(t, fake, every, 3)
+	if !isOpen(t, c) {
+		t.Fatal("closed before the idle timeout")
 	}
-	if d := time.Since(start); d < 40*time.Millisecond || d > 2*time.Second {
-		t.Fatalf("idle close after %v", d)
+	send(t, l, a, "y")
+	_, _ = c.Read(make([]byte, 1))
+	sweep(t, fake, every, 3)
+	if !isOpen(t, c) {
+		t.Fatal("a datagram did not restart the idle timeout")
+	}
+	sweep(t, fake, every, 1)
+	if isOpen(t, c) {
+		t.Fatal("open after the idle timeout")
 	}
 }
 
@@ -591,29 +640,43 @@ func TestPacketListenerClearsExpiredReadDeadline(t *testing.T) {
 	}
 }
 
-func TestPacketListenerIdleTimeoutSparesBacklog(t *testing.T) {
-	// Long enough that the Read below comes before the sweep on a busy host.
-	const idle = 300 * time.Millisecond
-	l := newUDPListener(t, WithPacketIdleTimeout(idle))
+// One large Advance of a fake clock at the zero time sweeps at each time it
+// passes, and so closes an idle connection.
+func TestPacketListenerIdleTimeoutLargeAdvance(t *testing.T) {
+	const idle = time.Second
+	fake := timeshim.NewFake(time.Time{})
+	l := newUDPListener(t, WithPacketIdleTimeout(idle), WithPacketClock(fake))
 	a := dialUDP(t, l)
 	send(t, l, a, "x")
-	// Several sweeps run while the connection waits for Accept.
-	time.Sleep(2 * idle)
 	c := acceptWithin(t, l)
-	if c.(*packetConn).q.IdleAt(dgram.Mono(time.Now()), idle) {
-		t.Fatal("idle clock started before Accept")
+	_, _ = c.Read(make([]byte, 1))
+	waitPending(t, fake, 1)
+	fake.Advance(10 * idle)
+	if isOpen(t, c) {
+		t.Fatal("open after the idle timeout")
 	}
+}
+
+func TestPacketListenerIdleTimeoutSparesBacklog(t *testing.T) {
+	const idle, every = time.Minute, 15 * time.Second
+	fake := timeshim.NewFake(time.Now())
+	l := newUDPListener(t, WithPacketIdleTimeout(idle), WithPacketClock(fake))
+	a := dialUDP(t, l)
+	send(t, l, a, "x")
+	sweep(t, fake, every, 8) // while the connection waits for Accept
+	c := acceptWithin(t, l)
 	buf := make([]byte, 4)
 	n, err := c.Read(buf)
 	if err != nil || string(buf[:n]) != "x" {
 		t.Fatalf("Read() = %q, %v, want the datagram sent before Accept", buf[:n], err)
 	}
-	start := time.Now()
-	if _, err := c.Read(buf); !errors.Is(err, io.EOF) {
-		t.Fatalf("Read() error = %v, want EOF after the idle timeout", err)
+	sweep(t, fake, every, 3)
+	if !isOpen(t, c) {
+		t.Fatal("idle clock started before Accept")
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("idle close after %v", d)
+	sweep(t, fake, every, 1)
+	if isOpen(t, c) {
+		t.Fatal("open after the idle timeout")
 	}
 }
 

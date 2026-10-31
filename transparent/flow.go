@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/djylb/timeshim"
+
 	"github.com/djylb/netx/internal/dgram"
 )
 
@@ -34,6 +36,7 @@ type FlowListener struct {
 	closeErr  error
 	wg        sync.WaitGroup
 	opts      flowOptions
+	epoch     *dgram.Epoch // of the idle timeout
 	closeOnce sync.Once
 	// mu orders the reply loops that wg counts before Close's wait: once
 	// closed is set, none starts.
@@ -50,6 +53,7 @@ type flowOptions struct {
 	backlog  int
 	maxConns int
 	idle     time.Duration
+	clock    timeshim.Clock
 	direct   bool
 }
 
@@ -101,6 +105,12 @@ func WithFlowIdleTimeout(d time.Duration) FlowOption {
 	return func(o *flowOptions) { o.idle = d }
 }
 
+// WithFlowClock makes the listener tell the time of the idle timeout by c
+// instead of the system clock, such as a timeshim.Fake in tests.
+func WithFlowClock(c timeshim.Clock) FlowOption {
+	return func(o *flowOptions) { o.clock = c }
+}
+
 // WithFlowDirect also accepts flows of datagrams sent to the socket directly,
 // not redirected, which are dropped by default. FlowConn.Redirected tells
 // them apart, and their connections answer from the listening socket, from
@@ -150,10 +160,10 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 	}
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
-	l := &FlowListener{c: c, opts: cfg}
+	l := &FlowListener{c: c, opts: cfg, epoch: dgram.NewEpoch(cfg.clock)}
 	l.flows.Init(cfg.backlog, cfg.maxConns, (*FlowConn).queue, (*FlowConn).shutdown)
 	if cfg.idle > 0 {
-		l.wg.Go(func() { l.flows.Sweep(cfg.idle) })
+		l.wg.Go(func() { l.flows.Sweep(cfg.idle, l.epoch) })
 	}
 	return l
 }
@@ -254,7 +264,7 @@ func (l *FlowListener) newFlow(key flowKey, redirected bool) *FlowConn {
 		local:      net.UDPAddrFromAddrPort(key.dst),
 		remote:     net.UDPAddrFromAddrPort(key.src),
 	}
-	f.q.Init(l.opts.queue)
+	f.q.Init(l.opts.queue, l.epoch)
 	f.datagramSource = dgram.NewSource(f, &f.q)
 	return f
 }

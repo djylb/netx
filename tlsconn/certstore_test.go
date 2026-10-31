@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 func newCert(t *testing.T, validFor time.Duration, hosts ...string) *tls.Certificate {
@@ -114,10 +116,10 @@ func TestCertStoreSharesLoads(t *testing.T) {
 
 // A failed Load is remembered for RetryAfter, and LoadTimeout bounds one.
 func TestCertStoreRemembersFailures(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	errDown := errors.New("source down")
 	var loads atomic.Int64
-	s := &CertStore{RetryAfter: time.Minute, LoadTimeout: 50 * time.Millisecond, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, LoadTimeout: 50 * time.Millisecond, Clock: fake,
 		Load: func(ctx context.Context, name string) (*tls.Certificate, error) {
 			loads.Add(1)
 			if name == "slow.example" {
@@ -134,7 +136,7 @@ func TestCertStoreRemembersFailures(t *testing.T) {
 	if n := loads.Load(); n != 1 {
 		t.Fatalf("%d loads within RetryAfter, want 1", n)
 	}
-	clock.advance(time.Minute)
+	fake.Advance(time.Minute)
 	_, _ = s.forName(context.Background(), "a.example")
 	if n := loads.Load(); n != 2 {
 		t.Fatalf("%d loads after RetryAfter, want 2", n)
@@ -148,12 +150,12 @@ func TestCertStoreRemembersFailures(t *testing.T) {
 // A certificate due for refresh is loaded again in the background while it
 // serves, also when that load fails, and not on every handshake.
 func TestCertStoreRefreshes(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	old, renewed := newCert(t, 48*time.Hour), newCert(t, 90*24*time.Hour)
 	var loads atomic.Int64
 	fail := atomic.Bool{}
 	refreshed := make(chan struct{}, 10)
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			n := loads.Add(1)
 			defer func() {
@@ -182,13 +184,13 @@ func TestCertStoreRefreshes(t *testing.T) {
 	}
 	// Not due: old expires in 48h and lives 49h, so refreshes start a third
 	// of that, about 16h, before.
-	clock.advance(30 * time.Hour)
+	fake.Advance(30 * time.Hour)
 	_ = get()
 	if n := loads.Load(); n != 1 {
 		t.Fatalf("%d loads before the certificate was due, want 1", n)
 	}
 	// Due, but the source is down: old serves on.
-	clock.advance(3 * time.Hour)
+	fake.Advance(3 * time.Hour)
 	fail.Store(true)
 	if get() != old {
 		t.Fatal("the old certificate did not serve while due")
@@ -206,7 +208,7 @@ func TestCertStoreRefreshes(t *testing.T) {
 		t.Fatalf("%d loads right after a failed refresh, want 2", n)
 	}
 	// After RetryAfter the refresh succeeds.
-	clock.advance(time.Minute)
+	fake.Advance(time.Minute)
 	fail.Store(false)
 	_ = get()
 	<-refreshed
@@ -216,9 +218,9 @@ func TestCertStoreRefreshes(t *testing.T) {
 // Forget makes the next handshake load again, and IdleTimeout drops what
 // no handshake uses.
 func TestCertStoreForgetAndIdle(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	var loads atomic.Int64
-	s := &CertStore{IdleTimeout: time.Hour, now: clock.now,
+	s := &CertStore{IdleTimeout: time.Hour, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			loads.Add(1)
 			return newCert(t, 0), nil
@@ -229,7 +231,7 @@ func TestCertStoreForgetAndIdle(t *testing.T) {
 	if n := loads.Load(); n != 2 {
 		t.Fatalf("%d loads after Forget, want 2", n)
 	}
-	clock.advance(2 * time.Hour)
+	fake.Advance(2 * time.Hour)
 	_, _ = s.forName(context.Background(), "b.example") // sweeps
 	s.mu.Lock()
 	_, kept := s.entries["a.example"]
@@ -279,10 +281,10 @@ func TestCertStoreServesHandshakes(t *testing.T) {
 // A certificate that is due when it comes is not loaded again on every
 // handshake.
 func TestCertStoreSpacesRefreshesOfDueCertificates(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	due := newCert(t, 12*time.Hour) // inside the default 24h refresh window
 	var loads atomic.Int64
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			loads.Add(1)
 			return due, nil
@@ -358,9 +360,9 @@ func TestCertStoreForgetDuringLoad(t *testing.T) {
 // Added certificates serve without Load, wildcards and the default
 // included, until their NotAfter.
 func TestCertStoreAddedCertificates(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	exact, wild, def := newCert(t, time.Hour), newCert(t, 0), newCert(t, 0)
-	s := &CertStore{now: clock.now}
+	s := &CertStore{Clock: fake}
 	mustAdd(t, s, "exact", exact, "a.example")
 	mustAdd(t, s, "wild", wild, "*.example")
 	s.SetDefault(mustAdd(t, s, "", def))
@@ -369,7 +371,7 @@ func TestCertStoreAddedCertificates(t *testing.T) {
 			t.Fatalf("%s: wrong certificate", name)
 		}
 	}
-	clock.advance(2 * time.Hour) // exact has expired: the wildcard serves
+	fake.Advance(2 * time.Hour) // exact has expired: the wildcard serves
 	if c, _ := s.forName(context.Background(), "a.example"); !sameLeaf(c, wild) {
 		t.Fatal("an expired added certificate served")
 	}
@@ -378,11 +380,11 @@ func TestCertStoreAddedCertificates(t *testing.T) {
 // Load results that are not valid now fail: an expired first certificate is
 // remembered as a failure, and a refresh that brings one keeps the old.
 func TestCertStoreLoadsNotValidNow(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	expired := newCert(t, 0)
-	clock.advance(400 * 24 * time.Hour) // past its year
+	fake.Advance(400 * 24 * time.Hour) // past its year
 	var loads atomic.Int64
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			loads.Add(1)
 			return expired, nil
@@ -399,7 +401,7 @@ func TestCertStoreLoadsNotValidNow(t *testing.T) {
 	valid := newCert(t, 500*24*time.Hour) // valid on the advanced clock
 	refreshed := make(chan struct{}, 4)
 	var calls atomic.Int64
-	r := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	r := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			if calls.Add(1) == 1 {
 				return valid, nil
@@ -463,12 +465,12 @@ func TestCertStoreRefreshDuringLoad(t *testing.T) {
 // every handshake; a refresh that finds none removes it; and an expired one
 // does not serve.
 func TestCertStoreLifetimes(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	short := newCert(t, 5*time.Hour) // valid from an hour ago: 6h in all
 	var loads atomic.Int64
 	none := atomic.Bool{}
 	done := make(chan struct{}, 10)
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			n := loads.Add(1)
 			if n > 1 {
@@ -481,13 +483,13 @@ func TestCertStoreLifetimes(t *testing.T) {
 		}}
 	get := func() (*tls.Certificate, error) { return s.forName(context.Background(), "a.example") }
 	_, _ = get()
-	clock.advance(2 * time.Hour) // 3h left: not yet within a third of 6h
+	fake.Advance(2 * time.Hour) // 3h left: not yet within a third of 6h
 	_, _ = get()
 	time.Sleep(20 * time.Millisecond) // for a refresh it would start
 	if n := loads.Load(); n != 1 {
 		t.Fatalf("%d loads before the certificate was due, want 1", n)
 	}
-	clock.advance(90 * time.Minute) // 1.5h left: due
+	fake.Advance(90 * time.Minute) // 1.5h left: due
 	none.Store(true)
 	if c, _ := get(); c != short {
 		t.Fatal("a due certificate did not serve")
@@ -498,10 +500,10 @@ func TestCertStoreLifetimes(t *testing.T) {
 		return c == nil && errors.Is(err, ErrNoCertificate)
 	})
 
-	expired := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	expired := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) { return short, nil }}
 	_, _ = expired.forName(context.Background(), "b.example")
-	clock.advance(24 * time.Hour)
+	fake.Advance(24 * time.Hour)
 	expired.Load = func(context.Context, string) (*tls.Certificate, error) { return nil, errors.New("down") }
 	if c, err := expired.forName(context.Background(), "b.example"); c != nil || err == nil {
 		t.Fatalf("an expired certificate served: %v, %v", c, err)
@@ -588,7 +590,7 @@ func TestCertStoreNoRefreshOfDroppedEntry(t *testing.T) {
 // handshake sees, but not of loads that found no certificate, and it may
 // call back into the store.
 func TestCertStoreLoadErrors(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	old := newCert(t, 48*time.Hour)
 	errDown := errors.New("source down")
 	var result atomic.Value // of func() (*tls.Certificate, error)
@@ -598,7 +600,7 @@ func TestCertStoreLoadErrors(t *testing.T) {
 		got  *tls.Certificate
 	}
 	reports := make(chan report, 4)
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			return result.Load().(func() (*tls.Certificate, error))()
 		}}
@@ -632,7 +634,7 @@ func TestCertStoreLoadErrors(t *testing.T) {
 		t.Fatalf("a successful load was reported: %+v", <-reports)
 	}
 	result.Store(func() (*tls.Certificate, error) { return nil, errDown })
-	clock.advance(33 * time.Hour) // due, as in TestCertStoreRefreshes
+	fake.Advance(33 * time.Hour) // due, as in TestCertStoreRefreshes
 	if got, err := s.forName(context.Background(), "a.example"); err != nil || got != old {
 		t.Fatalf("Certificate() while due = %v, %v; want the old certificate", got, err)
 	}
@@ -645,9 +647,9 @@ func TestCertStoreLoadErrors(t *testing.T) {
 // again after RetryAfter, and serves once valid; Match agrees.
 func TestCertStoreLoadNotValidYet(t *testing.T) {
 	cert := newCert(t, 0, "a.example")
-	clock := &fakeClock{t: cert.Leaf.NotBefore.Add(-30 * time.Second)}
+	fake := timeshim.NewFake(cert.Leaf.NotBefore.Add(-30 * time.Second))
 	var loads atomic.Int64
-	s := &CertStore{RetryAfter: time.Minute, now: clock.now,
+	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			loads.Add(1)
 			return cert, nil
@@ -658,11 +660,11 @@ func TestCertStoreLoadNotValidYet(t *testing.T) {
 	if infos := s.Match("a.example"); len(infos) != 0 {
 		t.Fatalf("Match() = %+v, want nothing that serves", infos)
 	}
-	clock.advance(30 * time.Second) // valid now, but the failure is remembered
+	fake.Advance(30 * time.Second) // valid now, but the failure is remembered
 	if _, err := s.forName(context.Background(), "a.example"); !errors.Is(err, ErrNotValidNow) || loads.Load() != 1 {
 		t.Fatalf("within RetryAfter: %v after %d loads", err, loads.Load())
 	}
-	clock.advance(time.Minute)
+	fake.Advance(time.Minute)
 	if got, err := s.forName(context.Background(), "a.example"); err != nil || got != cert {
 		t.Fatalf("once valid: %v, %v", got, err)
 	}

@@ -4,8 +4,10 @@
   `go test -race ./...` and the js/wasm tests
   (`GOOS=js GOARCH=wasm go test ./...` with `$(go env GOROOT)/lib/wasm` on
   `PATH`) must pass.
-- Standard library only, also for tests. `internal` packages import only the
-  standard library; leaf packages never import the root package. Register
+- Standard library only, also for tests, besides
+  `github.com/djylb/timeshim` (itself standard library only), which every
+  package, leaf and `internal` ones included, may import. `internal`
+  packages import nothing else of this module; leaf packages never import the root package. Register
   every new package in `deps_test.go`.
 - Treat everything from peers and the network as untrusted: bound every read
   and every parse, and reject ambiguous framing instead of guessing.

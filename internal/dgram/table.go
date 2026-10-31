@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // Table holds the connections of a demultiplexing listener by key, such as
@@ -179,32 +181,51 @@ func (t *Table[K, S]) Done() <-chan struct{} {
 }
 
 // Sweep shuts down, with io.EOF, the accepted connections idle for d, until
-// t is closed. It checks every quarter of d, at least every 10ms.
-func (t *Table[K, S]) Sweep(d time.Duration) {
-	ticker := time.NewTicker(max(d/4, 10*time.Millisecond))
-	defer ticker.Stop()
-	var idle []S
-	for {
-		select {
-		case <-t.done:
-			return
-		case now := <-ticker.C:
-			mono := Mono(now)
-			t.mu.Lock()
-			for _, s := range t.conns {
-				if t.queue(s).IdleAt(mono, d) {
-					idle = append(idle, s)
-				}
-			}
-			t.mu.Unlock()
-			var zero S
-			for i, s := range idle {
-				t.shutdown(s, io.EOF)
-				idle[i] = zero
-			}
-			idle = idle[:0]
-		}
+// t is closed, and then returns. It checks every quarter of d, at least
+// every 10ms, after the end of the last check, by the clock of e, the epoch
+// of the connections' queues. The checks run in the timer's callbacks, so a
+// fake clock's Advance checks at each of the times it passes.
+func (t *Table[K, S]) Sweep(d time.Duration, e *Epoch) {
+	if e == nil {
+		e = RealEpoch
 	}
+	every := max(d/4, 10*time.Millisecond)
+	var (
+		mu      sync.Mutex // held by a check; orders it with the end
+		stopped bool
+		timer   timeshim.Timer
+		idle    []S
+	)
+	check := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
+			return
+		}
+		now := e.Now()
+		t.mu.Lock()
+		for _, s := range t.conns {
+			if t.queue(s).IdleAt(now, d) {
+				idle = append(idle, s)
+			}
+		}
+		t.mu.Unlock()
+		var zero S
+		for i, s := range idle {
+			t.shutdown(s, io.EOF)
+			idle[i] = zero
+		}
+		idle = idle[:0]
+		timer.Reset(every)
+	}
+	mu.Lock()
+	timer = e.Clock().AfterFunc(every, check)
+	mu.Unlock()
+	<-t.Done()
+	mu.Lock() // waits for a check in progress
+	stopped = true
+	timer.Stop()
+	mu.Unlock()
 }
 
 // Len returns how many connections t holds.

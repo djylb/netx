@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // setModTime sets the modification time of files, so that changes do not
@@ -37,9 +39,9 @@ func TestCertFilesChangeDetection(t *testing.T) {
 	certFile, keyFile := writeCert(t, dir, first)
 	base := time.Now().Add(-time.Hour)
 	setModTime(t, base, certFile, keyFile)
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	var reports []*CertError
-	c := &CertFiles{now: clock.now, OnError: func(err *CertError) { reports = append(reports, err) }}
+	c := &CertFiles{Clock: fake, OnError: func(err *CertError) { reports = append(reports, err) }}
 	got, err := c.LoadFiles(certFile, keyFile)
 	if err != nil || !sameCert(got, first) {
 		t.Fatalf("LoadFiles() = %v", err)
@@ -49,11 +51,11 @@ func TestCertFilesChangeDetection(t *testing.T) {
 	second, _ := NewSelfSigned(SelfSignedOptions{})
 	writeCert(t, dir, second)
 	setModTime(t, base.Add(time.Second), certFile, keyFile)
-	clock.advance(DefaultCheckInterval - time.Second)
+	fake.Advance(DefaultCheckInterval - time.Second)
 	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
 		t.Fatal("files checked before CheckInterval")
 	}
-	clock.advance(time.Second)
+	fake.Advance(time.Second)
 	if got, _ = c.LoadFiles(certFile, keyFile); !sameCert(got, second) {
 		t.Fatal("changed files not read again")
 	}
@@ -66,7 +68,7 @@ func TestCertFilesChangeDetection(t *testing.T) {
 	if _, err := os.ReadFile(certFile); err == nil {
 		t.Log("file permissions not enforced here; skipping the unread check")
 	} else {
-		clock.advance(DefaultCheckInterval)
+		fake.Advance(DefaultCheckInterval)
 		if again, _ := c.LoadFiles(certFile, keyFile); again != got || len(reports) != 0 {
 			t.Fatalf("unchanged files were read: %v", reports)
 		}
@@ -80,12 +82,12 @@ func TestCertFilesChangeDetection(t *testing.T) {
 	third, _ := NewSelfSigned(SelfSignedOptions{})
 	writeCert(t, dir, third)
 	setModTime(t, base.Add(2*time.Second), certFile, keyFile)
-	clock.advance(time.Hour)
+	fake.Advance(time.Hour)
 	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
 		t.Fatal("files checked with a negative CheckInterval")
 	}
 	c.CheckInterval = time.Minute
-	clock.advance(time.Minute)
+	fake.Advance(time.Minute)
 	if got, _ = c.LoadFiles(certFile, keyFile); !sameCert(got, third) {
 		t.Fatal("changed files not read with CheckInterval set")
 	}
@@ -100,9 +102,9 @@ func TestCertFilesHalfWrittenPair(t *testing.T) {
 	certFile, keyFile := writeCert(t, dir, first)
 	base := time.Now().Add(-time.Hour)
 	setModTime(t, base, certFile, keyFile)
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	var reports []*CertError
-	c := &CertFiles{now: clock.now}
+	c := &CertFiles{Clock: fake}
 	c.OnError = func(err *CertError) {
 		_ = c.Len() // the hook may call back into the cache
 		reports = append(reports, err)
@@ -118,7 +120,7 @@ func TestCertFilesHalfWrittenPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	setModTime(t, base.Add(time.Second), certFile)
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	if kept, err := c.LoadFiles(certFile, keyFile); err != nil || kept != got {
 		t.Fatalf("half-written pair: LoadFiles() = %v, %v; want the old certificate", kept, err)
 	}
@@ -129,7 +131,7 @@ func TestCertFilesHalfWrittenPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	setModTime(t, base.Add(time.Second), keyFile)
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	if got, _ = c.LoadFiles(certFile, keyFile); !sameCert(got, second) {
 		t.Fatal("completed pair not read")
 	}
@@ -145,14 +147,14 @@ func TestCertFilesHalfWrittenPair(t *testing.T) {
 	if _, err := os.ReadFile(certFile); err == nil {
 		t.Skip("file permissions not enforced here")
 	}
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	if kept, _ := c.LoadFiles(certFile, keyFile); kept != got || len(reports) != 2 {
 		t.Fatalf("unreadable file: kept %v, %d reports; want the old certificate and a report", kept == got, len(reports))
 	}
 	if err := os.Chmod(certFile, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	if got, _ = c.LoadFiles(certFile, keyFile); !sameCert(got, third) {
 		t.Fatal("files not read again after a failed read")
 	}
@@ -206,13 +208,13 @@ func TestCertFilesSymlinkSwap(t *testing.T) {
 	}
 	link("v1")
 	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
-	clock := &fakeClock{t: time.Now()}
-	c := &CertFiles{now: clock.now}
+	fake := timeshim.NewFake(time.Now())
+	c := &CertFiles{Clock: fake}
 	if got, err := c.LoadFiles(certFile, keyFile); err != nil || !sameCert(got, first) {
 		t.Fatalf("LoadFiles() = %v", err)
 	}
 	link("v2")
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	if got, _ := c.LoadFiles(certFile, keyFile); !sameCert(got, second) {
 		t.Fatal("swapped link not picked up")
 	}
@@ -223,19 +225,19 @@ func TestCertFilesSymlinkSwap(t *testing.T) {
 func TestCertFilesReloadsExpired(t *testing.T) {
 	first, _ := NewSelfSigned(SelfSignedOptions{ValidFor: time.Hour})
 	certFile, keyFile := writeCert(t, t.TempDir(), first)
-	clock := &fakeClock{t: time.Now()}
-	c := &CertFiles{CheckInterval: -1, now: clock.now}
+	fake := timeshim.NewFake(time.Now())
+	c := &CertFiles{CheckInterval: -1, Clock: fake}
 	got, err := c.LoadFiles(certFile, keyFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, _ := NewSelfSigned(SelfSignedOptions{})
 	writeCert(t, filepath.Dir(certFile), second)
-	clock.advance(30 * time.Minute)
+	fake.Advance(30 * time.Minute)
 	if again, _ := c.LoadFiles(certFile, keyFile); again != got {
 		t.Fatal("valid certificate read again")
 	}
-	clock.advance(time.Hour + time.Second) // past NotAfter
+	fake.Advance(time.Hour + time.Second) // past NotAfter
 	if got, _ = c.LoadFiles(certFile, keyFile); !sameCert(got, second) {
 		t.Fatal("expired certificate not read again")
 	}
@@ -245,7 +247,7 @@ func TestCertFilesReloadsExpired(t *testing.T) {
 // although they look unchanged, at most once a minute; also in a CertStore.
 func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 	now := time.Now()
-	clock := &fakeClock{t: now}
+	fake := timeshim.NewFake(now)
 	expired := makeCert(t, nil, nil, now.Add(-2*time.Hour), now.Add(time.Hour), "a.example")
 	certPEM, keyPEM, _ := EncodePEM(*expired)
 	// A renewal of the same size, written in place with the same time.
@@ -283,11 +285,11 @@ func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 		setModTime(t, when, certFile, keyFile)
 	}
 
-	c := &CertFiles{now: clock.now}
+	c := &CertFiles{Clock: fake}
 	if _, err := c.LoadFiles(certFile, keyFile); err != nil {
 		t.Fatal(err)
 	}
-	s := &CertStore{now: clock.now}
+	s := &CertStore{Clock: fake}
 	id, err := s.AddFiles("a", certFile, keyFile)
 	if err != nil {
 		t.Fatal(err)
@@ -295,14 +297,14 @@ func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 	syncStore := func() {
 		s.checkMu.Lock() // also waits for a check that a handshake started
 		defer s.checkMu.Unlock()
-		s.syncFiles(clock.now(), false)
+		s.syncFiles(fake.Now(), false)
 	}
 	storeCert := func() *tls.Certificate {
 		got, _ := s.forName(context.Background(), "a.example")
 		return got
 	}
 
-	clock.advance(time.Hour + time.Second) // expired
+	fake.Advance(time.Hour + time.Second) // expired
 	if got, err := c.LoadFiles(certFile, keyFile); got != nil || !errors.Is(err, ErrNotValidNow) {
 		t.Fatalf("expired: LoadFiles() = %v, %v; want ErrNotValidNow", got, err)
 	}
@@ -311,7 +313,7 @@ func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 		t.Fatal("an expired certificate served from the store")
 	}
 	renew()
-	clock.advance(30 * time.Second) // within a minute of the last read
+	fake.Advance(30 * time.Second) // within a minute of the last read
 	if got, err := c.LoadFiles(certFile, keyFile); got != nil || !errors.Is(err, ErrNotValidNow) {
 		t.Fatalf("read again within a minute: %v, %v", got, err)
 	}
@@ -319,7 +321,7 @@ func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 	if got := storeCert(); got != nil {
 		t.Fatal("store read again within a minute")
 	}
-	clock.advance(30 * time.Second)
+	fake.Advance(30 * time.Second)
 	if got, err := c.LoadFiles(certFile, keyFile); err != nil || !sameLeaf(got, renewed) {
 		t.Fatalf("a minute on: LoadFiles() = %v; want the renewal with unchanged stat", err)
 	}
@@ -394,8 +396,8 @@ func TestCertFilesConcurrentChecks(t *testing.T) {
 // MaxEntries counts the loaded certificates, also across failed loads,
 // Clear and the idle sweep.
 func TestCertFilesCountsLoadedEntries(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
-	c := &CertFiles{MaxEntries: 2, IdleTimeout: time.Hour, now: clock.now}
+	fake := timeshim.NewFake(time.Now())
+	c := &CertFiles{MaxEntries: 2, IdleTimeout: time.Hour, Clock: fake}
 	pems := make([][2][]byte, 4)
 	for i := range pems {
 		cert, _ := NewSelfSigned(SelfSignedOptions{})
@@ -419,7 +421,7 @@ func TestCertFilesCountsLoadedEntries(t *testing.T) {
 	c.Clear()
 	check(0)
 	_, _ = c.LoadPEM(pems[0][0], pems[0][1])
-	clock.advance(2 * time.Hour)
+	fake.Advance(2 * time.Hour)
 	_, _ = c.LoadPEM(pems[1][0], pems[1][1]) // the sweep drops the first
 	check(1)
 	_, _ = c.LoadPEM(pems[2][0], pems[2][1])
@@ -647,9 +649,9 @@ func TestCertStoreOnErrorChecksFiles(t *testing.T) {
 	cert, _ := NewSelfSigned(SelfSignedOptions{Hosts: []string{"a.example"}})
 	certFile, keyFile := writeCert(t, dir, cert)
 	setModTime(t, time.Now().Add(-time.Hour), certFile, keyFile)
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	reports := make(chan struct{}, 16)
-	s := &CertStore{now: clock.now}
+	s := &CertStore{Clock: fake}
 	var calls atomic.Int32
 	s.OnError = func(*CertError) {
 		reports <- struct{}{}
@@ -688,7 +690,7 @@ func TestCertStoreOnErrorChecksFiles(t *testing.T) {
 		}
 		reports <- struct{}{}
 	}
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	_, _ = s.forName(context.Background(), "a.example")
 	select {
 	case <-reports:
@@ -709,11 +711,11 @@ func TestCertFilesRenewalNotValidNow(t *testing.T) {
 	certFile, keyFile := writeCert(t, dir, *good)
 	base := now.Add(-time.Hour)
 	setModTime(t, base, certFile, keyFile)
-	clock := &fakeClock{t: now}
+	fake := timeshim.NewFake(now)
 
 	var fileReports, storeReports []*CertError
-	c := &CertFiles{now: clock.now, OnError: func(err *CertError) { fileReports = append(fileReports, err) }}
-	s := &CertStore{now: clock.now, OnError: func(err *CertError) { storeReports = append(storeReports, err) }}
+	c := &CertFiles{Clock: fake, OnError: func(err *CertError) { fileReports = append(fileReports, err) }}
+	s := &CertStore{Clock: fake, OnError: func(err *CertError) { storeReports = append(storeReports, err) }}
 	if _, err := c.LoadFiles(certFile, keyFile); err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +724,7 @@ func TestCertFilesRenewalNotValidNow(t *testing.T) {
 	}
 	check := func(want *tls.Certificate, reports int) {
 		t.Helper()
-		clock.advance(DefaultCheckInterval)
+		fake.Advance(DefaultCheckInterval)
 		s.CheckFiles()
 		_, _ = c.LoadFiles(certFile, keyFile)
 		c.mu.Lock()
@@ -750,7 +752,7 @@ func TestCertFilesRenewalNotValidNow(t *testing.T) {
 
 	// Once the current one has expired too, the files replace it, here with
 	// one that becomes valid later.
-	clock.advance(48 * time.Hour)
+	fake.Advance(48 * time.Hour)
 	check(future, 4)
 	if got, _ := s.forName(context.Background(), "a.example"); got != nil {
 		t.Fatal("a certificate not valid yet served")
@@ -758,7 +760,7 @@ func TestCertFilesRenewalNotValidNow(t *testing.T) {
 	if got, err := c.LoadFiles(certFile, keyFile); got != nil || !errors.Is(err, ErrNotValidNow) {
 		t.Fatalf("CertFiles served a certificate not valid yet: %v", err)
 	}
-	clock.advance(24 * time.Hour)
+	fake.Advance(24 * time.Hour)
 	if got, _ := s.forName(context.Background(), "a.example"); !sameLeaf(got, future) {
 		t.Fatal("the renewal did not serve once valid")
 	}

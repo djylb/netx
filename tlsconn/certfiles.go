@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // DefaultCheckInterval is how often certificate files are checked for
@@ -84,13 +86,15 @@ type CertFiles struct {
 	// cache's methods. A failed first load is not reported: LoadFiles
 	// returns its error.
 	OnError func(err *CertError)
+	// Clock tells the time of CheckInterval, IdleTimeout and certificate
+	// validity; the system clock if nil.
+	Clock timeshim.Clock
 
 	mu        sync.Mutex
 	entries   map[string]*list.Element
 	lru       list.List // of *certEntry, most recently used first
 	loaded    int       // entries with a certificate, which MaxEntries bounds
 	lastSweep time.Time
-	now       func() time.Time // time.Now when nil; set by tests
 }
 
 type certEntry struct {
@@ -167,7 +171,7 @@ func (c *CertFiles) Clear() {
 // get returns the certificate for key, loaded by load, or from certFile and
 // keyFile if load is nil, if it is valid now.
 func (c *CertFiles) get(key, certFile, keyFile string, load func() (*tls.Certificate, error)) (*tls.Certificate, error) {
-	now := c.clock()
+	now := c.now()
 	cert, err := c.lookup(now, key, certFile, keyFile, load)
 	if err == nil && cert.Leaf != nil && !validAt(cert.Leaf, now) {
 		// Kept, for its files to be read again, but not served.
@@ -301,12 +305,7 @@ func (c *CertFiles) removeLocked(el *list.Element) {
 	}
 }
 
-func (c *CertFiles) clock() time.Time {
-	if c.now != nil {
-		return c.now()
-	}
-	return time.Now()
-}
+func (c *CertFiles) now() time.Time { return timeshim.Or(c.Clock).Now() }
 
 // fileSource is a certificate's pair of files and what they were when last
 // read successfully. Its owner lets one goroutine at a time use it.

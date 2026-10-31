@@ -712,7 +712,7 @@ type source = dgram.Source
 
 func newQueueConn() *queueConn {
 	c := &queueConn{}
-	c.q.Init(4)
+	c.q.Init(4, nil)
 	c.source = dgram.NewSource(c, &c.q)
 	return c
 }

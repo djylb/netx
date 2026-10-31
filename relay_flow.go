@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/djylb/timeshim"
+
 	"github.com/djylb/netx/internal/dgram"
 )
 
@@ -112,21 +114,22 @@ func (f *RelayFlow) end(n int64, err error) {
 // relayIdle is the idle timeout of a relay: the flows of both directions
 // record when data passes, and a timer stops the relay once none has for d.
 type relayIdle struct {
-	timer    *time.Timer
+	epoch    *dgram.Epoch
+	timer    timeshim.Timer
 	d        time.Duration
-	activity atomic.Int64 // clockOffset of the last data
+	activity atomic.Int64 // epoch time of the last data
 	waiting  atomic.Int32 // flows blocked in Wait, which is not idleness
 	mu       sync.Mutex   // orders the timer with start and its stop
 	stopped  bool
 }
 
-func newRelayIdle(d time.Duration) *relayIdle {
-	i := &relayIdle{d: d}
+func newRelayIdle(d time.Duration, c timeshim.Clock) *relayIdle {
+	i := &relayIdle{d: d, epoch: dgram.NewEpoch(c)}
 	i.touch()
 	return i
 }
 
-func (i *relayIdle) touch() { i.activity.Store(dgram.Mono(time.Now())) }
+func (i *relayIdle) touch() { i.activity.Store(i.epoch.Now()) }
 
 // watch returns f recording the data that passes, and its waits.
 func (i *relayIdle) watch(f RelayFlow) RelayFlow {
@@ -156,7 +159,7 @@ func (i *relayIdle) watch(f RelayFlow) RelayFlow {
 func (i *relayIdle) start(stop func()) func() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.timer = time.AfterFunc(i.d, func() { i.check(stop) })
+	i.timer = i.epoch.Clock().AfterFunc(i.d, func() { i.check(stop) })
 	return func() {
 		i.mu.Lock()
 		defer i.mu.Unlock()
@@ -171,7 +174,7 @@ func (i *relayIdle) check(stop func()) {
 	if i.stopped {
 		return
 	}
-	left := time.Duration(i.activity.Load() + int64(i.d) - dgram.Mono(time.Now()))
+	left := time.Duration(i.activity.Load() + int64(i.d) - i.epoch.Now())
 	if i.waiting.Load() > 0 {
 		left = i.d // a Wait that blocks counts as activity
 	}

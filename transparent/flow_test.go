@@ -1,6 +1,7 @@
 package transparent
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // testFlowListener returns a listener on a loopback socket whose read loop
@@ -184,12 +187,44 @@ func readFlowN(t *testing.T, f *FlowConn, size int, want string) {
 	}
 }
 
+// waitPending waits until c has n pending timers, for at most 5s.
+func waitPending(t *testing.T, c *timeshim.Fake, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := c.WaitPending(ctx, n); err != nil {
+		t.Fatalf("%d timers, want %d: %v", c.Pending(), n, err)
+	}
+}
+
+// sweep advances c by every n times, each time waiting until the idle sweep
+// that it starts has finished and waits on c again.
+func sweep(t *testing.T, c *timeshim.Fake, every time.Duration, n int) {
+	t.Helper()
+	for range n {
+		waitPending(t, c, 1)
+		c.Advance(every)
+		waitPending(t, c, 1)
+	}
+}
+
 func TestFlowIdleTimeout(t *testing.T) {
-	l := testFlowListener(t, WithFlowIdleTimeout(50*time.Millisecond))
+	const idle, every = time.Minute, 15 * time.Second // a sweep every idle/4
+	fake := timeshim.NewFake(time.Now())
+	l := testFlowListener(t, WithFlowIdleTimeout(idle), WithFlowClock(fake))
 	info := redirectedInfo("192.0.2.1:1000", "198.51.100.1:53")
 	l.deliver([]byte("1"), info)
 	f := acceptFlow(t, l)
 	readFlow(t, f, "1")
+	sweep(t, fake, every, 3)
+	l.deliver([]byte("2"), info) // restarts the idle time
+	readFlow(t, f, "2")
+	sweep(t, fake, every, 3)
+	_ = f.SetReadDeadline(time.Now())
+	if _, err := f.Read(make([]byte, 8)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Read() of an active flow error = %v, want a timeout", err)
+	}
+	sweep(t, fake, every, 1)
 	_ = f.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := f.Read(make([]byte, 8)); !errors.Is(err, io.EOF) {
 		t.Fatalf("Read() of an idle flow error = %v, want io.EOF", err)
@@ -198,18 +233,18 @@ func TestFlowIdleTimeout(t *testing.T) {
 		t.Fatalf("Write() of an idle flow error = %v, want net.ErrClosed", err)
 	}
 	// The next datagram of the flow starts another.
-	l.deliver([]byte("2"), info)
+	l.deliver([]byte("3"), info)
 	g := acceptFlow(t, l)
 	if g == f {
 		t.Fatal("the idle flow was reused")
 	}
-	readFlow(t, g, "2")
+	readFlow(t, g, "3")
 
 	// A flow waiting for Accept is kept however long it waits.
-	l.deliver([]byte("3"), redirectedInfo("192.0.2.1:1001", "198.51.100.1:53"))
-	time.Sleep(150 * time.Millisecond)
+	l.deliver([]byte("4"), redirectedInfo("192.0.2.1:1001", "198.51.100.1:53"))
+	sweep(t, fake, every, 8)
 	h := acceptFlow(t, l)
-	readFlow(t, h, "3")
+	readFlow(t, h, "4")
 }
 
 func TestFlowClose(t *testing.T) {

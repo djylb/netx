@@ -8,11 +8,12 @@ import (
 )
 
 // TestPackageDependencies checks what the README promises: every package
-// depends on the standard library and this module alone, crypto/tls is
+// depends on the standard library, this module and timeshim alone, crypto/tls is
 // linked only by tlsconn, proxydial, and httprewrite and wsconn/wshttp
 // through net/http, and duplex, forwarded, httphead, proxyproto, tlsconn and
-// transparent depend on the standard library and this module's internal
-// packages alone, which depend on the standard library alone.
+// transparent depend on the standard library, this module's internal
+// packages and timeshim alone, and the internal packages on the standard
+// library and timeshim alone.
 func TestPackageDependencies(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
 		t.Skip("cannot run the go command")
@@ -22,6 +23,7 @@ func TestPackageDependencies(t *testing.T) {
 		t.Skip("no go command")
 	}
 	const module = "github.com/djylb/netx"
+	const timeshim = "github.com/djylb/timeshim"
 	type pkgRule struct {
 		pkg  string
 		tls  bool
@@ -59,6 +61,9 @@ func TestPackageDependencies(t *testing.T) {
 			path, std, _ := strings.Cut(strings.TrimSpace(line), " ")
 			switch {
 			case path == tt.pkg:
+			case path == timeshim:
+				// The injectable clock, of the standard library alone, which
+				// every package may use.
 			case path == "crypto/tls" && !tt.tls:
 				t.Errorf("%s links crypto/tls", tt.pkg)
 			case path == module || strings.HasPrefix(path, module+"/"):

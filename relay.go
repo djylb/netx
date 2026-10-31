@@ -10,11 +10,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/djylb/timeshim"
+
 	"github.com/djylb/netx/internal/dgram"
 )
 
 type relayOptions struct {
 	idle      time.Duration
+	clock     timeshim.Clock
 	halfClose bool
 	groups    []*ConnGroup
 	flows     [2]RelayFlow // a to b, b to a
@@ -44,6 +47,14 @@ func WithRelayHalfClose() RelayOption {
 func WithRelayIdleTimeout(d time.Duration) RelayOption {
 	return func(o *relayOptions) {
 		o.idle = d
+	}
+}
+
+// WithRelayClock makes the idle timeout of WithRelayIdleTimeout tell the time
+// by c instead of the system clock, such as a timeshim.Fake in tests.
+func WithRelayClock(c timeshim.Clock) RelayOption {
+	return func(o *relayOptions) {
+		o.clock = c
 	}
 }
 
@@ -159,7 +170,7 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 
 	var idle *relayIdle
 	if cfg.idle > 0 {
-		idle = newRelayIdle(cfg.idle)
+		idle = newRelayIdle(cfg.idle, cfg.clock)
 		cfg.flows[0] = idle.watch(cfg.flows[0])
 		cfg.flows[1] = idle.watch(cfg.flows[1])
 	}

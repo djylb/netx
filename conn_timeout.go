@@ -99,7 +99,7 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle <= 0 {
 		return nil
 	}
-	if dgram.Mono(time.Now())+int64(idle) <= c.deadline.Load() {
+	if dgram.RealEpoch.At(time.Now())+int64(idle) <= c.deadline.Load() {
 		return nil // at least idle left
 	}
 	c.mu.Lock()
@@ -110,11 +110,11 @@ func (c *TimeoutConn) refreshDeadline() error {
 		return nil
 	}
 	now := time.Now()
-	if dgram.Mono(now)+int64(idle) <= c.deadline.Load() {
+	if dgram.RealEpoch.At(now)+int64(idle) <= c.deadline.Load() {
 		return nil
 	}
 	ahead := idle + min(idle/16, time.Second)
-	want := dgram.Mono(now) + int64(ahead)
+	want := dgram.RealEpoch.At(now) + int64(ahead)
 	// now.Add keeps the monotonic reading, so the socket deadline does not
 	// follow wall-clock steps either.
 	rd := now.Add(ahead)

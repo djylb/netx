@@ -9,11 +9,12 @@ import (
 	"os"
 	"slices"
 	"sync"
-	"time"
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/dgram"
 	"github.com/djylb/netx/internal/netutil"
+
+	"github.com/djylb/timeshim"
 )
 
 // PacketConn is the outbound side of a UDP association: it sends the client's
@@ -162,6 +163,7 @@ func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
 		netx.WithPacketAcceptFilter(r.expects),
 		netx.WithPacketQueue(queue),
 		netx.WithPacketIdleTimeout(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
+		netx.WithPacketClock(s.Clock),
 	)
 	go r.acceptLoop()
 	return r
@@ -342,9 +344,9 @@ type association struct {
 	ownsRelay bool
 
 	mu      sync.Mutex
-	once    sync.Once   // closes done
-	pending *time.Timer // ends an association that never receives a datagram
-	conn    net.Conn    // the client's datagram stream once bound
+	once    sync.Once      // closes done
+	pending timeshim.Timer // ends an association that never receives a datagram
+	conn    net.Conn       // the client's datagram stream once bound
 	done    chan struct{}
 }
 
@@ -368,7 +370,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	}
 	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, exact: exact, done: make(chan struct{})}
 	a.mu.Lock()
-	a.pending = time.AfterFunc(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
+	a.pending = timeshim.Or(s.Clock).AfterFunc(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
 	a.mu.Unlock()
 	if !relay.add(a) {
 		// The reason, before a.close closes a relay of its own.

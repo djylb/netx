@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // testCA is a certificate authority for tests.
@@ -123,9 +125,9 @@ func hello(name string) *tls.ClientHelloInfo { return &tls.ClientHelloInfo{Serve
 func TestCertStoreRanking(t *testing.T) {
 	ca := newTestCA(t)
 	now := time.Now()
-	clock := &fakeClock{t: now}
+	fake := timeshim.NewFake(now)
 	from, to := now.Add(-time.Hour), now.Add(30*24*time.Hour)
-	s := &CertStore{Roots: ca.roots, now: clock.now}
+	s := &CertStore{Roots: ca.roots, Clock: fake}
 	// Valid longer, but self-signed.
 	mustAdd(t, s, "self-exact", makeCert(t, nil, nil, from, to.Add(24*time.Hour), "www.example.com"))
 	mustAdd(t, s, "ca-wild", makeCert(t, ca, nil, from, to, "*.example.com"))
@@ -150,7 +152,7 @@ func TestCertStoreRanking(t *testing.T) {
 	if got := pick(t, s, hello("www.example.com")); got != "ca-exact-newer" {
 		t.Fatalf("not valid yet: got %s", got)
 	}
-	clock.advance(time.Hour)
+	fake.Advance(time.Hour)
 	if got := pick(t, s, hello("www.example.com")); got != "ca-exact-future" {
 		t.Fatalf("once valid: got %s", got)
 	}
@@ -171,11 +173,11 @@ func TestCertStoreRanking(t *testing.T) {
 		t.Fatalf("wildcard: got %s", got)
 	}
 	// An expired best one gives way.
-	clock.advance(31 * 24 * time.Hour)
+	fake.Advance(31 * 24 * time.Hour)
 	if got := pick(t, s, hello("api.example.org")); got != "self-wild" {
 		t.Fatalf("expired exact: got %s", got)
 	}
-	clock.advance(48 * time.Hour)
+	fake.Advance(48 * time.Hour)
 	if got := pick(t, s, hello("api.example.org")); got != "error: "+ErrNoCertificate.Error() {
 		t.Fatalf("all expired: got %s", got)
 	}
@@ -216,11 +218,11 @@ func TestCertStoreClientSupport(t *testing.T) {
 // Select names the certificate, also one not for the name; an ID that does
 // not serve is reported and the ranking chooses; an error fails.
 func TestCertStoreSelect(t *testing.T) {
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	from := time.Now().Add(-time.Hour)
 	errDenied := errors.New("denied")
 	var reports []*CertError
-	s := &CertStore{now: clock.now}
+	s := &CertStore{Clock: fake}
 	s.OnError = func(err *CertError) {
 		_, _ = s.Certificate(err.ID) // the hook may call back into the store
 		reports = append(reports, err)
@@ -257,7 +259,7 @@ func TestCertStoreSelect(t *testing.T) {
 	if len(reports) != 1 || reports[0].ID != "missing.example" || !errors.Is(reports[0].Err, ErrUnknownID) {
 		t.Fatalf("reports = %+v, want ErrUnknownID", reports)
 	}
-	clock.advance(3 * time.Hour) // short has expired
+	fake.Advance(3 * time.Hour) // short has expired
 	if got := pick(t, s, hello("short")); got != "error: "+ErrNoCertificate.Error() {
 		t.Fatalf("expired selection: got %s, want the ranking's, which has none for the name", got)
 	}
@@ -414,9 +416,9 @@ func TestCertStoreAddFiles(t *testing.T) {
 	certFile, keyFile := writeCert(t, dir, *first)
 	base := time.Now().Add(-time.Hour)
 	setModTime(t, base, certFile, keyFile)
-	clock := &fakeClock{t: time.Now()}
+	fake := timeshim.NewFake(time.Now())
 	reports := make(chan *CertError, 4)
-	s := &CertStore{now: clock.now, OnError: func(err *CertError) { reports <- err }}
+	s := &CertStore{Clock: fake, OnError: func(err *CertError) { reports <- err }}
 	// An empty ID means the cleaned path of the certificate file.
 	given := dir + string(filepath.Separator) + "." + string(filepath.Separator) + "cert.pem"
 	id, err := s.AddFiles("", given, keyFile)
@@ -437,7 +439,7 @@ func TestCertStoreAddFiles(t *testing.T) {
 	if got, _ := s.forName(context.Background(), "a.example"); !sameLeaf(got, first) {
 		t.Fatal("files checked before CheckInterval")
 	}
-	clock.advance(DefaultCheckInterval)
+	fake.Advance(DefaultCheckInterval)
 	_, _ = s.forName(context.Background(), "a.example") // starts the check
 	eventually(t, func() bool {
 		got, _ := s.forName(context.Background(), "b.example")

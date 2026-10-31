@@ -148,7 +148,7 @@ func (s *CertStore) dropLoaded(names []string) {
 // holds, which a failure leaves serving and finding none removes.
 func (s *CertStore) load(e *storeEntry, refresh bool) {
 	cert, err := s.runLoad(e.name)
-	now := s.clock()
+	now := s.now()
 	var notBefore, notAfter time.Time
 	if err != nil {
 		cert = nil

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // endRecord records the calls of RelayFlow.End.
@@ -253,29 +255,40 @@ func TestRelayThroughTimeoutConnBusy(t *testing.T) {
 	}
 }
 
-// WithRelayIdleTimeout ends an idle relay with ErrRelayIdle, over sockets,
-// which keep their fast paths, and over ends without deadlines, while traffic
-// in one direction keeps it alive.
+// WithRelayIdleTimeout ends an idle relay with ErrRelayIdle, over sockets
+// and over ends without deadlines, while traffic in one direction keeps it
+// alive.
 func TestRelayIdleTimeout(t *testing.T) {
-	const idle = 150 * time.Millisecond
+	const idle = time.Minute
 	t.Run("conns", func(t *testing.T) {
+		fake := timeshim.NewFake(time.Now())
 		userA, relayA := tcpPair(t)
 		relayB, userB := tcpPair(t)
+		touched := make(chan struct{}, 1)
+		flow := RelayFlow{Done: func(int64) error { touched <- struct{}{}; return nil }}
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayIdleTimeout(idle))
+			_, _, err := Relay(context.Background(), relayA, relayB, WithRelayIdleTimeout(idle), WithRelayClock(fake), WithRelayFlows(&flow, nil))
 			done <- err
 		}()
 		go func() { _, _ = io.Copy(io.Discard, userB) }()
-		for range 6 {
+		waitPending(t, fake, 1)
+		for range 4 {
+			fake.Advance(idle / 2)
 			_, _ = userA.Write([]byte("tick"))
-			time.Sleep(idle / 3)
+			select {
+			case <-touched: // the activity is recorded at this time
+			case <-time.After(5 * time.Second):
+				t.Fatal("no data passed")
+			}
 		}
+		fake.Advance(idle - time.Nanosecond)
 		select {
 		case err := <-done:
 			t.Fatalf("Relay() ended while in use: %v", err)
 		default:
 		}
+		fake.Advance(time.Nanosecond)
 		select {
 		case err := <-done:
 			if !errors.Is(err, ErrRelayIdle) {
@@ -286,13 +299,53 @@ func TestRelayIdleTimeout(t *testing.T) {
 		}
 	})
 	t.Run("ends without deadlines", func(t *testing.T) {
+		fake := timeshim.NewFake(time.Now())
 		a, b := &blockingRWC{closed: make(chan struct{})}, &blockingRWC{closed: make(chan struct{})}
-		start := time.Now()
-		_, _, err := Relay(context.Background(), a, b, WithRelayIdleTimeout(idle))
-		if !errors.Is(err, ErrRelayIdle) || time.Since(start) < idle {
-			t.Fatalf("Relay() = %v after %v, want ErrRelayIdle after %v", err, time.Since(start), idle)
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := Relay(context.Background(), a, b, WithRelayIdleTimeout(idle), WithRelayClock(fake))
+			done <- err
+		}()
+		waitPending(t, fake, 1)
+		fake.Advance(idle - time.Nanosecond)
+		select {
+		case err := <-done:
+			t.Fatalf("Relay() = %v before the idle timeout", err)
+		default:
+		}
+		fake.Advance(time.Nanosecond)
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrRelayIdle) {
+				t.Fatalf("Relay() = %v, want ErrRelayIdle", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Relay() did not end when idle")
 		}
 	})
+}
+
+// The idle timeout counts from the time of the clock it is given, also of a
+// fake one at the zero time, and one large Advance ends the relay.
+func TestRelayIdleTimeoutZeroTimeClock(t *testing.T) {
+	const idle = time.Second
+	fake := timeshim.NewFake(time.Time{})
+	a, b := &blockingRWC{closed: make(chan struct{})}, &blockingRWC{closed: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Relay(context.Background(), a, b, WithRelayIdleTimeout(idle), WithRelayClock(fake))
+		done <- err
+	}()
+	waitPending(t, fake, 1)
+	fake.Advance(10 * idle)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRelayIdle) {
+			t.Fatalf("Relay() = %v, want ErrRelayIdle", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Relay() did not end when idle")
+	}
 }
 
 // noDeadlineConn is a connection without deadline support, as an SSH

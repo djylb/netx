@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,24 +168,6 @@ func writeCert(t *testing.T, dir string, cert tls.Certificate) (certFile, keyFil
 		t.Fatal(err)
 	}
 	return certFile, keyFile
-}
-
-// fakeClock is a clock for CertFiles and CertStore that moves only when told to.
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-func (f *fakeClock) now() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.t
-}
-
-func (f *fakeClock) advance(d time.Duration) {
-	f.mu.Lock()
-	f.t = f.t.Add(d)
-	f.mu.Unlock()
 }
 
 func TestPinSetClientConfigKeepsBaseCheck(t *testing.T) {

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/djylb/timeshim"
+
 	"github.com/djylb/netx/internal/dgram"
 	"github.com/djylb/netx/internal/netutil"
 )
@@ -39,8 +41,9 @@ type PacketListener struct {
 	closeOnce sync.Once
 	closeErr  error
 	wg        sync.WaitGroup
-	filtering atomic.Bool // the read loop is in the accept filter
-	closing   atomic.Bool // Close has begun; with filtering, orders the two
+	epoch     *dgram.Epoch // of the idle timeout
+	filtering atomic.Bool  // the read loop is in the accept filter
+	closing   atomic.Bool  // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {
@@ -49,6 +52,7 @@ type packetListenerOptions struct {
 	backlog     int
 	maxConns    int
 	idle        time.Duration
+	clock       timeshim.Clock
 	maxDatagram int
 	// beforeFilter, set by tests, runs before the accept filter.
 	beforeFilter func(*PacketListener)
@@ -131,6 +135,14 @@ func WithPacketIdleTimeout(d time.Duration) PacketListenerOption {
 	}
 }
 
+// WithPacketClock makes the listener tell the time of the idle timeout by c
+// instead of the system clock, such as a timeshim.Fake in tests.
+func WithPacketClock(c timeshim.Clock) PacketListenerOption {
+	return func(o *packetListenerOptions) {
+		o.clock = c
+	}
+}
+
 // WithPacketMaxDatagram sets the largest datagram that is delivered in full,
 // DefaultPacketMaxDatagram bytes by default; longer ones are truncated. The
 // packet connection is still read with a buffer of at least 65535 bytes,
@@ -157,12 +169,12 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
 	cfg.maxDatagram = max(cfg.maxDatagram, 1)
-	l := &PacketListener{pc: pc, opts: cfg}
+	l := &PacketListener{pc: pc, opts: cfg, epoch: dgram.NewEpoch(cfg.clock)}
 	l.conns.Init(cfg.backlog, cfg.maxConns, (*packetConn).queue, (*packetConn).shutdown)
 	l.udp, _ = pc.(*net.UDPConn)
 	l.wg.Go(l.readLoop)
 	if cfg.idle > 0 {
-		l.wg.Go(func() { l.conns.Sweep(cfg.idle) })
+		l.wg.Go(func() { l.conns.Sweep(cfg.idle, l.epoch) })
 	}
 	return l
 }
@@ -377,7 +389,7 @@ func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr) *packetConn
 // makeConn returns a connection to peer under k.
 func (l *PacketListener) makeConn(k peerKey, peer net.Addr) *packetConn {
 	c := &packetConn{l: l, key: k, peer: peer, writeDeadline: dgram.MakeDeadline()}
-	c.q.Init(l.opts.queue)
+	c.q.Init(l.opts.queue, l.epoch)
 	return c
 }
 

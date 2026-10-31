@@ -19,15 +19,21 @@ type Queue struct {
 	err    error // returned by reads once closed; set before closed is
 	// readDeadline fails reads once it has expired.
 	readDeadline Deadline
-	active       atomic.Int64 // Mono of the last datagram or of Accept
+	active       atomic.Int64 // Epoch time of the last datagram or of Accept
 	// accepted is set by Accept; the idle sweep skips the connection until
 	// then.
 	accepted atomic.Bool
+	epoch    *Epoch // tells the time of activity
 }
 
 // Init makes q hold up to n datagrams of SmallSize, or as many bytes of
-// larger ones.
-func (q *Queue) Init(n int) {
+// larger ones, telling the time of activity by e, the epoch that the
+// Table's Sweep uses too, or by the system clock when e is nil.
+func (q *Queue) Init(n int, e *Epoch) {
+	if e == nil {
+		e = RealEpoch
+	}
+	q.epoch = e
 	q.queue = make(chan *[]byte, n)
 	q.budget = int64(n) * SmallSize
 	q.closed = make(chan struct{})
@@ -154,7 +160,7 @@ func (q *Queue) Done() <-chan struct{} { return q.closed }
 func (q *Queue) SetReadDeadline(t time.Time) { q.readDeadline.Set(t) }
 
 // Touch records activity now.
-func (q *Queue) Touch() { q.active.Store(Mono(time.Now())) }
+func (q *Queue) Touch() { q.active.Store(q.epoch.Now()) }
 
 // Accepted records that the connection was handed to its user, which
 // starts its idle timeout.
@@ -164,7 +170,7 @@ func (q *Queue) Accepted() {
 }
 
 // IdleAt reports whether the accepted connection has been idle for at least
-// d at now, a Mono time. A connection waiting for Accept is not idle: the
+// d at now, a time of its Epoch. A connection waiting for Accept is not idle: the
 // backlog is bounded, and closing it would lose its datagrams.
 func (q *Queue) IdleAt(now int64, d time.Duration) bool {
 	return q.accepted.Load() && now-q.active.Load() >= int64(d)

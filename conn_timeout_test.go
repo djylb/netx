@@ -359,7 +359,7 @@ func TestTimeoutConnIdleClockIsMonotonic(t *testing.T) {
 	// The stored deadline is an offset on the monotonic clock, not a wall
 	// clock reading that a clock step would move.
 	// It is idle plus the refresh slack of one second ahead.
-	if d := time.Duration(conn.deadline.Load() - dgram.Mono(time.Now())); d <= idle || d > idle+time.Second {
+	if d := time.Duration(conn.deadline.Load() - dgram.RealEpoch.At(time.Now())); d <= idle || d > idle+time.Second {
 		t.Fatalf("stored idle deadline is %v ahead of the monotonic clock, want about %v", d, idle+time.Second)
 	}
 	// The socket deadline keeps the monotonic reading too.

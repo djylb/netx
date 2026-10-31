@@ -18,6 +18,8 @@ import (
 	"hash"
 	"sync"
 	"time"
+
+	"github.com/djylb/timeshim"
 )
 
 // Errors of a possession proof.
@@ -206,7 +208,7 @@ func digest(h crypto.Hash, msg []byte) []byte {
 // the zero value has no key, and its methods fail with ErrNoChallenger.
 type Challenger struct {
 	mu    sync.Mutex
-	now   func() time.Time // for tests
+	clock timeshim.Clock
 	used  usedHeap
 	seen  map[[nonceSize]byte]struct{}
 	epoch time.Time // with a monotonic reading
@@ -224,6 +226,8 @@ type ChallengerOptions struct {
 	// expires, the Challenger holds; DefaultMaxUsed (65536, a few MB) if not
 	// positive.
 	MaxUsed int
+	// Clock tells the time of TTL; the system clock if nil.
+	Clock timeshim.Clock
 }
 
 // NewChallenger returns a Challenger with a new random key.
@@ -232,8 +236,9 @@ func NewChallenger(opts ChallengerOptions) (*Challenger, error) {
 		ttl:   positive(opts.TTL, DefaultChallengeTTL),
 		max:   opts.MaxUsed,
 		seen:  make(map[[nonceSize]byte]struct{}),
-		epoch: time.Now(),
+		clock: timeshim.Or(opts.Clock),
 	}
+	c.epoch = c.clock.Now()
 	if c.max <= 0 {
 		c.max = DefaultMaxUsed
 	}
@@ -355,11 +360,7 @@ func (c *Challenger) use(nonce [nonceSize]byte, expiry int64) error {
 
 // elapsed returns the nanoseconds since c was made, by the monotonic clock.
 func (c *Challenger) elapsed() int64 {
-	now := time.Now()
-	if c.now != nil {
-		now = c.now()
-	}
-	return int64(now.Sub(c.epoch))
+	return int64(c.clock.Now().Sub(c.epoch))
 }
 
 // usedChallenge is a used challenge's nonce, kept until its expiry.

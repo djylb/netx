@@ -12,7 +12,7 @@ import (
 
 func newQueue(n int) *Queue {
 	q := new(Queue)
-	q.Init(n)
+	q.Init(n, nil)
 	return q
 }
 
@@ -107,10 +107,10 @@ func TestQueueReadRacingClose(t *testing.T) {
 func TestQueueActivityIsMonotonic(t *testing.T) {
 	q := newQueue(1)
 	q.Accepted()
-	if d := time.Duration(Mono(time.Now()) - q.active.Load()); d < 0 || d > time.Second {
+	if d := time.Duration(RealEpoch.Now() - q.active.Load()); d < 0 || d > time.Second {
 		t.Fatalf("activity stamp is %v behind the monotonic clock, want about 0", d)
 	}
-	if q.IdleAt(Mono(time.Now()), time.Hour) || !q.IdleAt(Mono(time.Now().Add(time.Hour)), time.Hour) {
+	if q.IdleAt(RealEpoch.Now(), time.Hour) || !q.IdleAt(RealEpoch.At(time.Now().Add(time.Hour)), time.Hour) {
 		t.Fatal("IdleAt does not follow the activity stamp")
 	}
 }

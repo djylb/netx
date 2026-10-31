@@ -14,6 +14,8 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/dgram"
+
+	"github.com/djylb/timeshim"
 )
 
 // DatagramRelay relays the datagrams of a UDP association between a stream
@@ -47,6 +49,8 @@ type DatagramRelay struct {
 	// either direction for this long, with netx.ErrRelayIdle. Datagrams
 	// dropped as invalid or by Allow do not count.
 	IdleTimeout time.Duration
+	// Clock tells the time of IdleTimeout; the system clock if nil.
+	Clock timeshim.Clock
 }
 
 // ErrDatagramTooLarge drops a datagram that fills the relay's whole buffer,
@@ -125,7 +129,7 @@ func (r *DatagramRelay) Relay(ctx context.Context, stream io.ReadWriteCloser, ou
 		reportInvalid: true,
 	}
 	if cfg.IdleTimeout > 0 {
-		d.idle = startDatagramIdle(cfg.IdleTimeout, func() { stop(netx.ErrRelayIdle) })
+		d.idle = startDatagramIdle(cfg.IdleTimeout, cfg.Clock, func() { stop(netx.ErrRelayIdle) })
 		defer d.idle.end()
 	}
 	var wg sync.WaitGroup
@@ -314,25 +318,26 @@ func (d *datagramRelay) report(err error) {
 
 func (d *datagramRelay) touch() {
 	if d.idle != nil {
-		d.idle.activity.Store(dgram.Mono(time.Now()))
+		d.idle.activity.Store(d.idle.epoch.Now())
 	}
 }
 
 // datagramIdle ends a relay that no datagram passed for d.
 type datagramIdle struct {
 	d        time.Duration
-	activity atomic.Int64 // dgram.Mono of the last datagram
+	epoch    *dgram.Epoch
+	activity atomic.Int64 // epoch time of the last datagram
 	mu       sync.Mutex   // orders the timer with end
-	timer    *time.Timer
+	timer    timeshim.Timer
 	ended    bool
 }
 
-func startDatagramIdle(d time.Duration, stop func()) *datagramIdle {
-	i := &datagramIdle{d: d}
-	i.activity.Store(dgram.Mono(time.Now()))
+func startDatagramIdle(d time.Duration, c timeshim.Clock, stop func()) *datagramIdle {
+	i := &datagramIdle{d: d, epoch: dgram.NewEpoch(c)}
+	i.activity.Store(i.epoch.Now())
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.timer = time.AfterFunc(d, func() { i.check(stop) })
+	i.timer = i.epoch.Clock().AfterFunc(d, func() { i.check(stop) })
 	return i
 }
 
@@ -342,7 +347,7 @@ func (i *datagramIdle) check(stop func()) {
 		i.mu.Unlock()
 		return
 	}
-	left := time.Duration(i.activity.Load() + int64(i.d) - dgram.Mono(time.Now()))
+	left := time.Duration(i.activity.Load() + int64(i.d) - i.epoch.Now())
 	if left > 0 {
 		i.timer.Reset(left)
 		i.mu.Unlock()
