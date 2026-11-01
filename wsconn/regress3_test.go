@@ -24,7 +24,7 @@ func TestPongDoesNotHoldReaderTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = sc.(*net.TCPConn).SetWriteBuffer(4096)
-	srv := NewConn(sc, nil, false, nil)
+	srv := newTestConn(sc, nil, false, nil)
 	defer func() { _ = sc.Close() }()
 	ping := frame(finBit|opPing, true, bytes.Repeat([]byte("x"), 125))
 	go func() {

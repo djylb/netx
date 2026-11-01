@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -28,7 +29,7 @@ const (
 )
 
 // DefaultUDPQueue is how many client datagrams a UDP association buffers
-// when Server.UDPQueue is not positive.
+// when Server.UDPQueue is 0.
 const DefaultUDPQueue = 128
 
 // Request is a client request read by Server.Handshake.
@@ -273,18 +274,19 @@ type Server struct {
 	// proxy, return a Dialer's ListenPacket.
 	DialPacket func(ctx context.Context, req *Request) (PacketConn, error)
 	// UDPQueue is how many client datagrams an association buffers;
-	// DefaultUDPQueue if not positive.
+	// DefaultUDPQueue if 0, and a negative queue is an error.
 	UDPQueue int
 
 	// HandshakeTimeout bounds the negotiation and request;
-	// DefaultHandshakeTimeout if not positive.
+	// DefaultHandshakeTimeout if 0, and a negative timeout is an error.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial and DialPacket; DefaultDialTimeout if not
-	// positive.
+	// DialTimeout bounds Dial and DialPacket; DefaultDialTimeout if 0, and
+	// a negative timeout is an error.
 	DialTimeout time.Duration
 	// UDPIdleTimeout ends a UDP association without datagrams in either
 	// direction, or without a first datagram, for this long, and closes its
-	// control connection; DefaultUDPIdleTimeout if not positive.
+	// control connection; DefaultUDPIdleTimeout if 0, and a negative
+	// timeout is an error.
 	UDPIdleTimeout time.Duration
 	// Clock tells the time of UDPIdleTimeout; the system clock if nil.
 	Clock timeshim.Clock
@@ -326,6 +328,10 @@ func (s *Server) ListenAndServe(addr string) error {
 // Accept errors for which netx.IsAcceptRetryable reports true, such as
 // running out of file descriptors, are retried as netx.Accept does.
 func (s *Server) Serve(l net.Listener) error {
+	if err := s.Validate(); err != nil {
+		_ = l.Close()
+		return err
+	}
 	return s.life.Serve(l, ErrServerClosed, netx.Accept, s.serveConn, s.onError)
 }
 
@@ -334,6 +340,10 @@ func (s *Server) Serve(l net.Listener) error {
 // the error that ended the exchange, if any. The connection counts in
 // ActiveConns until ServeConn returns.
 func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
+	if err := s.Validate(); err != nil {
+		_ = c.Close()
+		return err
+	}
 	if !s.life.TrackConn(&c, true) {
 		_ = c.Close()
 		return ErrServerClosed
@@ -372,6 +382,10 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 // called. A caller that serves connections itself, rather than with Serve or
 // ServeConn, is not counted by ActiveConns and not waited for by Shutdown.
 func (s *Server) Handshake(ctx context.Context, c net.Conn) (*Request, error) {
+	if err := s.Validate(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	ctx, cancel, err := s.bindContext(ctx)
 	if err != nil {
 		_ = c.Close()
@@ -389,6 +403,10 @@ func (s *Server) Handshake(ctx context.Context, c net.Conn) (*Request, error) {
 // and Close end it, closing req.Conn. It returns the error that ended the
 // exchange, if any.
 func (s *Server) ServeRequest(ctx context.Context, req *Request) error {
+	if err := s.Validate(); err != nil {
+		_ = req.Conn.Close()
+		return err
+	}
 	ctx, cancel, err := s.bindContext(ctx)
 	if err != nil {
 		_ = req.Conn.Close()
@@ -620,6 +638,18 @@ func (s *Server) dial(ctx context.Context, req *Request) (net.Conn, error) {
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp", req.Dst.String())
+}
+
+// Validate reports a negative setting, which fails Serve, ServeConn,
+// Handshake and ServeRequest.
+func (s *Server) Validate() error {
+	switch {
+	case s.UDPQueue < 0:
+		return fmt.Errorf("socks5: negative UDPQueue %d", s.UDPQueue)
+	case s.HandshakeTimeout < 0 || s.DialTimeout < 0 || s.UDPIdleTimeout < 0:
+		return errors.New("socks5: negative timeout")
+	}
+	return nil
 }
 
 // Shutdown stops the server gracefully: it closes the listeners passed to

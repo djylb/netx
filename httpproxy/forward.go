@@ -117,7 +117,7 @@ func idempotent(req *Request) bool {
 // reuseKey returns the key under which req's target connection is kept.
 func (sc *serverConn) reuseKey(req *Request) (string, bool) {
 	s := sc.s
-	if s.MaxIdleConnsPerKey < 0 {
+	if s.targets().perKey == 0 {
 		return "", false
 	}
 	if s.ReuseKey != nil {

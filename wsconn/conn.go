@@ -2,6 +2,7 @@ package wsconn
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ type Conn struct {
 
 	readLimit    int64
 	closeTimeout time.Duration
+	skipClose    bool // Options.SkipCloseHandshake
 	onPing       func(*Conn, []byte)
 	onPong       func(*Conn, []byte)
 	deflate      *deflateConfig // nil without permessage-deflate
@@ -98,15 +100,19 @@ type Conn struct {
 // what the peer sent after the handshake. A set opts.Compression means
 // that permessage-deflate was negotiated without context takeover in
 // either direction. opts may be nil.
-func NewConn(conn net.Conn, br *bufio.Reader, client bool, opts *Options) *Conn {
+// It fails, leaving conn open, when Options.Validate fails.
+func NewConn(conn net.Conn, br *bufio.Reader, client bool, opts *Options) (*Conn, error) {
 	if opts == nil {
 		opts = &Options{}
+	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
 	}
 	var dc *deflateConfig
 	if opts.Compression != nil {
 		dc = opts.Compression.config()
 	}
-	return newConn(conn, br, client, opts, dc)
+	return newConn(conn, br, client, opts, dc), nil
 }
 
 func newConn(conn net.Conn, br *bufio.Reader, client bool, o *Options, dc *deflateConfig) *Conn {
@@ -124,7 +130,8 @@ func newConn(conn net.Conn, br *bufio.Reader, client bool, o *Options, dc *defla
 		br:           br,
 		client:       client,
 		readLimit:    o.readLimit(),
-		closeTimeout: o.closeTimeout(),
+		closeTimeout: cmp.Or(o.CloseTimeout, DefaultCloseTimeout),
+		skipClose:    o.SkipCloseHandshake,
 		onPing:       o.OnPing,
 		onPong:       o.OnPong,
 		deflate:      dc,
@@ -590,7 +597,7 @@ func (c *Conn) peerClose(p []byte) error {
 // closes the connection beneath first (RFC 6455, section 7.1.1); the client
 // waits for that, within the close timeout.
 func (c *Conn) finish() {
-	if c.client && c.closeTimeout > 0 {
+	if c.client && !c.skipClose {
 		_ = c.conn.SetReadDeadline(c.closeDeadline())
 		_, _ = io.Copy(io.Discard, c.br)
 	}
@@ -603,7 +610,7 @@ func (c *Conn) closeDeadline() time.Time {
 	if ns := c.closeBy.Load(); ns != 0 {
 		return time.Unix(0, ns)
 	}
-	return time.Now().Add(c.closeTimeout.Abs())
+	return time.Now().Add(c.closeTimeout)
 }
 
 // fail fails the connection with err after sending a close frame with
@@ -642,9 +649,9 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 	if c.closing.Swap(true) {
 		return fmt.Errorf("wsconn: close: %w", net.ErrClosed)
 	}
-	deadline := time.Now().Add(c.closeTimeout.Abs())
+	deadline := time.Now().Add(c.closeTimeout)
 	c.closeBy.Store(deadline.UnixNano())
-	if c.sendClose(code, reason, deadline) == nil && c.closeTimeout > 0 {
+	if c.sendClose(code, reason, deadline) == nil && !c.skipClose {
 		c.awaitPeer(deadline)
 	}
 	c.closeConn()
@@ -659,14 +666,17 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 // handshake to the reader: reads go on until the peer's close frame,
 // which ends the connection, and Close may follow at any time. A message
 // that a writer from NextWriter has not finished fails. The close timeout
-// bounds the write, also one in progress; when it is negative, the frame
-// is sent only when no write is in progress, as Close sends it. A close
-// frame sent before makes it return nil.
+// bounds the write, also one in progress; with SkipCloseHandshake it
+// fails. A close frame sent before makes
+// it return nil.
 func (c *Conn) CloseWrite() error {
 	if c.closing.Load() {
 		return fmt.Errorf("wsconn: close write: %w", net.ErrClosed)
 	}
-	return c.sendClose(StatusNormalClosure, "", time.Now().Add(c.closeTimeout.Abs()))
+	if c.skipClose {
+		return errors.New("wsconn: close write without the closing handshake")
+	}
+	return c.sendClose(StatusNormalClosure, "", time.Now().Add(c.closeTimeout))
 }
 
 // awaitPeer waits for the end of the closing handshake until deadline: for
@@ -698,19 +708,15 @@ func (c *Conn) awaitPeer(deadline time.Time) {
 
 // sendClose sends a close frame with code, none for 0, unless one was
 // sent. deadline bounds the write, also a write of another goroutine that
-// holds the connection, which then fails; with a negative close timeout it
-// sends the frame only when no write is in progress.
+// holds the connection, which then fails; with SkipCloseHandshake it
+// sends none, and writes fail as after one.
 func (c *Conn) sendClose(code StatusCode, reason string, deadline time.Time) error {
-	if c.closeTimeout < 0 {
-		if !c.frameMu.TryLock() {
-			c.closeSent.Store(true)
-			return errCloseSent
-		}
-		c.boundWrites(deadline)
-	} else {
-		c.boundWrites(deadline)
-		c.frameMu.Lock()
+	if c.skipClose {
+		c.closeSent.Store(true)
+		return errCloseSent
 	}
+	c.boundWrites(deadline)
+	c.frameMu.Lock()
 	defer c.unlockFrame()
 	if c.closeSent.Load() {
 		return nil
@@ -762,11 +768,10 @@ func (c *Conn) writeControl(op byte, data []byte) error {
 // queuePong answers a ping without waiting for a write in progress: the
 // writer that holds frameMu sends the pong when it lets go. Only the pong
 // for the last ping is sent, as RFC 6455 allows. When no write is in
-// progress the reader writes the pong itself, bounded by the close timeout
-// (DefaultCloseTimeout when negative), so that a peer that sends pings but
-// does not read cannot hold the reader, nor past its read deadline: a pong
-// that does not go out in time is dropped, and one that went out in part
-// fails the writes.
+// progress the reader writes the pong itself, bounded by the close
+// timeout, so that a peer that sends pings but does not read cannot hold
+// the reader, nor past its read deadline: a pong that does not go out in
+// time is dropped, and one that went out in part fails the writes.
 func (c *Conn) queuePong(data []byte) {
 	c.pongMu.Lock()
 	c.pongLen = copy(c.pongData[:], data)
@@ -774,9 +779,6 @@ func (c *Conn) queuePong(data []byte) {
 	c.pongPending.Store(true)
 	for c.pongPending.Load() && c.frameMu.TryLock() {
 		d := c.closeTimeout
-		if d <= 0 {
-			d = DefaultCloseTimeout
-		}
 		c.wdMu.Lock()
 		c.pongBound = time.Now().Add(d)
 		if !c.rd.IsZero() && c.rd.Before(c.pongBound) {

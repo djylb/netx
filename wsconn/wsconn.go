@@ -163,7 +163,7 @@ const (
 	// Options.ReadBufferSize is zero.
 	DefaultReadBufferSize = 4096
 	// DefaultCloseTimeout bounds the closing handshake when
-	// Options.CloseTimeout is zero.
+	// Options.CloseTimeout is unset.
 	DefaultCloseTimeout = 5 * time.Second
 	// DefaultHandshakeTimeout bounds an opening handshake whose context has
 	// no deadline.
@@ -196,11 +196,13 @@ type Options struct {
 	// CloseTimeout bounds the closing handshake: sending the close frame
 	// and waiting for the peer's, and on a client then waiting for the
 	// server to end the connection beneath, which the server does at once.
-	// Zero means DefaultCloseTimeout. When negative, Close does not wait
-	// for the peer: it sends a close frame only when no write is in
-	// progress, within the timeout's magnitude, and closes the connection
-	// beneath.
+	// Zero means DefaultCloseTimeout, and a negative timeout is an error.
 	CloseTimeout time.Duration
+	// SkipCloseHandshake closes without the closing handshake: Close sends
+	// no close frame and closes the connection beneath at once, and
+	// CloseWrite fails. CloseTimeout then still bounds the pongs that the
+	// reader writes.
+	SkipCloseHandshake bool
 	// OnPing and OnPong, if set, are called by the reader with the payload
 	// of each ping and pong, which is valid only during the call; a ping
 	// is answered with a pong all the same. They run on the reader's
@@ -210,6 +212,29 @@ type Options struct {
 	OnPong func(c *Conn, data []byte)
 	// Compression, if set, offers or accepts permessage-deflate.
 	Compression *Compression
+}
+
+// Validate reports a setting out of range, which fails the handshakes
+// and NewConn. ClientOptions and ServerOptions have it through Options.
+func (o *Options) Validate() error {
+	if o.CloseTimeout < 0 {
+		return fmt.Errorf("wsconn: negative close timeout %v", o.CloseTimeout)
+	}
+	if o.ReadBufferSize < 0 {
+		return fmt.Errorf("wsconn: negative read buffer size %d", o.ReadBufferSize)
+	}
+	if o.Compression != nil {
+		return o.Compression.validate()
+	}
+	return nil
+}
+
+// validateHandshake reports a negative MaxHeaderBytes.
+func validateHandshake(maxHeader int) error {
+	if maxHeader < 0 {
+		return fmt.Errorf("wsconn: negative MaxHeaderBytes %d", maxHeader)
+	}
+	return nil
 }
 
 func (o *Options) readLimit() int64 {
@@ -230,13 +255,6 @@ func (o *Options) readBufferSize() int {
 		return minReadBufferSize
 	}
 	return o.ReadBufferSize
-}
-
-func (o *Options) closeTimeout() time.Duration {
-	if o.CloseTimeout == 0 {
-		return DefaultCloseTimeout
-	}
-	return o.CloseTimeout
 }
 
 // protocolError fails a connection with ErrProtocol and a description.

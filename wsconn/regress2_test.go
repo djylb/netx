@@ -19,7 +19,7 @@ func TestPongDoesNotHoldReader(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
-	srv := NewConn(a, nil, false, nil)
+	srv := newTestConn(a, nil, false, nil)
 	go func() {
 		// Attacker: sends one ping, never reads.
 		_, _ = b.Write(frame(finBit|opPing, true, []byte("x")))
@@ -59,7 +59,7 @@ func TestDeflateBombHitsLimit(t *testing.T) {
 	t.Logf("bomb: %d bytes compressed", len(bomb))
 	in := frame(finBit|rsv1Bit|opBinary, true, bomb)
 	mc := &memConn{r: bytes.NewReader(in)}
-	c := NewConn(mc, nil, false, &Options{ReadLimit: 1 << 20, Compression: &Compression{}})
+	c := newTestConn(mc, nil, false, &Options{ReadLimit: 1 << 20, Compression: &Compression{}})
 	var ms0, ms1 runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&ms0)
@@ -102,14 +102,14 @@ func TestCloseStress(t *testing.T) {
 				srvCh <- nil
 				return
 			}
-			c, err := Accept(t.Context(), nc, &ServerOptions{Options: Options{CloseTimeout: time.Second, Compression: &Compression{Threshold: -1}}})
+			c, err := Accept(t.Context(), nc, &ServerOptions{Options: Options{CloseTimeout: time.Second, Compression: &Compression{Threshold: 1}}})
 			if err != nil {
 				srvCh <- nil
 				return
 			}
 			srvCh <- c
 		}()
-		d := &Dialer{ClientOptions: ClientOptions{Options: Options{CloseTimeout: time.Second, Compression: &Compression{Threshold: -1}}}}
+		d := &Dialer{ClientOptions: ClientOptions{Options: Options{CloseTimeout: time.Second, Compression: &Compression{Threshold: 1}}}}
 		cli, _, err := d.Dial(t.Context(), "ws://"+ln.Addr().String()+"/")
 		if err != nil {
 			t.Fatal(err)

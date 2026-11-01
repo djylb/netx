@@ -66,6 +66,14 @@ type ServerOptions struct {
 	MaxHeaderBytes int
 }
 
+// Validate reports a setting out of range, which fails the handshakes.
+func (o *ServerOptions) Validate() error {
+	if err := o.Options.Validate(); err != nil {
+		return err
+	}
+	return validateHandshake(o.MaxHeaderBytes)
+}
+
 // AnyOrigin is a ServerOptions.CheckOrigin that accepts every request.
 func AnyOrigin(_ *httphead.Request) error { return nil }
 
@@ -107,6 +115,9 @@ type Handshake struct {
 func CheckRequest(req *httphead.Request, opts *ServerOptions) (*Handshake, error) {
 	if opts == nil {
 		opts = &ServerOptions{}
+	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
 	}
 	h := &req.Header
 	if req.Method == "CONNECT" && h.Has(":protocol") {
@@ -284,6 +295,10 @@ func Accept(ctx context.Context, conn net.Conn, opts *ServerOptions) (*Conn, err
 	if opts == nil {
 		opts = &ServerOptions{}
 	}
+	if err := opts.Validate(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	var c *Conn
 	err := doHandshake(ctx, conn, opts.HandshakeTimeout, func() error {
 		br := bufio.NewReaderSize(conn, opts.readBufferSize())
@@ -321,6 +336,10 @@ func Accept(ctx context.Context, conn net.Conn, opts *ServerOptions) (*Conn, err
 func AcceptRequest(ctx context.Context, conn net.Conn, br *bufio.Reader, req *httphead.Request, opts *ServerOptions) (*Conn, error) {
 	if opts == nil {
 		opts = &ServerOptions{}
+	}
+	if err := opts.Validate(); err != nil {
+		_ = conn.Close()
+		return nil, err
 	}
 	var c *Conn
 	err := doHandshake(ctx, conn, opts.HandshakeTimeout, func() error {

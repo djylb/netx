@@ -787,3 +787,21 @@ func TestCertFilesParsesMissingLeaf(t *testing.T) {
 		t.Fatalf("expired PEM: LoadPEM() = %v, %v; want ErrNotValidNow", got, err)
 	}
 }
+
+// Negative settings fail CertFiles, CertStore and NewChallenger.
+func TestNegativeCertSettings(t *testing.T) {
+	cert, _ := NewSelfSigned(SelfSignedOptions{})
+	certFile, keyFile := writeCert(t, t.TempDir(), cert)
+	if _, err := (&CertFiles{MaxEntries: -1}).LoadFiles(certFile, keyFile); err == nil {
+		t.Error("CertFiles MaxEntries")
+	}
+	if _, err := (&CertStore{RetryAfter: -1}).AddFiles("", certFile, keyFile); err == nil {
+		t.Error("CertStore RetryAfter")
+	}
+	if _, err := (&CertStore{LoadTimeout: -1}).GetCertificate(&tls.ClientHelloInfo{ServerName: "x"}); err == nil {
+		t.Error("CertStore LoadTimeout")
+	}
+	if _, err := NewChallenger(ChallengerOptions{TTL: -1}); err == nil {
+		t.Error("NewChallenger")
+	}
+}

@@ -253,7 +253,7 @@ func TestMessagesBothWays(t *testing.T) {
 			var so ServerOptions
 			var co ClientOptions
 			if comp {
-				so.Compression = &Compression{Threshold: -1}
+				so.Compression = &Compression{Threshold: 1}
 				co.Compression = &Compression{Level: 6}
 			}
 			srv, cli := pair(t, &so, &co)

@@ -114,7 +114,7 @@ func BenchmarkForwardKeepAlive(b *testing.B) {
 // connection for each request.
 func BenchmarkForwardNoReuse(b *testing.B) {
 	o := rawOrigin(b, 2)
-	addr := serve(b, &httpproxy.Server{MaxIdleConnsPerKey: -1})
+	addr := serve(b, &httpproxy.Server{DisableKeepAlives: true})
 	benchForward(b, addr, o, 2)
 }
 

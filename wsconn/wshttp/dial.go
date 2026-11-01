@@ -50,6 +50,9 @@ var ErrNoTransport = errors.New("wshttp: Dialer without a Transport")
 // unless Header holds an Authorization field, as over HTTP/1.1.
 func (d *Dialer) Dial(ctx context.Context, rawURL string) (*wsconn.Conn, *httphead.Response, error) {
 	// One bound for both attempts.
+	if err := d.Validate(); err != nil {
+		return nil, nil, err
+	}
 	timeout := d.HandshakeTimeout
 	if timeout == 0 {
 		timeout = wsconn.DefaultHandshakeTimeout

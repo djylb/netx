@@ -45,9 +45,10 @@ type DatagramRelay struct {
 	// handler that logs them should rate-limit. The error that ends the
 	// relay is returned by Relay instead.
 	OnError func(err error)
-	// IdleTimeout, if positive, ends a relay that no datagram passed in
+	// IdleTimeout, if not 0, ends a relay that no datagram passed in
 	// either direction for this long, with netx.ErrRelayIdle. Datagrams
-	// dropped as invalid or by Allow do not count.
+	// dropped as invalid or by Allow do not count. A negative timeout fails
+	// Relay.
 	IdleTimeout time.Duration
 	// Clock tells the time of IdleTimeout; the system clock if nil.
 	Clock timeshim.Clock
@@ -98,6 +99,15 @@ func (r *DatagramRelay) Relay(ctx context.Context, stream io.ReadWriteCloser, ou
 	var cfg DatagramRelay
 	if r != nil {
 		cfg = *r
+	}
+	if cfg.IdleTimeout < 0 {
+		if stream != nil {
+			_ = stream.Close()
+		}
+		if out != nil {
+			_ = out.Close()
+		}
+		return fmt.Errorf("socks5: negative relay IdleTimeout %v", cfg.IdleTimeout)
 	}
 	var (
 		once    sync.Once

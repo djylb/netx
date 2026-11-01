@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"io"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -27,12 +28,12 @@ func FuzzReadFrames(f *testing.F) {
 	f.Add(frame(finBit|opClose, true, []byte{0x03, 0xe8, 'o', 'k'}), false, false)
 	f.Add([]byte{0x81, 0xfe, 0x00, 0x05}, false, false)
 	f.Fuzz(func(t *testing.T, data []byte, client, compressed bool) {
-		opts := &Options{ReadLimit: 1 << 16, CloseTimeout: -1}
+		opts := &Options{ReadLimit: 1 << 16, CloseTimeout: time.Millisecond}
 		if compressed {
 			opts.Compression = &Compression{}
 		}
 		mc := &memConn{r: bytes.NewReader(data)}
-		c := NewConn(mc, nil, client, opts)
+		c := newTestConn(mc, nil, client, opts)
 		for range 64 {
 			typ, p, err := c.ReadMessage()
 			if err != nil {
@@ -47,6 +48,6 @@ func FuzzReadFrames(f *testing.F) {
 		}
 		// The same input as a stream.
 		mc = &memConn{r: bytes.NewReader(data)}
-		_, _ = io.Copy(io.Discard, NewStreamConn(NewConn(mc, nil, client, opts)))
+		_, _ = io.Copy(io.Discard, NewStreamConn(newTestConn(mc, nil, client, opts)))
 	})
 }

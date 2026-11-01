@@ -110,7 +110,7 @@ func lastClose(t *testing.T, c *memConn) StatusCode {
 
 func serverOver(input []byte, opts *Options) (*Conn, *memConn) {
 	mc := &memConn{r: bytes.NewReader(input)}
-	return NewConn(mc, nil, false, opts), mc
+	return newTestConn(mc, nil, false, opts), mc
 }
 
 func cat(frames ...[]byte) []byte { return bytes.Join(frames, nil) }
@@ -232,7 +232,7 @@ func TestProtocolViolations(t *testing.T) {
 
 func TestClientRefusesMaskedFrames(t *testing.T) {
 	mc := &memConn{r: bytes.NewReader(frame(finBit|opText, true, []byte("a")))}
-	c := NewConn(mc, nil, true, nil)
+	c := newTestConn(mc, nil, true, nil)
 	if _, _, err := c.ReadMessage(); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("err %v", err)
 	}
@@ -324,7 +324,7 @@ func TestStreamConnReads(t *testing.T) {
 func TestWriteFrames(t *testing.T) {
 	for _, client := range []bool{false, true} {
 		mc := &memConn{r: bytes.NewReader(nil)}
-		c := NewConn(mc, nil, client, nil)
+		c := newTestConn(mc, nil, client, nil)
 		big := bytes.Repeat([]byte("0123456789"), 10000)
 		if err := c.WriteMessage(Binary, big); err != nil {
 			t.Fatal(err)
@@ -377,7 +377,7 @@ func TestWriteFrames(t *testing.T) {
 }
 
 func TestCloseCodes(t *testing.T) {
-	c, mc := serverOver(nil, &Options{CloseTimeout: -1})
+	c, mc := serverOver(nil, &Options{CloseTimeout: 10 * time.Millisecond})
 	if err := c.CloseWithStatus(1005, ""); err == nil {
 		t.Fatal("1005 sent")
 	}

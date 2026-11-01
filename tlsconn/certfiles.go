@@ -118,6 +118,9 @@ func fileKey(certFile, keyFile string) string {
 // the previous certificate and is reported to OnError. The returned
 // certificate is shared and must not be modified.
 func (c *CertFiles) LoadFiles(certFile, keyFile string) (*tls.Certificate, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	return c.get(fileKey(certFile, keyFile), certFile, keyFile, nil)
 }
 
@@ -129,6 +132,9 @@ func (c *CertFiles) LoadFiles(certFile, keyFile string) (*tls.Certificate, error
 // entry while the old one, private key included, stays until MaxEntries or
 // IdleTimeout drops it: set one of them when the data changes over time.
 func (c *CertFiles) LoadPEM(certPEM, keyPEM []byte) (*tls.Certificate, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	h := sha256.New()
 	var n [8]byte
 	h.Write(binary.BigEndian.AppendUint64(n[:0], uint64(len(certPEM))))
@@ -314,6 +320,15 @@ type fileSource struct {
 	cert, key         os.FileInfo // as of the last successful read
 	checkedAt         time.Time   // of the last check
 	forcedAt          time.Time   // of the last read of an expired certificate
+}
+
+// validate reports a negative setting, which LoadFiles and LoadPEM
+// return.
+func (c *CertFiles) validate() error {
+	if c.MaxEntries < 0 || c.IdleTimeout < 0 {
+		return errors.New("tlsconn: negative CertFiles setting")
+	}
+	return nil
 }
 
 // due reports whether the files should be checked now, every interval

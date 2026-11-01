@@ -64,12 +64,12 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	}
 	limit := DefaultHandshakeTimeout
 	switch {
+	case d.HandshakeTimeout < 0:
+		limit = 0
 	case d.HandshakeTimeout > 0:
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d.HandshakeTimeout)
 		defer cancel()
-	case d.HandshakeTimeout < 0:
-		limit = 0
 	}
 	tc, err := handshake(ctx, raw, cfg, tls.Client, limit)
 	if err != nil {

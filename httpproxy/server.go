@@ -2,8 +2,10 @@ package httpproxy
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -226,14 +228,18 @@ type Server struct {
 	// other parts of the request, such as a field, must have a ReuseKey
 	// that holds them.
 	ReuseKey func(req *Request) (key string, ok bool)
+	// DisableKeepAlives keeps no connection to a target: each serves one
+	// request.
+	DisableKeepAlives bool
 	// MaxIdleConnsPerKey bounds the kept connections of one key;
-	// DefaultMaxIdleConnsPerKey if 0, and none are kept if negative.
+	// DefaultMaxIdleConnsPerKey if 0, as DisableKeepAlives is how to keep
+	// none, and a negative bound is an error.
 	MaxIdleConnsPerKey int
 	// MaxIdleConns bounds the kept connections of all keys;
 	// DefaultMaxIdleConns if 0, and unbounded if negative.
 	MaxIdleConns int
 	// IdleConnTimeout closes a kept connection that served no request for
-	// this long; DefaultIdleConnTimeout if not positive.
+	// this long; DefaultIdleConnTimeout if 0.
 	IdleConnTimeout time.Duration
 
 	// Via, if not empty, is the pseudonym that the server adds to the Via
@@ -254,19 +260,19 @@ type Server struct {
 	ResponseHeader func(req *Request, status int, h *httphead.Header)
 
 	// HandshakeTimeout bounds reading each request head and authenticating
-	// it; DefaultHandshakeTimeout if not positive.
+	// it; DefaultHandshakeTimeout if 0.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial; DefaultDialTimeout if not positive.
+	// DialTimeout bounds Dial; DefaultDialTimeout if 0.
 	DialTimeout time.Duration
 	// IdleTimeout bounds the wait for the next request on a kept-alive
-	// client connection; DefaultIdleTimeout if not positive.
+	// client connection; DefaultIdleTimeout if 0.
 	IdleTimeout time.Duration
-	// ResponseHeaderTimeout, if positive, bounds the wait for the head of a
+	// ResponseHeaderTimeout, if not 0, bounds the wait for the head of a
 	// forwarded request's response once the request has been sent; the
 	// client then gets 504 Gateway Timeout.
 	ResponseHeaderTimeout time.Duration
 	// MaxHeaderBytes bounds a request or response head, and a trailer
-	// section; DefaultMaxHeaderBytes if not positive. A larger request head
+	// section; DefaultMaxHeaderBytes if 0. A larger request head
 	// is answered with 431 Request Header Fields Too Large, a larger
 	// response head with 502 Bad Gateway.
 	MaxHeaderBytes int
@@ -295,7 +301,13 @@ func (s *Server) ListenAndServe(addr string) error {
 // ErrServerClosed after Shutdown or Close, which close l, or the error that
 // ended Accept. Accept errors for which netx.IsAcceptRetryable reports
 // true are retried as netx.Accept does.
+//
+// Settings that Validate reports fail it, closing l.
 func (s *Server) Serve(l net.Listener) error {
+	if err := s.Validate(); err != nil {
+		_ = l.Close()
+		return err
+	}
 	return s.life.Serve(l, ErrServerClosed, netx.Accept, s.serveConn, s.onError)
 }
 
@@ -305,13 +317,33 @@ func (s *Server) Serve(l net.Listener) error {
 // Close does. It returns the error that ended the connection, if any,
 // which is also passed to OnError for each request that failed before it
 // was ended. The connection counts in ActiveConns until ServeConn returns.
+// Settings that Validate reports fail it, closing c.
 func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
+	if err := s.Validate(); err != nil {
+		_ = c.Close()
+		return err
+	}
 	if !s.life.TrackConn(&c, true) {
 		_ = c.Close()
 		return ErrServerClosed
 	}
 	defer s.life.TrackConn(&c, false)
 	return s.serveConn(ctx, c)
+}
+
+// Validate reports a negative setting, which fails Serve and ServeConn;
+// every negative setting is invalid.
+func (s *Server) Validate() error {
+	if s.MaxIdleConnsPerKey < 0 {
+		return fmt.Errorf("httpproxy: negative MaxIdleConnsPerKey %d", s.MaxIdleConnsPerKey)
+	}
+	if s.MaxHeaderBytes < 0 {
+		return fmt.Errorf("httpproxy: negative MaxHeaderBytes %d", s.MaxHeaderBytes)
+	}
+	if s.IdleConnTimeout < 0 || s.HandshakeTimeout < 0 || s.DialTimeout < 0 || s.IdleTimeout < 0 || s.ResponseHeaderTimeout < 0 {
+		return errors.New("httpproxy: negative timeout")
+	}
+	return nil
 }
 
 // Shutdown stops the server gracefully: it closes the listeners passed to
@@ -346,9 +378,9 @@ func (s *Server) Close() error {
 // targets returns the pool of kept connections, set up on first use.
 func (s *Server) targets() *pool {
 	s.poolOnce.Do(func() {
-		s.pool.perKey = s.MaxIdleConnsPerKey
-		if s.pool.perKey == 0 {
-			s.pool.perKey = DefaultMaxIdleConnsPerKey
+		s.pool.perKey = cmp.Or(s.MaxIdleConnsPerKey, DefaultMaxIdleConnsPerKey)
+		if s.DisableKeepAlives {
+			s.pool.perKey = 0
 		}
 		s.pool.total = s.MaxIdleConns
 		if s.pool.total == 0 {

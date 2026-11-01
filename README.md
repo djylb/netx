@@ -106,8 +106,8 @@ func main() {
 - `tlsconn.Dialer` dials with any `Forward` dialer, such as a proxy dialer, and
   runs `tlsconn.Client` on the result, taking the server name from the dialed
   address unless the config sets one. The context bounds the dial and the
-  handshake; a positive `HandshakeTimeout` also bounds the handshake, and a
-  negative one leaves the context alone to bound it, without the
+  handshake; a positive `HandshakeTimeout` also bounds the handshake, and
+  a negative one leaves the context alone to bound it, without the
   `DefaultHandshakeTimeout` fallback. Used as a proxy dialer's `Forward`, it
   reaches the proxy over TLS.
 
@@ -1627,7 +1627,7 @@ func runHTTPProxy(ln net.Listener) error {
   default: a `Dial` that depends on more, such as a field, needs a
   `ReuseKey`, which can also return false to keep none for a request.
   `MaxIdleConnsPerKey` (16), `MaxIdleConns` (1024) and `IdleConnTimeout`
-  (90 s) bound them; a negative `MaxIdleConnsPerKey` keeps none. A kept
+  (90 s) bound them; `DisableKeepAlives` keeps none. A kept
   connection that the target closes, or that sends anything unasked, leaves
   the pool at once, and a request that finds one dead before any response
   is sent again on a new one only when it is idempotent and has no body;

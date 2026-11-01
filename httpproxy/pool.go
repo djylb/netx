@@ -46,8 +46,8 @@ type pool struct {
 	idle    map[string][]*upConn
 	n       int
 	closed  bool
-	perKey  int // most idle connections of a key; no reuse when not positive
-	total   int // most idle connections; no bound when not positive
+	perKey  int // most idle connections of a key; no reuse when 0
+	total   int // most idle connections; no bound when negative
 	timeout time.Duration
 }
 
@@ -98,7 +98,7 @@ func (p *pool) put(u *upConn) {
 		return
 	}
 	p.mu.Lock()
-	if p.closed || p.perKey <= 0 || len(p.idle[u.key]) >= p.perKey || p.total > 0 && p.n >= p.total {
+	if p.closed || p.perKey == 0 || len(p.idle[u.key]) >= p.perKey || p.total > 0 && p.n >= p.total {
 		p.mu.Unlock()
 		u.close()
 		return

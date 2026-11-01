@@ -55,6 +55,10 @@ func Client(ctx context.Context, conn net.Conn, rawURL string, opts *ClientOptio
 	if opts == nil {
 		opts = &ClientOptions{}
 	}
+	if err := opts.Validate(); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
 	u, err := parseURL(rawURL)
 	if err != nil {
 		_ = conn.Close()
@@ -234,6 +238,14 @@ func checkNegotiated(resp *httphead.Response, opts *ClientOptions) (*deflateConf
 	return dc, sub, nil
 }
 
+// Validate reports a setting out of range, which fails the handshakes.
+func (o *ClientOptions) Validate() error {
+	if err := o.Options.Validate(); err != nil {
+		return err
+	}
+	return validateHandshake(o.MaxHeaderBytes)
+}
+
 // ExtendedConnectHeader returns the fields of an HTTP/2 extended CONNECT
 // request (RFC 8441) for the options, after the pseudo-field
 // ":protocol: websocket" that the caller sends: Sec-WebSocket-Version,
@@ -267,6 +279,10 @@ func (o *ClientOptions) ExtendedConnectHeader() (httphead.Header, error) {
 func ExtendedConnectClient(conn net.Conn, resp *httphead.Response, opts *ClientOptions) (*Conn, error) {
 	if opts == nil {
 		opts = &ClientOptions{}
+	}
+	if err := opts.Validate(); err != nil {
+		_ = conn.Close()
+		return nil, err
 	}
 	if resp.Code != 200 {
 		_ = conn.Close()
@@ -309,6 +325,9 @@ type Dialer struct {
 // HandshakeTimeout when it has no deadline, bounds the dial and the
 // handshakes.
 func (d *Dialer) Dial(ctx context.Context, rawURL string) (*Conn, *httphead.Response, error) {
+	if err := d.Validate(); err != nil {
+		return nil, nil, err
+	}
 	u, err := parseURL(rawURL)
 	if err != nil {
 		return nil, nil, err

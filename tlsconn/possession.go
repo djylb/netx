@@ -220,11 +220,11 @@ type Challenger struct {
 // ChallengerOptions configures NewChallenger.
 type ChallengerOptions struct {
 	// TTL is how long a challenge is valid; DefaultChallengeTTL (5 minutes)
-	// if not positive.
+	// if 0.
 	TTL time.Duration
 	// MaxUsed bounds how many accepted challenges, each kept until it
-	// expires, the Challenger holds; DefaultMaxUsed (65536, a few MB) if not
-	// positive.
+	// expires, the Challenger holds; DefaultMaxUsed (65536, a few MB) if 0.
+	// Negative options fail NewChallenger.
 	MaxUsed int
 	// Clock tells the time of TTL; the system clock if nil.
 	Clock timeshim.Clock
@@ -232,6 +232,9 @@ type ChallengerOptions struct {
 
 // NewChallenger returns a Challenger with a new random key.
 func NewChallenger(opts ChallengerOptions) (*Challenger, error) {
+	if opts.TTL < 0 || opts.MaxUsed < 0 {
+		return nil, errors.New("tlsconn: negative ChallengerOptions")
+	}
 	c := &Challenger{
 		ttl:   positive(opts.TTL, DefaultChallengeTTL),
 		max:   opts.MaxUsed,

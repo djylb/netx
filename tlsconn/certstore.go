@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"net"
 	"path/filepath"
 	"slices"
@@ -20,13 +21,12 @@ import (
 
 const (
 	// DefaultRetryAfter is how long a failed CertStore load is remembered
-	// when RetryAfter is not positive.
+	// when RetryAfter is 0.
 	DefaultRetryAfter = 10 * time.Second
 	// DefaultRefreshBefore is how long before expiry a loaded certificate is
-	// loaded again when RefreshBefore is not positive.
+	// loaded again when RefreshBefore is 0.
 	DefaultRefreshBefore = 24 * time.Hour
-	// DefaultLoadTimeout bounds a CertStore load when LoadTimeout is not
-	// positive.
+	// DefaultLoadTimeout bounds a CertStore load when LoadTimeout is 0.
 	DefaultLoadTimeout = 30 * time.Second
 )
 
@@ -113,16 +113,17 @@ type CertStore struct {
 	// it too. Calls for one name may overlap, as after RetryAfter, Forget or
 	// an eviction while an earlier call has not returned.
 	Load func(ctx context.Context, name string) (*tls.Certificate, error)
-	// LoadTimeout bounds a Load; DefaultLoadTimeout if not positive.
+	// LoadTimeout bounds a Load; DefaultLoadTimeout if 0. Negative
+	// settings are errors, which GetCertificate and the Add methods return.
 	LoadTimeout time.Duration
 	// RetryAfter is how long a failed Load, or one that found no
 	// certificate, is remembered before Load runs again for the name, and
 	// the least time between the loads of a certificate due for refresh;
-	// DefaultRetryAfter if not positive.
+	// DefaultRetryAfter if 0.
 	RetryAfter time.Duration
 	// RefreshBefore is how long before a loaded certificate expires that it
 	// is loaded again, at most a third of its lifetime;
-	// DefaultRefreshBefore if not positive.
+	// DefaultRefreshBefore if 0.
 	RefreshBefore time.Duration
 	// MaxEntries bounds the loaded names, failed ones included; the least
 	// recently used is dropped first. Zero means no bound.
@@ -296,6 +297,9 @@ func CertID(cert *tls.Certificate) string {
 // The certificate is shared and must not be modified; Add does not change
 // it.
 func (s *CertStore) Add(id string, cert *tls.Certificate, names ...string) (string, error) {
+	if err := s.validate(); err != nil {
+		return "", err
+	}
 	c, err := s.newCert(id, cert, normalizeNames(names), SourceAdd, nil)
 	if err != nil {
 		return "", err
@@ -327,6 +331,9 @@ func (s *CertStore) AddPEM(id string, certPEM, keyPEM []byte, names ...string) (
 // while the previous one is, leaves the previous certificate serving and goes
 // to OnError, and the next check reads them again.
 func (s *CertStore) AddFiles(id, certFile, keyFile string, names ...string) (string, error) {
+	if err := s.validate(); err != nil {
+		return "", err
+	}
 	if id == "" {
 		id = filepath.Clean(certFile)
 	}
@@ -389,6 +396,9 @@ func (s *CertStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 }
 
 func (s *CertStore) certificate(ctx context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
 	now := s.now()
 	s.checkFilesIfDue(now)
 	if s.Select != nil {
@@ -873,3 +883,11 @@ func (s *CertStore) report(err *CertError) {
 }
 
 func (s *CertStore) now() time.Time { return timeshim.Or(s.Clock).Now() }
+
+// validate reports a negative setting.
+func (s *CertStore) validate() error {
+	if s.LoadTimeout < 0 || s.RetryAfter < 0 || s.RefreshBefore < 0 || s.IdleTimeout < 0 || s.MaxEntries < 0 {
+		return errors.New("tlsconn: negative CertStore setting")
+	}
+	return nil
+}

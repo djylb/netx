@@ -151,7 +151,7 @@ func TestReuseKey(t *testing.T) {
 		conns int32
 	}{
 		{"default", &httpproxy.Server{}, 1},
-		{"no reuse", &httpproxy.Server{MaxIdleConnsPerKey: -1}, 3},
+		{"no reuse", &httpproxy.Server{DisableKeepAlives: true}, 3},
 		{"own key", &httpproxy.Server{ReuseKey: func(req *httpproxy.Request) (string, bool) {
 			return req.Header.Get("X-Route"), req.Header.Get("X-Route") != ""
 		}}, 3},
@@ -377,5 +377,27 @@ func TestOnDoneRefusal(t *testing.T) {
 	rawStatus(t, addr, "GET http://example.com/ HTTP/1.1\r\n\r\n")
 	if r := <-done; r.Status != 403 || r.Err == nil || r.ToClient == 0 {
 		t.Fatalf("result %+v", r)
+	}
+}
+
+// A negative MaxIdleConnsPerKey fails Validate and ServeConn.
+func TestNegativeMaxIdleConnsPerKey(t *testing.T) {
+	s := &httpproxy.Server{MaxIdleConnsPerKey: -1}
+	if s.Validate() == nil {
+		t.Error("valid")
+	}
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	if err := s.ServeConn(t.Context(), a); err == nil {
+		t.Error("ServeConn served")
+	}
+}
+
+// Negative timeouts and header limits fail Validate.
+func TestNegativeServerSettings(t *testing.T) {
+	for _, s := range []*httpproxy.Server{{IdleConnTimeout: -1}, {HandshakeTimeout: -1}, {DialTimeout: -1}, {IdleTimeout: -1}, {ResponseHeaderTimeout: -1}, {MaxHeaderBytes: -1}} {
+		if s.Validate() == nil {
+			t.Errorf("%+v valid", s)
+		}
 	}
 }

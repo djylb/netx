@@ -93,7 +93,7 @@ func BenchmarkStreamDeflate32K(b *testing.B)        { benchStream(b, 32<<10, tru
 func BenchmarkWriteMessage(b *testing.B) {
 	for _, client := range []bool{false, true} {
 		b.Run(map[bool]string{false: "server", true: "client"}[client], func(b *testing.B) {
-			c := NewConn(&discardConn{}, nil, client, nil)
+			c := newTestConn(&discardConn{}, nil, client, nil)
 			msg := make([]byte, 128)
 			b.SetBytes(int64(len(msg)))
 			b.ReportAllocs()
@@ -124,7 +124,7 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 
 func BenchmarkAppendMessage(b *testing.B) {
 	f := frame(finBit|opBinary, true, make([]byte, 128))
-	c := NewConn(&memConn{r: &repeatReader{frame: f}}, nil, false, nil)
+	c := newTestConn(&memConn{r: &repeatReader{frame: f}}, nil, false, nil)
 	buf := make([]byte, 0, 256)
 	b.SetBytes(128)
 	b.ReportAllocs()

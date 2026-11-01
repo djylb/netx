@@ -3,6 +3,7 @@ package proxyproto
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -16,7 +17,7 @@ import (
 )
 
 // DefaultHeaderTimeout bounds how long a Conn waits for its header when the
-// HeaderTimeout of its Config is not positive.
+// HeaderTimeout of its Config is 0.
 const DefaultHeaderTimeout = 10 * time.Second
 
 // Policy tells a Conn whether its peer sends a PROXY protocol header.
@@ -65,8 +66,9 @@ func TrustPrefixes(p ...netip.Prefix) func(peer net.Addr) Policy {
 
 // Config configures a Conn.
 type Config struct {
-	// HeaderTimeout bounds the wait for a header; a non-positive value means
-	// DefaultHeaderTimeout.
+	// HeaderTimeout bounds the wait for a header; 0 means
+	// DefaultHeaderTimeout, and a negative timeout is an error: Accept
+	// returns it, and a Conn fails with it.
 	HeaderTimeout time.Duration
 	// Policy tells whether the peer sends a header; the zero value is
 	// Required.
@@ -79,6 +81,14 @@ type Config struct {
 	// addresses in the header are reported as *net.UDPAddr, since version 1
 	// has no UDP token and UDP senders use TCP4 and TCP6.
 	Datagram bool
+}
+
+// Validate reports a negative HeaderTimeout.
+func (cfg Config) Validate() error {
+	if cfg.HeaderTimeout < 0 {
+		return fmt.Errorf("proxyproto: negative HeaderTimeout %v", cfg.HeaderTimeout)
+	}
+	return nil
 }
 
 // NewConn returns c as a Conn that reads the PROXY protocol header of c's
@@ -95,7 +105,11 @@ func NewConn(c net.Conn, cfg Config) *Conn {
 		c = nil
 	}
 	pc := &Conn{conn: c, policy: cfg.Policy, timeout: timeout, datagram: cfg.Datagram}
-	if c == nil {
+	if err := cfg.Validate(); err != nil && c != nil {
+		pc.err = err
+		pc.drained.Store(true)
+		pc.done.Store(true)
+	} else if c == nil {
 		pc.err = net.ErrClosed
 		pc.drained.Store(true)
 		pc.done.Store(true)
@@ -160,6 +174,10 @@ func (l *Listener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	cfg := l.Config
+	if err := cfg.Validate(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	if l.PolicyFor != nil {
 		cfg.Policy = l.PolicyFor(c.RemoteAddr())
 	}

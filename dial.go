@@ -122,7 +122,8 @@ type RaceDialer struct {
 	// a zero net.Dialer.
 	Dialers []ContextDialer
 	// Stagger is how long an attempt runs alone before the next one
-	// starts; DefaultDialStagger if not positive.
+	// starts; DefaultDialStagger if 0, and a negative stagger fails the
+	// dial.
 	Stagger time.Duration
 }
 
@@ -146,6 +147,9 @@ func (d *RaceDialer) DialAny(ctx context.Context, network string, addresses ...s
 }
 
 func (d *RaceDialer) dial(ctx context.Context, network string, addresses []string, name bool) (net.Conn, string, error) {
+	if d != nil && d.Stagger < 0 {
+		return nil, "", fmt.Errorf("netx: negative Stagger %v", d.Stagger)
+	}
 	var (
 		dialers = []ContextDialer{&net.Dialer{}}
 		stagger time.Duration

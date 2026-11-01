@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"slices"
@@ -33,7 +34,7 @@ func (c *timeoutConn) Write(p []byte) (int, error) {
 // connection's writes: another message's frame would break the fragments.
 func TestFailedFragmentFailsWrites(t *testing.T) {
 	tc := &timeoutConn{memConn: memConn{r: bytes.NewReader(nil)}}
-	c := NewConn(tc, nil, false, nil)
+	c := newTestConn(tc, nil, false, nil)
 	w, _ := c.NextWriter(Binary)
 	if _, err := w.Write(make([]byte, 40000)); err != nil {
 		t.Fatal(err)
@@ -49,7 +50,7 @@ func TestFailedFragmentFailsWrites(t *testing.T) {
 	}
 	// A timeout before any frame of a message leaves the connection usable.
 	tc2 := &timeoutConn{memConn: memConn{r: bytes.NewReader(nil)}}
-	c = NewConn(tc2, nil, false, nil)
+	c = newTestConn(tc2, nil, false, nil)
 	tc2.fail.Store(true)
 	if err := c.WriteMessage(Binary, []byte("x")); err == nil {
 		t.Fatal("write succeeded")
@@ -60,18 +61,27 @@ func TestFailedFragmentFailsWrites(t *testing.T) {
 	}
 }
 
-// With a negative close timeout, Close does not block on a peer that does
-// not read.
-func TestCloseNegativeTimeoutBounded(t *testing.T) {
+// With a zero close timeout, Close skips the closing handshake: it sends
+// no close frame, so it does not block on a peer that does not read, and
+// closes the connection beneath at once; CloseWrite fails.
+func TestCloseZeroTimeout(t *testing.T) {
 	a, b := net.Pipe()
-	defer func() { _ = b.Close() }()
-	c := NewConn(a, nil, false, &Options{CloseTimeout: -50 * time.Millisecond})
+	c := newTestConn(a, nil, false, &Options{SkipCloseHandshake: true})
+	if err := c.CloseWrite(); err == nil {
+		t.Fatal("CloseWrite with a zero close timeout succeeded")
+	}
 	done := make(chan error, 1)
 	go func() { done <- c.Close() }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked")
+	}
+	if n, err := b.Read(make([]byte, 16)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("peer read %d bytes, %v; want no close frame and EOF", n, err)
+	}
+	if err := c.WriteMessage(Binary, []byte("x")); err == nil {
+		t.Fatal("write after Close succeeded")
 	}
 }
 
@@ -81,7 +91,7 @@ func TestCloseWithinOneTimeout(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = b.Close() }()
 	const timeout = 300 * time.Millisecond
-	c := NewConn(a, nil, true, &Options{CloseTimeout: timeout})
+	c := newTestConn(a, nil, true, &Options{CloseTimeout: timeout})
 	go func() {
 		// Read the close frame slowly, answer late, never close.
 		time.Sleep(timeout / 2)
@@ -151,7 +161,7 @@ func TestExtendedConnectHandshake(t *testing.T) {
 		{Name: "Sec-WebSocket-Version", Value: "13"}, {Name: "Sec-WebSocket-Protocol", Value: "a, b"},
 		{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
 	}}
-	so := &ServerOptions{Subprotocols: []string{"b"}, Options: Options{Compression: &Compression{Threshold: -1}}}
+	so := &ServerOptions{Subprotocols: []string{"b"}, Options: Options{Compression: &Compression{Threshold: 1}}}
 	hs, err := CheckRequest(req, so)
 	if err != nil || !hs.ExtendedConnect || hs.Subprotocol != "b" || !hs.Compressed {
 		t.Fatalf("%+v %v", hs, err)

@@ -220,3 +220,10 @@ type failDialer struct{}
 func (failDialer) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
 	return nil, errors.New("refused")
 }
+
+// A negative Stagger fails the dial.
+func TestRaceDialerNegativeStagger(t *testing.T) {
+	if _, err := (&RaceDialer{Stagger: -1}).DialContext(t.Context(), "tcp", "192.0.2.1:80"); err == nil {
+		t.Error("dialed")
+	}
+}
