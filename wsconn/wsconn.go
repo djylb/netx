@@ -21,9 +21,10 @@
 // connection that is written to but never read answers no pings and never
 // sees the peer's close frame.
 //
-// Writes may come from any number of goroutines: WriteMessage, NextWriter,
-// Ping, Pong and Close are serialised frame by frame, and the frames of one
-// message are never interleaved with those of another. A writer from
+// Writes may come from any number of goroutines: WriteMessage,
+// WriteMessages, NextWriter, Ping, Pong and Close are serialised frame by
+// frame, and the frames of one message are never interleaved with those of
+// another; the messages of a WriteMessages go out together. A writer from
 // NextWriter holds the connection's messages until it is closed, while
 // control frames, such as the reader's automatic pongs, still go out
 // between its frames. Automatic pongs never wait for a write in progress:

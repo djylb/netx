@@ -1904,8 +1904,10 @@ func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (ne
   close the connection on failure, as the other handshakes of this module
   do.
 - Messages: `ReadMessage`, `AppendMessage` (into a reused buffer, without
-  allocating), `NextReader`, `WriteMessage` and `NextWriter` (frames of up to
-  32 KiB, or what a larger `Write` gets), text and binary. `ReadLimit`
+  allocating), `NextReader`, `WriteMessage`, `WriteMessages` (a batch,
+  framed as `WriteMessage` frames each message, in one write and with no
+  frame of another message or control frame between them) and `NextWriter`
+  (frames of up to 32 KiB, or what a larger `Write` gets), text and binary. `ReadLimit`
   (4 MiB, after decompression) bounds messages: kept small because deflate
   inflates about 1000:1, so with compression a few kilobytes on the wire
   make a message of the limit; a `StreamConn` reads without it, as it holds

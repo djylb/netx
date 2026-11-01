@@ -143,3 +143,48 @@ func BenchmarkMask(b *testing.B) {
 		mask(p, 0x12345678, 1)
 	}
 }
+
+func benchBatch(b *testing.B, batch bool, compress bool) {
+	var so ServerOptions
+	var co ClientOptions
+	if compress {
+		so.Compression = &Compression{}
+		co.Compression = &Compression{}
+	}
+	srv, cli := pairB(b, &so, &co)
+	msgs := make([][]byte, 16)
+	for i := range msgs {
+		msgs[i] = bytes.Repeat([]byte("0123456789abcdef"), 64)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range b.N * len(msgs) {
+			if _, _, err := srv.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	b.SetBytes(int64(len(msgs) * len(msgs[0])))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if batch {
+			if err := cli.WriteMessages(Binary, msgs); err != nil {
+				b.Fatal(err)
+			}
+			continue
+		}
+		for _, p := range msgs {
+			if err := cli.WriteMessage(Binary, p); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	<-done
+}
+
+func BenchmarkWriteMessage16x1K(b *testing.B)         { benchBatch(b, false, false) }
+func BenchmarkWriteMessages16x1K(b *testing.B)        { benchBatch(b, true, false) }
+func BenchmarkWriteMessage16x1KDeflate(b *testing.B)  { benchBatch(b, false, true) }
+func BenchmarkWriteMessages16x1KDeflate(b *testing.B) { benchBatch(b, true, true) }

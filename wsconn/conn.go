@@ -72,6 +72,12 @@ type Conn struct {
 	wbufArr [2][]byte
 	wbufs   net.Buffers
 
+	// The buffers of WriteMessages, under msgMu: the encoded frames, the
+	// compressed payload of a message, and the segments of a writev.
+	batch []byte
+	zbuf  []byte
+	bsegs net.Buffers
+
 	// wdMu guards wd, the write deadline set through the Conn or by
 	// Close, and pongBound, the bound of a pong that the reader writes.
 	wdMu      sync.Mutex
@@ -963,6 +969,143 @@ func (c *Conn) WriteMessage(typ MessageType, p []byte) error {
 	c.frameMu.Lock()
 	defer c.unlockFrame()
 	return c.writeFrameLocked(finBit|byte(typ), p)
+}
+
+// WriteMessages sends each of msgs as a message of type typ, framed and
+// compressed as WriteMessage would, in one write to the connection beneath
+// (a writev on TCP and Unix connections when a server sends a payload
+// larger than 32 KiB, which it does not copy). The messages go out in
+// order and together: no other message and no control frame comes between
+// them, and the reader's automatic pongs go out after them. It encodes the
+// messages before it takes the connection for writing, into buffers that
+// it keeps for the next call up to 128 KiB. It does nothing with no
+// messages.
+//
+// An error from the connection beneath that comes after part of the batch
+// went out fails the connection's writes, as an error inside a message
+// does, since the peer cannot know which messages it got; a write deadline
+// that passes before anything went out leaves the connection usable.
+func (c *Conn) WriteMessages(typ MessageType, msgs [][]byte) error {
+	if typ != Text && typ != Binary {
+		return fmt.Errorf("wsconn: cannot write a message of type %v", typ)
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	c.msgMu.Lock()
+	defer c.msgMu.Unlock()
+	if err := c.closedForWrites(); err != nil {
+		return err
+	}
+	zerocopy := !c.client && c.writev
+	b := c.batch[:0]
+	segs := c.bsegs[:0]
+	cut := 0 // the start of b that is not in segs yet
+	for _, p := range msgs {
+		if c.deflate != nil && len(p) >= c.deflate.threshold {
+			b = c.appendCompressed(b, byte(typ), p)
+			continue
+		}
+		if zerocopy && len(p) >= writevThreshold {
+			b = c.appendHeader(b, finBit|byte(typ), len(p), 0)
+			segs = append(segs, b[cut:], p)
+			cut = len(b)
+			continue
+		}
+		b = c.appendFrame(b, finBit|byte(typ), p)
+	}
+	c.frameMu.Lock()
+	err := c.writableLocked()
+	if err == nil {
+		if len(segs) == 0 {
+			var n int
+			n, err = c.conn.Write(b)
+			err = c.writeDone(n > 0, err)
+		} else {
+			if cut < len(b) {
+				segs = append(segs, b[cut:])
+			}
+			c.wbufs = segs
+			var n int64
+			n, err = c.wbufs.WriteTo(c.conn)
+			c.wbufs = nil
+			err = c.writeDone(n > 0, err)
+		}
+	}
+	c.unlockFrame()
+	clear(segs[:cap(segs)]) // let go of the payloads
+	c.bsegs = segs[:0]
+	if cap(b) > maxBatchRetain {
+		b = nil
+	}
+	c.batch = b[:0]
+	if cap(c.zbuf) > maxBatchRetain {
+		c.zbuf = nil
+	}
+	return err
+}
+
+// maxBatchRetain bounds the buffers that WriteMessages keeps.
+const maxBatchRetain = 128 << 10
+
+// closedForWrites returns the error that writes fail with, if it is
+// known without frameMu.
+func (c *Conn) closedForWrites() error {
+	if c.closeSent.Load() {
+		return errCloseSent
+	}
+	return nil
+}
+
+// appendHeader appends the header of a frame with an n-byte payload and
+// returns b; key is ignored by a server.
+func (c *Conn) appendHeader(b []byte, first byte, n int, key uint32) []byte {
+	var h [maxHeaderLen]byte
+	off := putHeader(&h, first, n, c.client, key)
+	return append(b, h[off:]...)
+}
+
+// appendFrame appends a frame with payload p, masked by a client.
+func (c *Conn) appendFrame(b []byte, first byte, p []byte) []byte {
+	var key uint32
+	if c.client {
+		key = maskKey()
+	}
+	b = c.appendHeader(b, first, len(p), key)
+	m := len(b)
+	b = append(b, p...)
+	if c.client {
+		mask(b[m:], key, 0)
+	}
+	return b
+}
+
+// appendCompressed appends the frames of message p compressed, cut as a
+// messageWriter cuts them: every frame but the last holds what its buffer
+// held less the four bytes that may end the stream.
+func (c *Conn) appendCompressed(b []byte, typ byte, p []byte) []byte {
+	c.zbuf = c.zbuf[:0]
+	fw := getDeflater(c.deflate.level, (*batchSink)(c))
+	_, _ = fw.Write(p) // batchSink does not fail
+	_ = fw.Flush()
+	putDeflater(c.deflate.level, fw)
+	z := c.zbuf[:len(c.zbuf)-len(syncTail)]
+	first := rsv1Bit | typ
+	const chunk = writeBufSize - len(syncTail)
+	for len(z)+len(syncTail) > writeBufSize {
+		b = c.appendFrame(b, first, z[:chunk])
+		z = z[chunk:]
+		first = opContinuation
+	}
+	return c.appendFrame(b, finBit|first, z)
+}
+
+// batchSink collects what the deflater of WriteMessages writes.
+type batchSink Conn
+
+func (s *batchSink) Write(p []byte) (int, error) {
+	s.zbuf = append(s.zbuf, p...)
+	return len(p), nil
 }
 
 // NextWriter returns a writer of a message of type typ, which is sent in
