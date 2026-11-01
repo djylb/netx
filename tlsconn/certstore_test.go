@@ -155,7 +155,7 @@ func TestCertStoreRefreshes(t *testing.T) {
 	var loads atomic.Int64
 	fail := atomic.Bool{}
 	refreshed := make(chan struct{}, 10)
-	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
+	s := &CertStore{RetryAfter: time.Minute, IdleTimeout: -1, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			n := loads.Add(1)
 			defer func() {
@@ -600,7 +600,7 @@ func TestCertStoreLoadErrors(t *testing.T) {
 		got  *tls.Certificate
 	}
 	reports := make(chan report, 4)
-	s := &CertStore{RetryAfter: time.Minute, Clock: fake,
+	s := &CertStore{RetryAfter: time.Minute, IdleTimeout: -1, Clock: fake,
 		Load: func(context.Context, string) (*tls.Certificate, error) {
 			return result.Load().(func() (*tls.Certificate, error))()
 		}}
@@ -667,5 +667,26 @@ func TestCertStoreLoadNotValidYet(t *testing.T) {
 	fake.Advance(time.Minute)
 	if got, err := s.forName(context.Background(), "a.example"); err != nil || got != cert {
 		t.Fatalf("once valid: %v, %v", got, err)
+	}
+}
+
+// Loaded names, which clients choose by SNI, are bounded by
+// DefaultMaxEntries unless MaxEntries is negative, and idle ones expire
+// after DefaultIdleTimeout unless IdleTimeout is negative.
+func TestCertStoreLoadDefaults(t *testing.T) {
+	for _, tt := range []struct {
+		max  int
+		want int
+	}{{0, DefaultMaxEntries}, {-1, DefaultMaxEntries + 10}} {
+		s := &CertStore{MaxEntries: tt.max}
+		s.mu.Lock()
+		for i := range DefaultMaxEntries + 10 {
+			s.addLocked(&storeEntry{name: fmt.Sprint("n", i), ready: make(chan struct{})})
+		}
+		n := s.lru.Len()
+		s.mu.Unlock()
+		if n != tt.want {
+			t.Errorf("MaxEntries %d: %d names kept, want %d", tt.max, n, tt.want)
+		}
 	}
 }

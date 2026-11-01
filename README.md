@@ -38,7 +38,13 @@ selects its default, a safe bound for timeouts and limits unless the field
 says otherwise; a negative timeout means no timeout, as for
 `http.Server.IdleTimeout`; other negative values are an error unless the
 field gives them a meaning. Fields that share a name with one of the standard
-library, such as `MaxIdleConns`, say where they differ from it.
+library, such as `MaxIdleConns`, say where they differ from it. The zero value
+is not a safe bound for `httpproxy.Server.ResponseHeaderTimeout` (no timeout,
+as for `http.Transport`), `socks5.DatagramRelay.IdleTimeout` (no timeout, as
+its caller bounds the relay), and `tlsconn.CertFiles`' `MaxEntries` and
+`IdleTimeout` (no bound, as the caller chooses the certificates);
+`tlsconn.CertStore`, whose `Load` caches names that clients send, keeps at
+most `DefaultMaxEntries` (1024) for `DefaultIdleTimeout` (24h).
 `forwarded` does not import `net/http`: it takes a header as the
 `map[string][]string` that `http.Header` is.
 
@@ -198,8 +204,9 @@ func perHost() *tls.Config {
   (`ErrNotValidNow`). A read that fails, such as a certificate replaced before
   its key, or that brings a certificate not valid now while the previous one
   is (an old pair copied back), keeps the previous certificate, goes to
-  `OnError`, and is retried at the next check. `MaxEntries` and `IdleTimeout` bound the cache, without
-  a background goroutine. `Forget` drops one file pair and `Clear` drops all.
+  `OnError`, and is retried at the next check. `MaxEntries` and
+  `IdleTimeout`, unbounded at 0, bound the cache, without a background
+  goroutine. `Forget` drops one file pair and `Clear` drops all.
 - `CertStore` holds certificates by ID and picks one for each handshake, for
   `GetCertificate`. `Add`, `AddPEM` and `AddFiles` (kept in sync as in
   `CertFiles`, in the background as handshakes come, or at once with
@@ -239,9 +246,9 @@ func perHost() *tls.Config {
   serves on, also when that fails or brings one not valid now; a refresh that
   finds none stops it serving. `Refresh` makes one due, also during a load,
   and `Forget` drops one; adding a certificate drops what was loaded for the
-  names it covers. Names come from clients, so bound the loaded ones with
-  `MaxEntries` or `IdleTimeout` and have `Load` turn unknown names away
-  cheaply. Names are matched in ASCII (punycode) form. `OnError` receives a
+  names it covers. Names come from clients, so the loaded ones are bounded
+  by `MaxEntries` (1024 at 0) and `IdleTimeout` (24h at 0); have `Load` turn
+  unknown names away cheaply. Names are matched in ASCII (punycode) form. `OnError` receives a
   `*CertError` (ID, name, files, cause) for every failure no handshake sees,
   runs without locks held and may call back into the store.
 

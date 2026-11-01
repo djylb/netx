@@ -2,6 +2,7 @@ package tlsconn
 
 import (
 	"bytes"
+	"cmp"
 	"container/list"
 	"context"
 	"crypto/tls"
@@ -243,7 +244,7 @@ func (s *CertStore) addLocked(e *storeEntry) {
 		s.entries = make(map[string]*list.Element)
 	}
 	s.entries[e.name] = s.lru.PushFront(e)
-	for s.MaxEntries > 0 && s.lru.Len() > s.MaxEntries {
+	for limit := cmp.Or(s.MaxEntries, DefaultMaxEntries); limit > 0 && s.lru.Len() > limit; {
 		s.removeLocked(s.lru.Back())
 	}
 }
@@ -257,11 +258,12 @@ func (s *CertStore) removeLocked(el *list.Element) {
 // IdleTimeout. The list is ordered by last use, so the sweep stops at the
 // first entry still in use.
 func (s *CertStore) sweepLocked(now time.Time) {
-	if s.IdleTimeout <= 0 || now.Sub(s.lastSweep) < s.IdleTimeout/2 {
+	idle := cmp.Or(s.IdleTimeout, DefaultIdleTimeout)
+	if idle < 0 || now.Sub(s.lastSweep) < idle/2 {
 		return
 	}
 	s.lastSweep = now
-	cutoff := now.Add(-s.IdleTimeout)
+	cutoff := now.Add(-idle)
 	for el := s.lru.Back(); el != nil && el.Value.(*storeEntry).lastUsed.Before(cutoff); el = s.lru.Back() {
 		s.removeLocked(el)
 	}

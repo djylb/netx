@@ -796,7 +796,7 @@ func TestNegativeCertSettings(t *testing.T) {
 	if _, err := (&CertFiles{MaxEntries: -1}).LoadFiles(certFile, keyFile); err == nil {
 		t.Error("CertFiles MaxEntries")
 	}
-	for _, s := range []*CertStore{{RetryAfter: -1}, {RefreshBefore: -1}, {MaxEntries: -1}} {
+	for _, s := range []*CertStore{{RetryAfter: -1}, {RefreshBefore: -1}} {
 		if _, err := s.AddFiles("", certFile, keyFile); err == nil {
 			t.Errorf("CertStore %+v", s)
 		}

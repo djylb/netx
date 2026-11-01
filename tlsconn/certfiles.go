@@ -68,11 +68,13 @@ func (e *CertError) Unwrap() error { return e.Err }
 // value is ready to use; set the fields before first use.
 type CertFiles struct {
 	// MaxEntries bounds the number of cached certificates, the least
-	// recently used dropped first; 0 means no bound, as the caller chooses
-	// the files, and a negative bound is an error.
+	// recently used dropped first; 0 means no bound, unlike other limits,
+	// as the caller chooses the files and data, not the clients, and a
+	// negative bound is an error.
 	MaxEntries int
 	// IdleTimeout drops certificates that have not been loaded for this
-	// long; 0 or a negative value keeps them.
+	// long; 0 or a negative value keeps them, unlike other timeouts, as
+	// for MaxEntries.
 	IdleTimeout time.Duration
 	// CheckInterval is how often a use checks whether the files of a
 	// certificate changed: their size, modification time or identity, with

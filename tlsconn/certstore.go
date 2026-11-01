@@ -26,6 +26,12 @@ const (
 	// DefaultRefreshBefore is how long before expiry a loaded certificate is
 	// loaded again when RefreshBefore is 0.
 	DefaultRefreshBefore = 24 * time.Hour
+	// DefaultMaxEntries bounds the names a CertStore loaded when
+	// MaxEntries is 0.
+	DefaultMaxEntries = 1024
+	// DefaultIdleTimeout drops loaded names unused for this long when
+	// IdleTimeout is 0.
+	DefaultIdleTimeout = 24 * time.Hour
 	// DefaultLoadTimeout bounds a CertStore load when LoadTimeout is 0.
 	DefaultLoadTimeout = 30 * time.Second
 )
@@ -126,12 +132,12 @@ type CertStore struct {
 	// DefaultRefreshBefore (24h), and a negative value is an error.
 	RefreshBefore time.Duration
 	// MaxEntries bounds the loaded names, failed ones included, the least
-	// recently used dropped first; 0 means no bound, and a negative bound
-	// is an error. Set it, or IdleTimeout, when Load answers names that
-	// clients choose.
+	// recently used dropped first; 0 means DefaultMaxEntries (1024), as the
+	// names come from the clients' SNI, and a negative value means no
+	// bound.
 	MaxEntries int
 	// IdleTimeout drops loaded names that no handshake used for this long;
-	// 0 or a negative value keeps them.
+	// 0 means DefaultIdleTimeout (24h), and a negative value keeps them.
 	IdleTimeout time.Duration
 
 	// OnError, if set, is called with each failure that no handshake may
@@ -893,9 +899,6 @@ func (s *CertStore) validate() error {
 	}
 	if s.RefreshBefore < 0 {
 		return fmt.Errorf("tlsconn: negative CertStore.RefreshBefore %v", s.RefreshBefore)
-	}
-	if s.MaxEntries < 0 {
-		return fmt.Errorf("tlsconn: negative CertStore.MaxEntries %v", s.MaxEntries)
 	}
 	return nil
 }
