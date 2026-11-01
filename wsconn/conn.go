@@ -245,9 +245,25 @@ func (c *Conn) ReadMessage() (MessageType, []byte, error) {
 // returns the extended slice, so that a reused b reads messages without
 // allocating.
 func (c *Conn) AppendMessage(b []byte) (MessageType, []byte, error) {
+	return c.appendMessage(b, c.readLimit)
+}
+
+// ReadMessageLimit reads the next data message as ReadMessage does, bounded
+// by limit as well as by Options.ReadLimit: a larger message, also after
+// decompression, is read no further and fails the connection with
+// ErrMessageTooLarge and status 1009. A negative limit adds no bound.
+func (c *Conn) ReadMessageLimit(limit int64) (MessageType, []byte, error) {
+	if limit < 0 || (c.readLimit >= 0 && c.readLimit < limit) {
+		limit = c.readLimit
+	}
+	return c.appendMessage(nil, limit)
+}
+
+// appendMessage is AppendMessage with the message bounded by limit.
+func (c *Conn) appendMessage(b []byte, limit int64) (MessageType, []byte, error) {
 	c.rsem <- struct{}{}
 	defer func() { <-c.rsem }()
-	typ, err := c.beginMessage(c.readLimit)
+	typ, err := c.beginMessage(limit)
 	if err != nil {
 		return 0, b, err
 	}

@@ -418,3 +418,74 @@ func TestCloseAwaitsPeer(t *testing.T) {
 		t.Fatalf("read after close: %v", err)
 	}
 }
+
+// ReadMessageLimit bounds one message, compressed or not, below the
+// connection's ReadLimit, and fails a longer one with 1009 without reading
+// its payload.
+func TestReadMessageLimit(t *testing.T) {
+	comp := &Options{ReadLimit: 1000, Compression: &Compression{}}
+	tests := []struct {
+		name  string
+		in    []byte
+		opts  *Options
+		limit int64
+		ok    bool
+	}{
+		{"equal", frame(finBit|opBinary, true, make([]byte, 100)), nil, 100, true},
+		{"over", frame(finBit|opBinary, true, make([]byte, 101)), nil, 100, false},
+		{"over in fragments", cat(frame(opBinary, true, make([]byte, 60)), frame(finBit|opContinuation, true, make([]byte, 60))), nil, 100, false},
+		{"compressed equal", frame(finBit|rsv1Bit|opBinary, true, deflateBomb(100)), comp, 100, true},
+		{"compressed over", frame(finBit|rsv1Bit|opBinary, true, deflateBomb(101)), comp, 100, false},
+		{"connection limit lower", frame(finBit|opBinary, true, make([]byte, 101)), &Options{ReadLimit: 100}, 200, false},
+		{"negative", frame(finBit|opBinary, true, make([]byte, 101)), &Options{ReadLimit: 101}, -1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, mc := serverOver(tt.in, tt.opts)
+			typ, m, err := c.ReadMessageLimit(tt.limit)
+			if tt.ok {
+				if err != nil || typ != Binary || len(m) != min(int(tt.limit), 100) && tt.limit >= 0 || tt.limit < 0 && len(m) != 101 {
+					t.Fatalf("%v %d %v", typ, len(m), err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrMessageTooLarge) {
+				t.Fatalf("err %v", err)
+			}
+			if code := lastClose(t, mc); code != StatusMessageTooBig {
+				t.Fatalf("close code %d", code)
+			}
+		})
+	}
+}
+
+// A message over the limit is refused at its header: its payload is not
+// read.
+func TestReadMessageLimitUnread(t *testing.T) {
+	in := frame(finBit|opBinary, true, make([]byte, 1<<20))
+	c, mc := serverOver(in, nil)
+	if _, _, err := c.ReadMessageLimit(64); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("err %v", err)
+	}
+	if left := mc.r.(*bytes.Reader).Len(); left < 1<<20-DefaultReadBufferSize {
+		t.Fatalf("read %d bytes of the payload", len(in)-left)
+	}
+}
+
+// ReadMessageLimit allocates the message only.
+func TestReadMessageLimitAllocs(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector adds allocations")
+	}
+	msg := frame(finBit|opBinary, true, make([]byte, 64))
+	in := bytes.Repeat(msg, 200)
+	c, _ := serverOver(in, nil)
+	n := testing.AllocsPerRun(100, func() {
+		if _, _, err := c.ReadMessageLimit(64); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if n > 1 {
+		t.Fatalf("%v allocs per message", n)
+	}
+}

@@ -14,9 +14,9 @@
 //
 // # Concurrency
 //
-// A Conn has one reader: NextReader, ReadMessage, AppendMessage, the
-// readers that NextReader returns and the Read of a StreamConn must not be
-// called concurrently with each other. Pings, pongs and the closing
+// A Conn has one reader: NextReader, ReadMessage, AppendMessage,
+// ReadMessageLimit, the readers that NextReader returns and the Read of a
+// StreamConn must not be called concurrently with each other. Pings, pongs and the closing
 // handshake that the peer starts are answered while reading, so a
 // connection that is written to but never read answers no pings and never
 // sees the peer's close frame.
