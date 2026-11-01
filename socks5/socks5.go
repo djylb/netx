@@ -29,6 +29,12 @@
 // dialing, relaying, the outbound side of UDP associations and the advertised
 // addresses are all replaceable, and UDP associations can share one fixed
 // port or get a socket each.
+//
+// Settings: the zero value of a field selects its default, stated in the
+// field's documentation; for timeouts and limits it is a safe bound unless
+// the field says otherwise. A negative timeout means no timeout, as for
+// http.Server.IdleTimeout. Other negative values are an error unless the
+// field gives them a meaning.
 package socks5
 
 import (

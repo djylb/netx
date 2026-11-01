@@ -15,6 +15,12 @@
 // which would link crypto/tls and the HTTP/2 machinery into every program
 // that uses this one. Connections to targets are kept for later requests,
 // and bodies of a known length are spliced on Linux, as tunnels are.
+//
+// Settings: the zero value of a field selects its default, stated in the
+// field's documentation; for timeouts and limits it is a safe bound unless
+// the field says otherwise. A negative timeout means no timeout, as for
+// http.Server.IdleTimeout. Other negative values are an error unless the
+// field gives them a meaning.
 package httpproxy
 
 import (

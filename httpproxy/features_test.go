@@ -393,11 +393,14 @@ func TestNegativeMaxIdleConnsPerKey(t *testing.T) {
 	}
 }
 
-// Negative timeouts and header limits fail Validate.
+// A negative MaxHeaderBytes fails Validate; negative timeouts mean no
+// timeout and are valid.
 func TestNegativeServerSettings(t *testing.T) {
-	for _, s := range []*httpproxy.Server{{IdleConnTimeout: -1}, {HandshakeTimeout: -1}, {DialTimeout: -1}, {IdleTimeout: -1}, {ResponseHeaderTimeout: -1}, {MaxHeaderBytes: -1}} {
-		if s.Validate() == nil {
-			t.Errorf("%+v valid", s)
-		}
+	if (&httpproxy.Server{MaxHeaderBytes: -1}).Validate() == nil {
+		t.Error("negative MaxHeaderBytes valid")
+	}
+	s := &httpproxy.Server{IdleConnTimeout: -1, HandshakeTimeout: -1, DialTimeout: -1, IdleTimeout: -1, ResponseHeaderTimeout: -1}
+	if err := s.Validate(); err != nil {
+		t.Error(err)
 	}
 }

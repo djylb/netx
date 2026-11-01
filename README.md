@@ -33,6 +33,12 @@ imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
 them link anyway) import it; the root package, `duplex`, `proxyproto`,
 `transparent`, `socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn` and
 `safedial` stay small.
+Settings follow one rule across the packages: the zero value of a field
+selects its default, a safe bound for timeouts and limits unless the field
+says otherwise; a negative timeout means no timeout, as for
+`http.Server.IdleTimeout`; other negative values are an error unless the
+field gives them a meaning. Fields that share a name with one of the standard
+library, such as `MaxIdleConns`, say where they differ from it.
 `forwarded` does not import `net/http`: it takes a header as the
 `map[string][]string` that `http.Header` is.
 
@@ -634,7 +640,8 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
 `DialFirst` races attempts that may dial in different ways, such as directly
 and through a relay or several proxies: it starts them in order, starts the
 next whenever one fails or has not connected within the stagger
-(`DefaultDialStagger`, 300 ms, if not positive), and closes the connections
+(`DefaultDialStagger`, 300 ms, if 0; only after a failure if negative, as
+with `net.Dialer.FallbackDelay`), and closes the connections
 that losing attempts still make. It returns the index of the attempt that
 won, or the errors of all attempts, joined.
 

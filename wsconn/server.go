@@ -58,11 +58,10 @@ type ServerOptions struct {
 	// Header holds fields added to the 101 response, such as Set-Cookie.
 	Header httphead.Header
 	// HandshakeTimeout bounds Accept and AcceptRequest when their context
-	// has no deadline; zero means DefaultHandshakeTimeout, and a negative
-	// timeout leaves them unbounded.
+	// has no deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// MaxHeaderBytes bounds the request head that Accept reads; zero means
-	// DefaultMaxHeaderBytes.
+	// MaxHeaderBytes bounds the request head that Accept reads; 0 means
+	// DefaultMaxHeaderBytes (32 KiB), and a negative bound is an error.
 	MaxHeaderBytes int
 }
 

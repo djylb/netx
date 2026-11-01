@@ -221,20 +221,28 @@ func (failDialer) DialContext(_ context.Context, _, _ string) (net.Conn, error) 
 	return nil, errors.New("refused")
 }
 
-// A negative Stagger fails the dial.
-func TestRaceDialerNegativeStagger(t *testing.T) {
-	if _, err := (&RaceDialer{Stagger: -1}).DialContext(t.Context(), "tcp", "192.0.2.1:80"); err == nil {
-		t.Error("dialed")
-	}
-}
-
-// A negative stagger fails DialFirst before it dials.
+// A negative stagger starts the next attempt only when one fails, as a
+// negative net.Dialer.FallbackDelay does.
 func TestDialFirstNegativeStagger(t *testing.T) {
-	_, i, err := DialFirst(t.Context(), -1, func(context.Context) (net.Conn, error) {
-		t.Fatal("dialed")
-		return nil, nil
-	})
-	if err == nil || i != -1 {
-		t.Errorf("DialFirst = %d, %v", i, err)
+	const wait = 150 * time.Millisecond
+	start := time.Now()
+	var second time.Duration
+	c, i, err := DialFirst(t.Context(), -1,
+		func(context.Context) (net.Conn, error) {
+			time.Sleep(wait)
+			return nil, errors.New("first fails")
+		},
+		func(context.Context) (net.Conn, error) {
+			second = time.Since(start)
+			a, b := net.Pipe()
+			_ = b.Close()
+			return a, nil
+		})
+	if err != nil || i != 1 {
+		t.Fatalf("DialFirst = %d, %v", i, err)
+	}
+	_ = c.Close()
+	if second < wait {
+		t.Errorf("second attempt started after %v, before the first failed", second)
 	}
 }

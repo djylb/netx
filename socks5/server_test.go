@@ -677,3 +677,15 @@ func TestServerUDPOutlivesControl(t *testing.T) {
 		t.Fatalf("reply %q after the idle timeout", got)
 	}
 }
+
+// Negative timeouts mean none: they do not end the exchange at once.
+func TestServerNegativeTimeouts(t *testing.T) {
+	target := echoTCP(t)
+	addr := serve(t, &socks5.Server{HandshakeTimeout: -1, DialTimeout: -1, UDPIdleTimeout: -1})
+	c, err := (&socks5.Dialer{ProxyAddr: addr}).Dial("tcp", target)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	assertEcho(t, c, "ping")
+}

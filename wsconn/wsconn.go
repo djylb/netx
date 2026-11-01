@@ -53,6 +53,12 @@
 // connection. Extended payload lengths need not be minimal, and a peer
 // that closes the connection without a close frame ends a StreamConn's
 // stream like a close frame does, when it does so between frames.
+//
+// Settings: the zero value of a field selects its default, stated in the
+// field's documentation; for timeouts and limits it is a safe bound unless
+// the field says otherwise. A negative timeout means no timeout, as for
+// http.Server.IdleTimeout. Other negative values are an error unless the
+// field gives them a meaning.
 package wsconn
 
 import (
@@ -182,21 +188,23 @@ const minReadBufferSize = 256
 type Options struct {
 	// ReadLimit bounds the size of a message that NextReader, ReadMessage
 	// and AppendMessage read, after decompression: a larger message fails
-	// the connection with ErrMessageTooLarge and status 1009. Zero means
-	// DefaultReadLimit (4 MiB) and a negative limit none; with compression
-	// a peer needs about a thousandth of the limit to make a message that
-	// large. A StreamConn reads messages without a limit, as it holds none
-	// of them in memory.
+	// the connection with ErrMessageTooLarge and status 1009. 0 means
+	// DefaultReadLimit (4 MiB), and a negative value means no limit. With
+	// compression a peer needs about a thousandth of the limit to make a
+	// message that large. A StreamConn reads messages without a limit, as
+	// it holds none of them in memory.
 	ReadLimit int64
-	// ReadBufferSize is the size of the read buffer; zero means
-	// DefaultReadBufferSize, and sizes below 256 bytes mean 256. A
-	// connection whose handshake left a buffer, such as an upgraded HTTP
-	// request's, keeps that buffer.
+	// ReadBufferSize is the size of the read buffer; 0 means
+	// DefaultReadBufferSize (4096), sizes below 256 bytes mean 256, as
+	// bufio.NewReaderSize raises small sizes, and a negative size is an
+	// error. A connection whose handshake left a buffer, such as an
+	// upgraded HTTP request's, keeps that buffer.
 	ReadBufferSize int
 	// CloseTimeout bounds the closing handshake: sending the close frame
 	// and waiting for the peer's, and on a client then waiting for the
 	// server to end the connection beneath, which the server does at once.
-	// Zero means DefaultCloseTimeout, and a negative timeout is an error.
+	// 0 means DefaultCloseTimeout (5s), and a negative value means no timeout, as for http.Server.IdleTimeout; DisableCloseHandshake
+	// skips the handshake.
 	CloseTimeout time.Duration
 	// DisableCloseHandshake closes without the closing handshake: no close
 	// frame is sent, neither by Close, which closes the connection beneath
@@ -217,9 +225,6 @@ type Options struct {
 // Validate reports a setting out of range, which fails the handshakes
 // and NewConn. ClientOptions and ServerOptions have it through Options.
 func (o *Options) Validate() error {
-	if o.CloseTimeout < 0 {
-		return fmt.Errorf("wsconn: negative close timeout %v", o.CloseTimeout)
-	}
 	if o.ReadBufferSize < 0 {
 		return fmt.Errorf("wsconn: negative read buffer size %d", o.ReadBufferSize)
 	}

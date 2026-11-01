@@ -16,6 +16,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/httphead"
+	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/netx/internal/serve"
 )
 
@@ -229,17 +230,20 @@ type Server struct {
 	// that holds them.
 	ReuseKey func(req *Request) (key string, ok bool)
 	// DisableKeepAlives keeps no connection to a target: each serves one
-	// request.
+	// request, as with http.Transport.DisableKeepAlives.
 	DisableKeepAlives bool
-	// MaxIdleConnsPerKey bounds the kept connections of one key;
-	// DefaultMaxIdleConnsPerKey if 0, as DisableKeepAlives is how to keep
-	// none, and a negative bound is an error.
+	// MaxIdleConnsPerKey bounds the kept connections of one key; 0 means
+	// DefaultMaxIdleConnsPerKey (16), as for
+	// http.Transport.MaxIdleConnsPerHost. A negative bound is an error;
+	// DisableKeepAlives keeps none.
 	MaxIdleConnsPerKey int
-	// MaxIdleConns bounds the kept connections of all keys;
-	// DefaultMaxIdleConns if 0, and unbounded if negative.
+	// MaxIdleConns bounds the kept connections of all keys; 0 means
+	// DefaultMaxIdleConns (1024), and a negative value means no limit.
+	// Unlike http.Transport.MaxIdleConns, 0 is not no limit.
 	MaxIdleConns int
 	// IdleConnTimeout closes a kept connection that served no request for
-	// this long; DefaultIdleConnTimeout if 0.
+	// this long; 0 means DefaultIdleConnTimeout (90s), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// Unlike http.Transport.IdleConnTimeout, 0 is not no limit.
 	IdleConnTimeout time.Duration
 
 	// Via, if not empty, is the pseudonym that the server adds to the Via
@@ -260,21 +264,25 @@ type Server struct {
 	ResponseHeader func(req *Request, status int, h *httphead.Header)
 
 	// HandshakeTimeout bounds reading each request head and authenticating
-	// it; DefaultHandshakeTimeout if 0.
+	// it; 0 means DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial; DefaultDialTimeout if 0.
+	// DialTimeout bounds Dial; 0 means DefaultDialTimeout (10s), and
+	// a negative value means no timeout, as for http.Server.IdleTimeout. Unlike net.Dialer.Timeout, 0 is not no timeout.
 	DialTimeout time.Duration
 	// IdleTimeout bounds the wait for the next request on a kept-alive
-	// client connection; DefaultIdleTimeout if 0.
+	// client connection; 0 means DefaultIdleTimeout (2 minutes), and a negative value means no timeout, as for http.Server.IdleTimeout.
 	IdleTimeout time.Duration
-	// ResponseHeaderTimeout, if not 0, bounds the wait for the head of a
-	// forwarded request's response once the request has been sent; the
-	// client then gets 504 Gateway Timeout.
+	// ResponseHeaderTimeout bounds the wait for the head of a forwarded
+	// request's response once the request has been sent; the client then
+	// gets 504 Gateway Timeout. 0 or a negative value means no timeout, as
+	// for http.Transport.ResponseHeaderTimeout, since targets may answer
+	// slowly by design.
 	ResponseHeaderTimeout time.Duration
 	// MaxHeaderBytes bounds a request or response head, and a trailer
-	// section; DefaultMaxHeaderBytes if 0. A larger request head
-	// is answered with 431 Request Header Fields Too Large, a larger
-	// response head with 502 Bad Gateway.
+	// section; 0 means DefaultMaxHeaderBytes (64 KiB), as for
+	// http.Server.MaxHeaderBytes, and a negative bound is an error. A
+	// larger request head is answered with 431 Request Header Fields Too
+	// Large, a larger response head with 502 Bad Gateway.
 	MaxHeaderBytes int
 
 	life     serve.Tracker
@@ -340,21 +348,6 @@ func (s *Server) Validate() error {
 	if s.MaxHeaderBytes < 0 {
 		return fmt.Errorf("httpproxy: negative MaxHeaderBytes %v", s.MaxHeaderBytes)
 	}
-	if s.IdleConnTimeout < 0 {
-		return fmt.Errorf("httpproxy: negative IdleConnTimeout %v", s.IdleConnTimeout)
-	}
-	if s.HandshakeTimeout < 0 {
-		return fmt.Errorf("httpproxy: negative HandshakeTimeout %v", s.HandshakeTimeout)
-	}
-	if s.DialTimeout < 0 {
-		return fmt.Errorf("httpproxy: negative DialTimeout %v", s.DialTimeout)
-	}
-	if s.IdleTimeout < 0 {
-		return fmt.Errorf("httpproxy: negative IdleTimeout %v", s.IdleTimeout)
-	}
-	if s.ResponseHeaderTimeout < 0 {
-		return fmt.Errorf("httpproxy: negative ResponseHeaderTimeout %v", s.ResponseHeaderTimeout)
-	}
 	return nil
 }
 
@@ -398,7 +391,7 @@ func (s *Server) targets() *pool {
 		if s.pool.total == 0 {
 			s.pool.total = DefaultMaxIdleConns
 		}
-		s.pool.timeout = positive(s.IdleConnTimeout, DefaultIdleConnTimeout)
+		s.pool.timeout = netutil.Timeout(s.IdleConnTimeout, DefaultIdleConnTimeout)
 	})
 	return &s.pool
 }
@@ -538,7 +531,7 @@ func (sc *serverConn) readRequest(first bool) (*Request, error) {
 	if !first {
 		// Idle: Shutdown ends the wait, which the client of a kept-alive
 		// connection is ready for.
-		stop := sc.readDeadline(positive(s.IdleTimeout, DefaultIdleTimeout))
+		stop := sc.readDeadline(netutil.Timeout(s.IdleTimeout, DefaultIdleTimeout))
 		drained := context.AfterFunc(s.life.DrainContext(), func() { _ = sc.c.SetReadDeadline(time.Unix(1, 0)) })
 		_, err := sc.br.Peek(1)
 		if !drained() {
@@ -552,7 +545,7 @@ func (sc *serverConn) readRequest(first bool) (*Request, error) {
 			return nil, err
 		}
 	}
-	stop := sc.readDeadline(positive(s.HandshakeTimeout, DefaultHandshakeTimeout))
+	stop := sc.readDeadline(netutil.Timeout(s.HandshakeTimeout, DefaultHandshakeTimeout))
 	var err error
 	sc.headBuf, err = httphead.Read(sc.br, sc.headBuf, positive(s.MaxHeaderBytes, DefaultMaxHeaderBytes))
 	stop()
@@ -776,7 +769,7 @@ func (sc *serverConn) authenticate(ctx context.Context, req *Request) error {
 		}
 		return ErrAuthFailed
 	}
-	hctx, cancel := context.WithTimeout(ctx, positive(sc.s.HandshakeTimeout, DefaultHandshakeTimeout))
+	hctx, cancel := context.WithTimeout(ctx, netutil.Timeout(sc.s.HandshakeTimeout, DefaultHandshakeTimeout))
 	defer cancel()
 	user, err := a.Authenticate(hctx, req, credentials)
 	if err != nil {
@@ -829,7 +822,7 @@ var connectReply = []byte("HTTP/1.1 200 Connection established\r\n\r\n")
 // dial dials req.Dst under DialTimeout.
 func (sc *serverConn) dial(ctx context.Context, req *Request) (net.Conn, error) {
 	s := sc.s
-	ctx, cancel := context.WithTimeout(ctx, positive(s.DialTimeout, DefaultDialTimeout))
+	ctx, cancel := context.WithTimeout(ctx, netutil.Timeout(s.DialTimeout, DefaultDialTimeout))
 	defer cancel()
 	if s.Dial != nil {
 		c, err := s.Dial(ctx, req)

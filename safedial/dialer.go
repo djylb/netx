@@ -3,7 +3,6 @@ package safedial
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -84,8 +83,9 @@ type Dialer struct {
 	Policy Policy
 	// Stagger is how long the dial of one address of a name runs alone
 	// before that of the next starts, as in netx.DialFirst, which also
-	// starts the next at once when one fails; netx.DefaultDialStagger if
-	// 0, and a negative stagger fails the dial.
+	// starts the next at once when one fails; 0 means
+	// netx.DefaultDialStagger (300ms), and a negative value starts the next
+	// only when one fails, as for net.Dialer.FallbackDelay.
 	Stagger time.Duration
 	// VerifyRemoteAddr, if set, closes a connection whose RemoteAddr is
 	// not the address dialed and returns a *DeniedError with
@@ -216,9 +216,6 @@ func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.A
 // dial, or else the errors of every attempt, joined. The name is resolved
 // once; the context bounds the lookup and the dials.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if d != nil && d.Stagger < 0 {
-		return nil, fmt.Errorf("safedial: negative Stagger %v", d.Stagger)
-	}
 	addrs, err := d.Lookup(ctx, network, address)
 	if err != nil {
 		return nil, err

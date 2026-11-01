@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // storeEntry is what Load brought for a name: a certificate, or an error or
@@ -196,7 +198,7 @@ func (s *CertStore) load(e *storeEntry, refresh bool) {
 // runLoad calls Load for name, bounded by LoadTimeout also when Load ignores
 // its context, and turns a panic into an error.
 func (s *CertStore) runLoad(name string) (*tls.Certificate, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), positive(s.LoadTimeout, DefaultLoadTimeout))
+	ctx, cancel := context.WithTimeout(context.Background(), netutil.Timeout(s.LoadTimeout, DefaultLoadTimeout))
 	defer cancel()
 	type result struct {
 		cert *tls.Certificate

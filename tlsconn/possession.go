@@ -219,12 +219,13 @@ type Challenger struct {
 
 // ChallengerOptions configures NewChallenger.
 type ChallengerOptions struct {
-	// TTL is how long a challenge is valid; DefaultChallengeTTL (5 minutes)
-	// if 0.
+	// TTL is how long a challenge is valid; 0 means DefaultChallengeTTL (5
+	// minutes), and a negative TTL fails NewChallenger.
 	TTL time.Duration
 	// MaxUsed bounds how many accepted challenges, each kept until it
-	// expires, the Challenger holds; DefaultMaxUsed (65536, a few MB) if 0.
-	// Negative options fail NewChallenger.
+	// expires, the Challenger holds; 0 means DefaultMaxUsed (65536, a few
+	// MB). It has no unlimited setting: a negative bound fails
+	// NewChallenger.
 	MaxUsed int
 	// Clock tells the time of TTL; the system clock if nil.
 	Clock timeshim.Clock

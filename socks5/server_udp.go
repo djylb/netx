@@ -162,7 +162,7 @@ func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
 	r.l = netx.NewPacketListener(pc,
 		netx.WithPacketAcceptFilter(r.expects),
 		netx.WithPacketQueue(queue),
-		netx.WithPacketIdleTimeout(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
+		netx.WithPacketIdleTimeout(netutil.Timeout(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
 		netx.WithPacketClock(s.Clock),
 	)
 	go r.acceptLoop()
@@ -359,7 +359,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	if err != nil {
 		return refuse(req, ReplyFor(err), err)
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, positive(s.DialTimeout, DefaultDialTimeout))
+	dialCtx, cancel := context.WithTimeout(ctx, netutil.Timeout(s.DialTimeout, DefaultDialTimeout))
 	out, err := s.dialPacket(dialCtx, req)
 	cancel()
 	if err != nil {
@@ -370,7 +370,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	}
 	a := &association{s: s, req: req, relay: relay, ownsRelay: owns, out: out, key: key, announced: announced, exact: exact, done: make(chan struct{})}
 	a.mu.Lock()
-	a.pending = timeshim.Or(s.Clock).AfterFunc(positive(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
+	a.pending = timeshim.Or(s.Clock).AfterFunc(netutil.Timeout(s.UDPIdleTimeout, DefaultUDPIdleTimeout), a.close)
 	a.mu.Unlock()
 	if !relay.add(a) {
 		// The reason, before a.close closes a relay of its own.

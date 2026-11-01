@@ -3,29 +3,36 @@ package proxyproto
 import (
 	"net"
 	"testing"
+	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
-// A negative HeaderTimeout fails the Conn and Accept.
+// A negative HeaderTimeout means no timeout, as for
+// http.Server.ReadHeaderTimeout; 0 means DefaultHeaderTimeout.
 func TestNegativeHeaderTimeout(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = b.Close() }()
-	c := NewConn(a, Config{HeaderTimeout: -1})
-	if _, err := c.Read(make([]byte, 1)); err == nil {
-		t.Error("Read")
+	if c := NewConn(a, Config{HeaderTimeout: -1}); c.timeout != netutil.NoTimeout {
+		t.Errorf("negative: %v", c.timeout)
 	}
-	_ = c.Close()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	if c := NewConn(a, Config{}); c.timeout != DefaultHeaderTimeout {
+		t.Errorf("zero: %v", c.timeout)
 	}
-	l := &Listener{Listener: ln, Config: Config{HeaderTimeout: -1}}
-	defer func() { _ = l.Close() }()
+}
+
+// With a negative HeaderTimeout a header that arrives late is read.
+func TestNegativeHeaderTimeoutReads(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	c := NewConn(a, Config{HeaderTimeout: -1, Policy: Optional})
+	defer func() { _ = c.Close() }()
 	go func() {
-		if c, err := net.Dial("tcp", ln.Addr().String()); err == nil {
-			_ = c.Close()
-		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = b.Write([]byte("x"))
 	}()
-	if _, err := l.Accept(); err == nil {
-		t.Error("Accept")
+	buf := make([]byte, 1)
+	if n, err := c.Read(buf); err != nil || n != 1 {
+		t.Fatalf("Read = %d, %v", n, err)
 	}
 }

@@ -420,10 +420,3 @@ func TestCheckAllocs(t *testing.T) {
 		t.Errorf("%v allocations", n)
 	}
 }
-
-// A negative Stagger fails the dial.
-func TestNegativeStagger(t *testing.T) {
-	if _, err := (&Dialer{Stagger: -1}).DialContext(t.Context(), "tcp", "192.0.2.1:80"); err == nil {
-		t.Error("dialed")
-	}
-}

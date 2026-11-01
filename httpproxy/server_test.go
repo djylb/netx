@@ -759,3 +759,14 @@ func TestShutdownDrains(t *testing.T) {
 }
 
 var errDeadline = os.ErrDeadlineExceeded
+
+// Negative timeouts mean none: they do not end the exchange at once.
+func TestConnectNegativeTimeouts(t *testing.T) {
+	addr := serve(t, &httpproxy.Server{HandshakeTimeout: -1, DialTimeout: -1, IdleTimeout: -1, IdleConnTimeout: -1, ResponseHeaderTimeout: -1})
+	c, err := (&proxydial.HTTPDialer{ProxyAddr: addr}).DialContext(context.Background(), "tcp", echoTCP(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	assertEcho(t, c, "hello")
+}

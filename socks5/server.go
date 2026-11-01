@@ -13,6 +13,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/creds"
+	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/netx/internal/serve"
 
 	"github.com/djylb/timeshim"
@@ -273,20 +274,21 @@ type Server struct {
 	// DialTimeout and bounds the setup only. To relay through another SOCKS5
 	// proxy, return a Dialer's ListenPacket.
 	DialPacket func(ctx context.Context, req *Request) (PacketConn, error)
-	// UDPQueue is how many client datagrams an association buffers;
-	// DefaultUDPQueue if 0, and a negative queue is an error.
+	// UDPQueue is how many client datagrams an association buffers; 0
+	// means DefaultUDPQueue (128). It has no unlimited setting: a negative
+	// queue is an error.
 	UDPQueue int
 
-	// HandshakeTimeout bounds the negotiation and request;
-	// DefaultHandshakeTimeout if 0, and a negative timeout is an error.
+	// HandshakeTimeout bounds the negotiation and request; 0 means
+	// DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial and DialPacket; DefaultDialTimeout if 0, and
-	// a negative timeout is an error.
+	// DialTimeout bounds Dial and DialPacket; 0 means DefaultDialTimeout
+	// (10s), and a negative value means no timeout, as for http.Server.IdleTimeout. Unlike net.Dialer.Timeout, 0 is not no timeout.
 	DialTimeout time.Duration
 	// UDPIdleTimeout ends a UDP association without datagrams in either
 	// direction, or without a first datagram, for this long, and closes its
-	// control connection; DefaultUDPIdleTimeout if 0, and a negative
-	// timeout is an error.
+	// control connection; 0 means DefaultUDPIdleTimeout (3 minutes), and
+	// a negative value means no timeout, as for http.Server.IdleTimeout.
 	UDPIdleTimeout time.Duration
 	// Clock tells the time of UDPIdleTimeout; the system clock if nil.
 	Clock timeshim.Clock
@@ -430,7 +432,7 @@ func (s *Server) bindContext(ctx context.Context) (context.Context, context.Canc
 // closes c when it fails.
 func (s *Server) handshake(ctx context.Context, c net.Conn) (*Request, error) {
 	// The authenticators' context ends with the handshake timeout too.
-	hctx, cancel := context.WithTimeout(ctx, positive(s.HandshakeTimeout, DefaultHandshakeTimeout))
+	hctx, cancel := context.WithTimeout(ctx, netutil.Timeout(s.HandshakeTimeout, DefaultHandshakeTimeout))
 	defer cancel()
 	var req *Request
 	err := netx.DoHandshake(hctx, c, func() (err error) {
@@ -608,7 +610,7 @@ func (s *Server) authenticators() []Authenticator {
 }
 
 func (s *Server) connect(ctx context.Context, req *Request) error {
-	dialCtx, cancel := context.WithTimeout(ctx, positive(s.DialTimeout, DefaultDialTimeout))
+	dialCtx, cancel := context.WithTimeout(ctx, netutil.Timeout(s.DialTimeout, DefaultDialTimeout))
 	target, err := s.dial(dialCtx, req)
 	cancel()
 	if err != nil {
@@ -645,15 +647,6 @@ func (s *Server) dial(ctx context.Context, req *Request) (net.Conn, error) {
 func (s *Server) Validate() error {
 	if s.UDPQueue < 0 {
 		return fmt.Errorf("socks5: negative UDPQueue %v", s.UDPQueue)
-	}
-	if s.HandshakeTimeout < 0 {
-		return fmt.Errorf("socks5: negative HandshakeTimeout %v", s.HandshakeTimeout)
-	}
-	if s.DialTimeout < 0 {
-		return fmt.Errorf("socks5: negative DialTimeout %v", s.DialTimeout)
-	}
-	if s.UDPIdleTimeout < 0 {
-		return fmt.Errorf("socks5: negative UDPIdleTimeout %v", s.UDPIdleTimeout)
 	}
 	return nil
 }
@@ -701,11 +694,4 @@ func (s *Server) onError(c net.Conn, err error) {
 	if s.OnError != nil && !s.life.IsClosed() {
 		s.OnError(c, err)
 	}
-}
-
-func positive(d, def time.Duration) time.Duration {
-	if d > 0 {
-		return d
-	}
-	return def
 }

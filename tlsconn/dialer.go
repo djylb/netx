@@ -23,11 +23,11 @@ type Dialer struct {
 	// Without a ServerName, the host of the dialed address is used, as
 	// tls.Dialer does, or the whole address when it has no port.
 	Config *tls.Config
-	// HandshakeTimeout, if positive, also bounds the handshake, after the
-	// dial and within the context's deadline. If zero, a handshake whose
-	// context has no deadline is bounded by DefaultHandshakeTimeout, as with
-	// Client. If negative, the context alone bounds it, as for a dialer
-	// whose callers bound a whole dial through a proxy with the context.
+	// HandshakeTimeout bounds the handshake, after the dial and within the
+	// context's deadline; 0 means DefaultHandshakeTimeout (10s) when the
+	// context has no deadline, as with Client, and a negative value leaves
+	// the context alone to bound it, as for a dialer whose callers bound a
+	// whole dial through a proxy with the context.
 	HandshakeTimeout time.Duration
 	// Forward dials the underlying connection; nil means a zero net.Dialer.
 	Forward ContextDialer

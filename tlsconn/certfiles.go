@@ -67,16 +67,18 @@ func (e *CertError) Unwrap() error { return e.Err }
 // concurrent first loads of one certificate share a single read. The zero
 // value is ready to use; set the fields before first use.
 type CertFiles struct {
-	// MaxEntries bounds the number of cached certificates; the least
-	// recently used is dropped first. Zero means no bound.
+	// MaxEntries bounds the number of cached certificates, the least
+	// recently used dropped first; 0 means no bound, as the caller chooses
+	// the files, and a negative bound is an error.
 	MaxEntries int
 	// IdleTimeout drops certificates that have not been loaded for this
-	// long. Zero keeps them.
+	// long; 0 or a negative value keeps them.
 	IdleTimeout time.Duration
 	// CheckInterval is how often a use checks whether the files of a
 	// certificate changed: their size, modification time or identity, with
 	// symbolic links followed, so that a link swapped to a new pair counts.
-	// Zero means DefaultCheckInterval and a negative value never checks. The
+	// 0 means DefaultCheckInterval (10s), and a negative value never
+	// checks, as a negative net.Dialer.KeepAlive turns keep-alives off. The
 	// files of an expired certificate are read again, changed or not, at
 	// most once a minute either way.
 	CheckInterval time.Duration
@@ -328,9 +330,6 @@ type fileSource struct {
 func (c *CertFiles) validate() error {
 	if c.MaxEntries < 0 {
 		return fmt.Errorf("tlsconn: negative CertFiles.MaxEntries %v", c.MaxEntries)
-	}
-	if c.IdleTimeout < 0 {
-		return fmt.Errorf("tlsconn: negative CertFiles.IdleTimeout %v", c.IdleTimeout)
 	}
 	return nil
 }

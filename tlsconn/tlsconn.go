@@ -19,6 +19,12 @@
 //
 // It is separate from the netx root package because importing crypto/tls
 // adds a large amount of code to a binary even when no handshake runs.
+//
+// Settings: the zero value of a field selects its default, stated in the
+// field's documentation; for timeouts and limits it is a safe bound unless
+// the field says otherwise. A negative timeout means no timeout, as for
+// http.Server.IdleTimeout. Other negative values are an error unless the
+// field gives them a meaning.
 package tlsconn
 
 import (

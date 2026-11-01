@@ -44,9 +44,6 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 	if len(attempts) == 0 {
 		return nil, -1, ErrNoDialAttempts
 	}
-	if stagger < 0 {
-		return nil, -1, fmt.Errorf("netx: negative stagger %v", stagger)
-	}
 	if stagger == 0 {
 		stagger = DefaultDialStagger
 	}
@@ -57,6 +54,9 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 	results := make(chan dialResult, len(attempts))
 	timer := time.NewTimer(stagger)
 	defer timer.Stop()
+	if stagger < 0 {
+		timer.Stop() // a failure alone starts the next
+	}
 	var (
 		next    int // the next attempt to start
 		running int
@@ -70,7 +70,9 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 			c, err := attempt(ctx)
 			results <- dialResult{c, i, err}
 		}()
-		timer.Reset(stagger)
+		if stagger >= 0 {
+			timer.Reset(stagger)
+		}
 	}
 	start()
 	// A failure starts the next attempt, so one runs until all have ended.
@@ -126,8 +128,9 @@ type RaceDialer struct {
 	// a zero net.Dialer.
 	Dialers []ContextDialer
 	// Stagger is how long an attempt runs alone before the next one
-	// starts; DefaultDialStagger if 0, and a negative stagger fails the
-	// dial.
+	// starts, as in DialFirst; 0 means DefaultDialStagger (300ms), and a
+	// negative value starts the next only when one fails, as for
+	// net.Dialer.FallbackDelay.
 	Stagger time.Duration
 }
 

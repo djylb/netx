@@ -3,7 +3,6 @@ package proxyproto
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -67,8 +66,8 @@ func TrustPrefixes(p ...netip.Prefix) func(peer net.Addr) Policy {
 // Config configures a Conn.
 type Config struct {
 	// HeaderTimeout bounds the wait for a header; 0 means
-	// DefaultHeaderTimeout, and a negative timeout is an error: Accept
-	// returns it, and a Conn fails with it.
+	// DefaultHeaderTimeout (10s), and a negative value means no timeout,
+	// as for http.Server.ReadHeaderTimeout.
 	HeaderTimeout time.Duration
 	// Policy tells whether the peer sends a header; the zero value is
 	// Required.
@@ -83,33 +82,18 @@ type Config struct {
 	Datagram bool
 }
 
-// Validate reports a negative HeaderTimeout.
-func (cfg Config) Validate() error {
-	if cfg.HeaderTimeout < 0 {
-		return fmt.Errorf("proxyproto: negative HeaderTimeout %v", cfg.HeaderTimeout)
-	}
-	return nil
-}
-
 // NewConn returns c as a Conn that reads the PROXY protocol header of c's
 // peer as configured by cfg. The header is read the first time the Conn is
 // used, not by NewConn. The Conn owns c: closing it closes c. With the Ignore
 // policy it passes c through and reports no header. For a nil c, its methods
 // return net.ErrClosed, its addresses are nil and Close does nothing.
 func NewConn(c net.Conn, cfg Config) *Conn {
-	timeout := cfg.HeaderTimeout
-	if timeout <= 0 {
-		timeout = DefaultHeaderTimeout
-	}
+	timeout := netutil.Timeout(cfg.HeaderTimeout, DefaultHeaderTimeout)
 	if c != nil && netutil.IsNilPointer(c) {
 		c = nil
 	}
 	pc := &Conn{conn: c, policy: cfg.Policy, timeout: timeout, datagram: cfg.Datagram}
-	if err := cfg.Validate(); err != nil && c != nil {
-		pc.err = err
-		pc.drained.Store(true)
-		pc.done.Store(true)
-	} else if c == nil {
+	if c == nil {
 		pc.err = net.ErrClosed
 		pc.drained.Store(true)
 		pc.done.Store(true)
@@ -174,10 +158,6 @@ func (l *Listener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	cfg := l.Config
-	if err := cfg.Validate(); err != nil {
-		_ = c.Close()
-		return nil, err
-	}
 	if l.PolicyFor != nil {
 		cfg.Policy = l.PolicyFor(c.RemoteAddr())
 	}

@@ -20,7 +20,7 @@ func newTestConn(conn net.Conn, br *bufio.Reader, client bool, opts *Options) *C
 // handshakes; a negative ReadLimit or HandshakeTimeout lifts the limit.
 func TestNegativeSettings(t *testing.T) {
 	for _, o := range []ClientOptions{
-		{Options: Options{CloseTimeout: -time.Second}},
+		{Options: Options{ReadBufferSize: -1}},
 		{Options: Options{Compression: &Compression{Threshold: -1}}},
 	} {
 		if err := o.Validate(); err == nil {
@@ -30,10 +30,10 @@ func TestNegativeSettings(t *testing.T) {
 			t.Errorf("server %+v valid", o)
 		}
 	}
-	if err := (&ClientOptions{Options: Options{ReadLimit: -1}, HandshakeTimeout: -1}).Validate(); err != nil {
+	if err := (&ClientOptions{Options: Options{ReadLimit: -1, CloseTimeout: -1}, HandshakeTimeout: -1}).Validate(); err != nil {
 		t.Error(err)
 	}
-	bad := Options{CloseTimeout: -time.Second}
+	bad := Options{ReadBufferSize: -1}
 	a, b := net.Pipe()
 	defer func() { _ = b.Close() }()
 	if _, err := NewConn(a, nil, false, &bad); err == nil {
@@ -65,5 +65,22 @@ func TestNegativeSizes(t *testing.T) {
 	}
 	if (&ClientOptions{MaxHeaderBytes: -1}).Validate() == nil || (&ServerOptions{MaxHeaderBytes: -1}).Validate() == nil {
 		t.Error("MaxHeaderBytes")
+	}
+}
+
+// A negative close timeout means none: Close still completes the closing
+// handshake with a peer that answers.
+func TestNegativeCloseTimeout(t *testing.T) {
+	srv, cli := pair(t, &ServerOptions{Options: Options{CloseTimeout: -1}}, &ClientOptions{Options: Options{CloseTimeout: -1}, HandshakeTimeout: -1})
+	go func() { _, _, _ = srv.ReadMessage() }()
+	done := make(chan error, 1)
+	go func() { done <- cli.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish")
 	}
 }

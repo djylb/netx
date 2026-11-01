@@ -21,18 +21,22 @@ import (
 // leaves the connection uncompressed.
 type Compression struct {
 	// Level is the compress/flate level of sent messages, from
-	// flate.HuffmanOnly (-2) to flate.BestCompression (9); zero means
-	// flate.BestSpeed. To send messages uncompressed, leave Compression
+	// flate.HuffmanOnly (-2) to flate.BestCompression (9); 0 means
+	// flate.BestSpeed, and other levels are an error, as for
+	// flate.NewWriter. To send messages uncompressed, leave Compression
 	// unset rather than choose a level.
 	Level int
-	// Threshold is the size below which messages are sent uncompressed;
-	// zero means 128 bytes, 1 compresses every message but empty ones, and
-	// a negative threshold is an error.
+	// Threshold is the size below which messages are sent uncompressed; 0
+	// means 128 bytes, 1 compresses every message but empty ones, and a
+	// negative threshold is an error.
 	Threshold int
 }
 
 // validate reports a negative Threshold.
 func (c *Compression) validate() error {
+	if c.Level < flate.HuffmanOnly || c.Level > flate.BestCompression {
+		return fmt.Errorf("wsconn: compression Level %d out of range", c.Level)
+	}
 	if c.Threshold < 0 {
 		return fmt.Errorf("wsconn: negative compression threshold %d", c.Threshold)
 	}
@@ -47,7 +51,7 @@ type deflateConfig struct {
 
 func (c *Compression) config() *deflateConfig {
 	d := &deflateConfig{level: c.Level, threshold: cmp.Or(c.Threshold, 128)}
-	if d.level == 0 || d.level < flate.HuffmanOnly || d.level > flate.BestCompression {
+	if d.level == 0 {
 		d.level = flate.BestSpeed
 	}
 	return d

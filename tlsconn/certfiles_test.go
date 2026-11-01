@@ -796,16 +796,16 @@ func TestNegativeCertSettings(t *testing.T) {
 	if _, err := (&CertFiles{MaxEntries: -1}).LoadFiles(certFile, keyFile); err == nil {
 		t.Error("CertFiles MaxEntries")
 	}
-	for _, s := range []*CertStore{{LoadTimeout: -1}, {RetryAfter: -1}, {RefreshBefore: -1}, {IdleTimeout: -1}, {MaxEntries: -1}} {
+	for _, s := range []*CertStore{{RetryAfter: -1}, {RefreshBefore: -1}, {MaxEntries: -1}} {
 		if _, err := s.AddFiles("", certFile, keyFile); err == nil {
 			t.Errorf("CertStore %+v", s)
 		}
 	}
-	if _, err := (&CertFiles{IdleTimeout: -1}).LoadPEM(nil, nil); err == nil || !strings.Contains(err.Error(), "IdleTimeout") {
-		t.Errorf("CertFiles IdleTimeout: %v", err)
+	if _, err := (&CertFiles{MaxEntries: -1}).LoadPEM(nil, nil); err == nil || !strings.Contains(err.Error(), "MaxEntries") {
+		t.Errorf("CertFiles MaxEntries: %v", err)
 	}
-	if _, err := (&CertStore{LoadTimeout: -1}).GetCertificate(&tls.ClientHelloInfo{ServerName: "x"}); err == nil {
-		t.Error("CertStore LoadTimeout")
+	if _, err := (&CertStore{LoadTimeout: -1}).AddFiles("", certFile, keyFile); err != nil {
+		t.Errorf("negative LoadTimeout, which means none: %v", err)
 	}
 	for _, o := range []ChallengerOptions{{TTL: -1}, {MaxUsed: -1}} {
 		if _, err := NewChallenger(o); err == nil {

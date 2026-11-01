@@ -29,4 +29,10 @@
 // of every datagram, resolving host names themselves with a bounded cache,
 // and deliver replies from any source; Dialer.Check checks one address.
 // Checking an IP address does not allocate.
+//
+// Settings: the zero value of a field selects its default, stated in the
+// field's documentation; for timeouts and limits it is a safe bound unless
+// the field says otherwise. A negative timeout means no timeout, as for
+// http.Server.IdleTimeout. Other negative values are an error unless the
+// field gives them a meaning.
 package safedial

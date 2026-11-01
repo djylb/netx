@@ -2,7 +2,6 @@ package wsconn
 
 import (
 	"bufio"
-	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/djylb/netx/httphead"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // Conn is a WebSocket connection after the opening handshake. See the
@@ -130,7 +130,7 @@ func newConn(conn net.Conn, br *bufio.Reader, client bool, o *Options, dc *defla
 		br:           br,
 		client:       client,
 		readLimit:    o.readLimit(),
-		closeTimeout: cmp.Or(o.CloseTimeout, DefaultCloseTimeout),
+		closeTimeout: netutil.Timeout(o.CloseTimeout, DefaultCloseTimeout),
 		skipClose:    o.DisableCloseHandshake,
 		onPing:       o.OnPing,
 		onPong:       o.OnPong,

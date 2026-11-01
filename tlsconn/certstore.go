@@ -95,11 +95,11 @@ type CertStore struct {
 	// certificates to rank as issued.
 	Roots *x509.CertPool
 	// CheckInterval is how often the files of AddFiles certificates are
-	// checked for changes, as in CertFiles; DefaultCheckInterval if zero,
-	// never if negative. The files of an expired certificate are read
-	// again, changed or not, at most once a minute either way. The checks
-	// run in the background, started by handshakes; CheckFiles runs one at
-	// once.
+	// checked for changes, as in CertFiles: 0 means DefaultCheckInterval
+	// (10s), and a negative value never checks. The files of an expired
+	// certificate are read again, changed or not, at most once a minute
+	// either way. The checks run in the background, started by handshakes;
+	// CheckFiles runs one at once.
 	CheckInterval time.Duration
 
 	// Load, if set, returns the certificate for a name that no added one is
@@ -113,23 +113,25 @@ type CertStore struct {
 	// it too. Calls for one name may overlap, as after RetryAfter, Forget or
 	// an eviction while an earlier call has not returned.
 	Load func(ctx context.Context, name string) (*tls.Certificate, error)
-	// LoadTimeout bounds a Load; DefaultLoadTimeout if 0. Negative
-	// settings are errors, which GetCertificate and the Add methods return.
+	// LoadTimeout bounds a Load; 0 means DefaultLoadTimeout (30s), and
+	// a negative value means no timeout, as for http.Server.IdleTimeout.
 	LoadTimeout time.Duration
 	// RetryAfter is how long a failed Load, or one that found no
 	// certificate, is remembered before Load runs again for the name, and
 	// the least time between the loads of a certificate due for refresh;
-	// DefaultRetryAfter if 0.
+	// 0 means DefaultRetryAfter (10s), and a negative value is an error.
 	RetryAfter time.Duration
 	// RefreshBefore is how long before a loaded certificate expires that it
-	// is loaded again, at most a third of its lifetime;
-	// DefaultRefreshBefore if 0.
+	// is loaded again, at most a third of its lifetime; 0 means
+	// DefaultRefreshBefore (24h), and a negative value is an error.
 	RefreshBefore time.Duration
-	// MaxEntries bounds the loaded names, failed ones included; the least
-	// recently used is dropped first. Zero means no bound.
+	// MaxEntries bounds the loaded names, failed ones included, the least
+	// recently used dropped first; 0 means no bound, and a negative bound
+	// is an error. Set it, or IdleTimeout, when Load answers names that
+	// clients choose.
 	MaxEntries int
-	// IdleTimeout drops loaded names that no handshake used for this long.
-	// Zero keeps them.
+	// IdleTimeout drops loaded names that no handshake used for this long;
+	// 0 or a negative value keeps them.
 	IdleTimeout time.Duration
 
 	// OnError, if set, is called with each failure that no handshake may
@@ -886,17 +888,11 @@ func (s *CertStore) now() time.Time { return timeshim.Or(s.Clock).Now() }
 
 // validate reports a negative setting.
 func (s *CertStore) validate() error {
-	if s.LoadTimeout < 0 {
-		return fmt.Errorf("tlsconn: negative CertStore.LoadTimeout %v", s.LoadTimeout)
-	}
 	if s.RetryAfter < 0 {
 		return fmt.Errorf("tlsconn: negative CertStore.RetryAfter %v", s.RetryAfter)
 	}
 	if s.RefreshBefore < 0 {
 		return fmt.Errorf("tlsconn: negative CertStore.RefreshBefore %v", s.RefreshBefore)
-	}
-	if s.IdleTimeout < 0 {
-		return fmt.Errorf("tlsconn: negative CertStore.IdleTimeout %v", s.IdleTimeout)
 	}
 	if s.MaxEntries < 0 {
 		return fmt.Errorf("tlsconn: negative CertStore.MaxEntries %v", s.MaxEntries)
