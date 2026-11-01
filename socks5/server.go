@@ -643,11 +643,17 @@ func (s *Server) dial(ctx context.Context, req *Request) (net.Conn, error) {
 // Validate reports a negative setting, which fails Serve, ServeConn,
 // Handshake and ServeRequest.
 func (s *Server) Validate() error {
-	switch {
-	case s.UDPQueue < 0:
-		return fmt.Errorf("socks5: negative UDPQueue %d", s.UDPQueue)
-	case s.HandshakeTimeout < 0 || s.DialTimeout < 0 || s.UDPIdleTimeout < 0:
-		return errors.New("socks5: negative timeout")
+	if s.UDPQueue < 0 {
+		return fmt.Errorf("socks5: negative UDPQueue %v", s.UDPQueue)
+	}
+	if s.HandshakeTimeout < 0 {
+		return fmt.Errorf("socks5: negative HandshakeTimeout %v", s.HandshakeTimeout)
+	}
+	if s.DialTimeout < 0 {
+		return fmt.Errorf("socks5: negative DialTimeout %v", s.DialTimeout)
+	}
+	if s.UDPIdleTimeout < 0 {
+		return fmt.Errorf("socks5: negative UDPIdleTimeout %v", s.UDPIdleTimeout)
 	}
 	return nil
 }

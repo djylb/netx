@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -325,8 +326,11 @@ type fileSource struct {
 // validate reports a negative setting, which LoadFiles and LoadPEM
 // return.
 func (c *CertFiles) validate() error {
-	if c.MaxEntries < 0 || c.IdleTimeout < 0 {
-		return errors.New("tlsconn: negative CertFiles setting")
+	if c.MaxEntries < 0 {
+		return fmt.Errorf("tlsconn: negative CertFiles.MaxEntries %v", c.MaxEntries)
+	}
+	if c.IdleTimeout < 0 {
+		return fmt.Errorf("tlsconn: negative CertFiles.IdleTimeout %v", c.IdleTimeout)
 	}
 	return nil
 }

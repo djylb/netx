@@ -227,3 +227,14 @@ func TestRaceDialerNegativeStagger(t *testing.T) {
 		t.Error("dialed")
 	}
 }
+
+// A negative stagger fails DialFirst before it dials.
+func TestDialFirstNegativeStagger(t *testing.T) {
+	_, i, err := DialFirst(t.Context(), -1, func(context.Context) (net.Conn, error) {
+		t.Fatal("dialed")
+		return nil, nil
+	})
+	if err == nil || i != -1 {
+		t.Errorf("DialFirst = %d, %v", i, err)
+	}
+}

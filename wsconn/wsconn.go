@@ -198,11 +198,11 @@ type Options struct {
 	// server to end the connection beneath, which the server does at once.
 	// Zero means DefaultCloseTimeout, and a negative timeout is an error.
 	CloseTimeout time.Duration
-	// SkipCloseHandshake closes without the closing handshake: Close sends
-	// no close frame and closes the connection beneath at once, and
-	// CloseWrite fails. CloseTimeout then still bounds the pongs that the
-	// reader writes.
-	SkipCloseHandshake bool
+	// DisableCloseHandshake closes without the closing handshake: no close
+	// frame is sent, neither by Close, which closes the connection beneath
+	// at once, nor when the connection fails, and CloseWrite fails.
+	// CloseTimeout then still bounds the pongs that the reader writes.
+	DisableCloseHandshake bool
 	// OnPing and OnPong, if set, are called by the reader with the payload
 	// of each ping and pong, which is valid only during the call; a ping
 	// is answered with a pong all the same. They run on the reader's

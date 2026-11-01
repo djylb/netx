@@ -66,7 +66,7 @@ func TestFailedFragmentFailsWrites(t *testing.T) {
 // closes the connection beneath at once; CloseWrite fails.
 func TestCloseZeroTimeout(t *testing.T) {
 	a, b := net.Pipe()
-	c := newTestConn(a, nil, false, &Options{SkipCloseHandshake: true})
+	c := newTestConn(a, nil, false, &Options{DisableCloseHandshake: true})
 	if err := c.CloseWrite(); err == nil {
 		t.Fatal("CloseWrite with a zero close timeout succeeded")
 	}

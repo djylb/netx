@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"slices"
@@ -886,8 +886,20 @@ func (s *CertStore) now() time.Time { return timeshim.Or(s.Clock).Now() }
 
 // validate reports a negative setting.
 func (s *CertStore) validate() error {
-	if s.LoadTimeout < 0 || s.RetryAfter < 0 || s.RefreshBefore < 0 || s.IdleTimeout < 0 || s.MaxEntries < 0 {
-		return errors.New("tlsconn: negative CertStore setting")
+	if s.LoadTimeout < 0 {
+		return fmt.Errorf("tlsconn: negative CertStore.LoadTimeout %v", s.LoadTimeout)
+	}
+	if s.RetryAfter < 0 {
+		return fmt.Errorf("tlsconn: negative CertStore.RetryAfter %v", s.RetryAfter)
+	}
+	if s.RefreshBefore < 0 {
+		return fmt.Errorf("tlsconn: negative CertStore.RefreshBefore %v", s.RefreshBefore)
+	}
+	if s.IdleTimeout < 0 {
+		return fmt.Errorf("tlsconn: negative CertStore.IdleTimeout %v", s.IdleTimeout)
+	}
+	if s.MaxEntries < 0 {
+		return fmt.Errorf("tlsconn: negative CertStore.MaxEntries %v", s.MaxEntries)
 	}
 	return nil
 }

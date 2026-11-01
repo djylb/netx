@@ -331,17 +331,29 @@ func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
 	return s.serveConn(ctx, c)
 }
 
-// Validate reports a negative setting, which fails Serve and ServeConn;
-// every negative setting is invalid.
+// Validate reports a negative setting other than MaxIdleConns, whose
+// negative value means no bound, which fails Serve and ServeConn.
 func (s *Server) Validate() error {
 	if s.MaxIdleConnsPerKey < 0 {
-		return fmt.Errorf("httpproxy: negative MaxIdleConnsPerKey %d", s.MaxIdleConnsPerKey)
+		return fmt.Errorf("httpproxy: negative MaxIdleConnsPerKey %v", s.MaxIdleConnsPerKey)
 	}
 	if s.MaxHeaderBytes < 0 {
-		return fmt.Errorf("httpproxy: negative MaxHeaderBytes %d", s.MaxHeaderBytes)
+		return fmt.Errorf("httpproxy: negative MaxHeaderBytes %v", s.MaxHeaderBytes)
 	}
-	if s.IdleConnTimeout < 0 || s.HandshakeTimeout < 0 || s.DialTimeout < 0 || s.IdleTimeout < 0 || s.ResponseHeaderTimeout < 0 {
-		return errors.New("httpproxy: negative timeout")
+	if s.IdleConnTimeout < 0 {
+		return fmt.Errorf("httpproxy: negative IdleConnTimeout %v", s.IdleConnTimeout)
+	}
+	if s.HandshakeTimeout < 0 {
+		return fmt.Errorf("httpproxy: negative HandshakeTimeout %v", s.HandshakeTimeout)
+	}
+	if s.DialTimeout < 0 {
+		return fmt.Errorf("httpproxy: negative DialTimeout %v", s.DialTimeout)
+	}
+	if s.IdleTimeout < 0 {
+		return fmt.Errorf("httpproxy: negative IdleTimeout %v", s.IdleTimeout)
+	}
+	if s.ResponseHeaderTimeout < 0 {
+		return fmt.Errorf("httpproxy: negative ResponseHeaderTimeout %v", s.ResponseHeaderTimeout)
 	}
 	return nil
 }

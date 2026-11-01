@@ -49,10 +49,10 @@ var ErrNoTransport = errors.New("wshttp: Dialer without a Transport")
 // HTTP/1.1. The URL's userinfo, if any, is sent as Basic credentials
 // unless Header holds an Authorization field, as over HTTP/1.1.
 func (d *Dialer) Dial(ctx context.Context, rawURL string) (*wsconn.Conn, *httphead.Response, error) {
-	// One bound for both attempts.
 	if err := d.Validate(); err != nil {
 		return nil, nil, err
 	}
+	// One bound for both attempts.
 	timeout := d.HandshakeTimeout
 	if timeout == 0 {
 		timeout = wsconn.DefaultHandshakeTimeout

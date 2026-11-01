@@ -36,7 +36,7 @@ type Conn struct {
 
 	readLimit    int64
 	closeTimeout time.Duration
-	skipClose    bool // Options.SkipCloseHandshake
+	skipClose    bool // Options.DisableCloseHandshake
 	onPing       func(*Conn, []byte)
 	onPong       func(*Conn, []byte)
 	deflate      *deflateConfig // nil without permessage-deflate
@@ -131,7 +131,7 @@ func newConn(conn net.Conn, br *bufio.Reader, client bool, o *Options, dc *defla
 		client:       client,
 		readLimit:    o.readLimit(),
 		closeTimeout: cmp.Or(o.CloseTimeout, DefaultCloseTimeout),
-		skipClose:    o.SkipCloseHandshake,
+		skipClose:    o.DisableCloseHandshake,
 		onPing:       o.OnPing,
 		onPong:       o.OnPong,
 		deflate:      dc,
@@ -666,9 +666,8 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 // handshake to the reader: reads go on until the peer's close frame,
 // which ends the connection, and Close may follow at any time. A message
 // that a writer from NextWriter has not finished fails. The close timeout
-// bounds the write, also one in progress; with SkipCloseHandshake it
-// fails. A close frame sent before makes
-// it return nil.
+// bounds the write, also one in progress; with DisableCloseHandshake it
+// fails. A close frame sent before makes it return nil.
 func (c *Conn) CloseWrite() error {
 	if c.closing.Load() {
 		return fmt.Errorf("wsconn: close write: %w", net.ErrClosed)
@@ -708,7 +707,7 @@ func (c *Conn) awaitPeer(deadline time.Time) {
 
 // sendClose sends a close frame with code, none for 0, unless one was
 // sent. deadline bounds the write, also a write of another goroutine that
-// holds the connection, which then fails; with SkipCloseHandshake it
+// holds the connection, which then fails; with DisableCloseHandshake it
 // sends none, and writes fail as after one.
 func (c *Conn) sendClose(code StatusCode, reason string, deadline time.Time) error {
 	if c.skipClose {

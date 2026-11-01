@@ -12,7 +12,7 @@ import (
 )
 
 // DefaultDialStagger is how long DialFirst waits for an attempt before it
-// starts the next when stagger is not positive.
+// starts the next when stagger is 0.
 const DefaultDialStagger = 300 * time.Millisecond
 
 // ContextDialer dials connections with a DialContext(ctx, network, address)
@@ -33,8 +33,9 @@ var errNoConn = errors.New("netx: dialer returned no connection")
 // and through a relay, and returns the first connection made and the index of
 // the attempt that made it. It starts them in order, starting the next while
 // earlier ones go on whenever one has not connected within stagger, or at
-// once when one fails; a non-positive stagger means DefaultDialStagger. The
-// other attempts are cancelled, and connections they still make are closed.
+// once when one fails; a stagger of 0 means DefaultDialStagger, and a
+// negative one fails the dial. The other attempts are cancelled, and
+// connections they still make are closed.
 //
 // When none connects, it returns -1 and the errors of every attempt, joined,
 // or ctx's error when ctx ended the dial. An attempt that returns a
@@ -43,7 +44,10 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 	if len(attempts) == 0 {
 		return nil, -1, ErrNoDialAttempts
 	}
-	if stagger <= 0 {
+	if stagger < 0 {
+		return nil, -1, fmt.Errorf("netx: negative stagger %v", stagger)
+	}
+	if stagger == 0 {
 		stagger = DefaultDialStagger
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -147,9 +151,6 @@ func (d *RaceDialer) DialAny(ctx context.Context, network string, addresses ...s
 }
 
 func (d *RaceDialer) dial(ctx context.Context, network string, addresses []string, name bool) (net.Conn, string, error) {
-	if d != nil && d.Stagger < 0 {
-		return nil, "", fmt.Errorf("netx: negative Stagger %v", d.Stagger)
-	}
 	var (
 		dialers = []ContextDialer{&net.Dialer{}}
 		stagger time.Duration

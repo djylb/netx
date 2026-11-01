@@ -232,8 +232,11 @@ type ChallengerOptions struct {
 
 // NewChallenger returns a Challenger with a new random key.
 func NewChallenger(opts ChallengerOptions) (*Challenger, error) {
-	if opts.TTL < 0 || opts.MaxUsed < 0 {
-		return nil, errors.New("tlsconn: negative ChallengerOptions")
+	if opts.TTL < 0 {
+		return nil, fmt.Errorf("tlsconn: negative ChallengerOptions.TTL %v", opts.TTL)
+	}
+	if opts.MaxUsed < 0 {
+		return nil, fmt.Errorf("tlsconn: negative ChallengerOptions.MaxUsed %v", opts.MaxUsed)
 	}
 	c := &Challenger{
 		ttl:   positive(opts.TTL, DefaultChallengeTTL),
