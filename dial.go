@@ -34,7 +34,8 @@ var errNoConn = errors.New("netx: dialer returned no connection")
 // the attempt that made it. It starts them in order, starting the next while
 // earlier ones go on whenever one has not connected within stagger, or at
 // once when one fails; a stagger of 0 means DefaultDialStagger, and a
-// negative one fails the dial. The other attempts are cancelled, and
+// negative one starts the next only when one fails, as a negative
+// net.Dialer.FallbackDelay does. The other attempts are cancelled, and
 // connections they still make are closed.
 //
 // When none connects, it returns -1 and the errors of every attempt, joined,

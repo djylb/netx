@@ -31,8 +31,9 @@ type ClientOptions struct {
 	Header httphead.Header
 	// Subprotocols are offered by preference in Sec-WebSocket-Protocol.
 	Subprotocols []string
-	// HandshakeTimeout bounds Client and Dialer.Dial when their context has
-	// no deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// HandshakeTimeout bounds Client and Dialer.Dial when their context has no
+	// deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value
+	// means no timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
 	// MaxHeaderBytes bounds the response head; 0 means
 	// DefaultMaxHeaderBytes (32 KiB), and a negative bound is an error.

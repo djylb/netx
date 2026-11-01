@@ -84,3 +84,28 @@ func TestNegativeCloseTimeout(t *testing.T) {
 		t.Fatal("Close did not finish")
 	}
 }
+
+// With a negative close timeout the pongs that the reader writes are still
+// bounded, by DefaultCloseTimeout, so that a peer that pings but does not
+// read cannot hold the reader.
+func TestPongBoundWithoutCloseTimeout(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe() // b never reads, so a pong write blocks
+	defer func() { _ = b.Close() }()
+	c := newTestConn(a, nil, false, &Options{CloseTimeout: -1})
+	defer func() { _ = c.NetConn().Close() }()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		c.queuePong([]byte("p"))
+		close(done)
+	}()
+	select {
+	case <-done:
+		if d := time.Since(start); d < DefaultCloseTimeout-time.Second {
+			t.Errorf("pong given up after %v", d)
+		}
+	case <-time.After(DefaultCloseTimeout + 5*time.Second):
+		t.Fatal("pong write not bounded")
+	}
+}

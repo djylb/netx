@@ -58,9 +58,9 @@ type Request struct {
 
 // Reply sends a reply to r in its protocol version: for SOCKS4 code and bound
 // are translated as by WriteReply4. A request gets one reply, except a BIND
-// request, which gets two: the address the server listens on for the peer,
-// and then the address of the peer that connected. A failure reply, which
-// usually carries the zero netx.Addr, is the last one, and the connection is then
+// request, which gets two: the address the server listens on for the peer, and
+// then the address of the peer that connected. A failure reply, which usually
+// carries the zero netx.Addr, is the last one, and the connection is then
 // closed. Calls after the last reply return ErrReplied. Reply is not safe for
 // concurrent use.
 func (r *Request) Reply(code Reply, bound netx.Addr) error {
@@ -238,30 +238,29 @@ type Server struct {
 
 	// UDPSocket is the client-facing UDP socket shared by all associations,
 	// which the clients are told to send to. Datagrams are routed to an
-	// association by their source, which must have the IP address of its control
-	// connection: to the association that announced the source's port, else
-	// to the only association of that IP address that announced no port,
+	// association by their source, which must have the IP address of its
+	// control connection: to the association that announced the source's port,
+	// else to the only association of that IP address that announced no port,
 	// else to the only one pending for that IP address. An announced port
-	// counts at the control connection's IP address whatever address comes
-	// with it, since clients behind a NAT announce their private address and
-	// clients that do not know theirs announce 0.0.0.0 or a name; a client
-	// that announces the control connection's own address and a port gets
-	// datagrams from that source alone, as no NAT rewrote it. A source
-	// that matches none of these, such as one of several associations that
-	// announced no port, is ambiguous while they wait for their first
-	// datagram, and its datagrams are dropped. A request whose control
-	// connection has no IP address, such as a tunneled stream, must announce
-	// one, or it fails; nothing proves that announcement, so such a client
-	// can claim the datagrams of any IP address, and its control
-	// connections must come from trusted clients only. Serve untrusted
-	// clients of that kind with ListenUDP, whose sockets are their own.
-	// Close closes UDPSocket.
+	// counts at the control connection's IP address whatever address comes with
+	// it, since clients behind a NAT announce their private address and clients
+	// that do not know theirs announce 0.0.0.0 or a name; a client that
+	// announces the control connection's own address and a port gets datagrams
+	// from that source alone, as no NAT rewrote it. A source that matches none
+	// of these, such as one of several associations that announced no port, is
+	// ambiguous while they wait for their first datagram, and its datagrams are
+	// dropped. A request whose control connection has no IP address, such as a
+	// tunneled stream, must announce one, or it fails; nothing proves that
+	// announcement, so such a client can claim the datagrams of any IP address,
+	// and its control connections must come from trusted clients only. Serve
+	// untrusted clients of that kind with ListenUDP, whose sockets are their
+	// own. Close closes UDPSocket.
 	UDPSocket net.PacketConn
 	// ListenUDP, used when UDPSocket is nil, opens a UDP socket for one
-	// association, which the association owns; ListenAssociationUDP is one. Datagrams are taken as on
-	// UDPSocket, except that when neither the control connection nor the
-	// request gives the client's IP address, the first source that sends
-	// becomes the client.
+	// association, which the association owns; ListenAssociationUDP is one.
+	// Datagrams are taken as on UDPSocket, except that when neither the control
+	// connection nor the request gives the client's IP address, the first
+	// source that sends becomes the client.
 	ListenUDP func(ctx context.Context, req *Request) (net.PacketConn, error)
 	// UDPAddr returns the address a UDP ASSOCIATE reply tells the client to
 	// send to, given the association's socket address; nil uses that address
@@ -280,10 +279,12 @@ type Server struct {
 	UDPQueue int
 
 	// HandshakeTimeout bounds the negotiation and request; 0 means
-	// DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// DefaultHandshakeTimeout (10s), and a negative value means no timeout, as
+	// for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial and DialPacket; 0 means DefaultDialTimeout
-	// (10s), and a negative value means no timeout, as for http.Server.IdleTimeout. Unlike net.Dialer.Timeout, 0 is not no timeout.
+	// DialTimeout bounds Dial and DialPacket; 0 means DefaultDialTimeout (10s),
+	// and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// This differs from net.Dialer.Timeout, where 0 means no timeout.
 	DialTimeout time.Duration
 	// UDPIdleTimeout ends a UDP association without datagrams in either
 	// direction, or without a first datagram, for this long, and closes its

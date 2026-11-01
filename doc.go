@@ -37,15 +37,15 @@
 // Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
 // handshakes and handles certificates, proxyproto builds, decodes and serves
 // PROXY protocol headers, transparent accepts transparently redirected TCP
-// connections and UDP datagrams, socks5 implements SOCKS5 and SOCKS4 with a client dialer and a
-// configurable server, httpproxy is an HTTP proxy server of the same shape,
-// httphead parses HTTP/1.x heads, duplex joins a read half and a write half
-// into a connection, and proxydial dials through HTTP CONNECT,
+// connections and UDP datagrams, socks5 implements SOCKS5 and SOCKS4 with a
+// client dialer and a configurable server, httpproxy is an HTTP proxy server of
+// the same shape, httphead parses HTTP/1.x heads, duplex joins a read half and
+// a write half into a connection, and proxydial dials through HTTP CONNECT,
 // SOCKS5 and SOCKS4 proxies, also over TLS.
 //
 // Every package depends only on the standard library, and only tlsconn and
-// proxydial import crypto/tls, which adds a large amount of code to a binary even
-// when it is not used.
+// proxydial import crypto/tls, which adds a large amount of code to a binary
+// even when it is not used.
 //
 // Settings: the zero value of a field selects its default, stated in the
 // field's documentation; for timeouts and limits it is a safe bound unless

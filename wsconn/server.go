@@ -48,17 +48,18 @@ type ServerOptions struct {
 	// the first of them that the client offers is chosen. Without a match
 	// the connection has no subprotocol.
 	Subprotocols []string
-	// CheckOrigin decides on the request, typically on its Origin field;
-	// an error refuses it, with the status of a *HandshakeError from 400 to
-	// 599, or else 403 Forbidden. Nil accepts requests without an Origin field and those
-	// whose origin's host is the request's Host, as browsers send for
+	// CheckOrigin decides on the request, typically on its Origin field; an
+	// error refuses it, with the status of a *HandshakeError from 400 to 599,
+	// or else 403 Forbidden. Nil accepts requests without an Origin field and
+	// those whose origin's host is the request's Host, as browsers send for
 	// pages of the same site. Clients other than browsers seldom send an
 	// Origin; AnyOrigin accepts every request.
 	CheckOrigin func(req *httphead.Request) error
 	// Header holds fields added to the 101 response, such as Set-Cookie.
 	Header httphead.Header
-	// HandshakeTimeout bounds Accept and AcceptRequest when their context
-	// has no deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// HandshakeTimeout bounds Accept and AcceptRequest when their context has
+	// no deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value
+	// means no timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
 	// MaxHeaderBytes bounds the request head that Accept reads; 0 means
 	// DefaultMaxHeaderBytes (32 KiB), and a negative bound is an error.

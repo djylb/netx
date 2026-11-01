@@ -239,11 +239,12 @@ type Server struct {
 	MaxIdleConnsPerKey int
 	// MaxIdleConns bounds the kept connections of all keys; 0 means
 	// DefaultMaxIdleConns (1024), and a negative value means no limit.
-	// Unlike http.Transport.MaxIdleConns, 0 is not no limit.
+	// This differs from http.Transport.MaxIdleConns, where 0 means no limit.
 	MaxIdleConns int
-	// IdleConnTimeout closes a kept connection that served no request for
-	// this long; 0 means DefaultIdleConnTimeout (90s), and a negative value means no timeout, as for http.Server.IdleTimeout.
-	// Unlike http.Transport.IdleConnTimeout, 0 is not no limit.
+	// IdleConnTimeout closes a kept connection that served no request for this
+	// long; 0 means DefaultIdleConnTimeout (90s), and a negative value means no
+	// timeout, as for http.Server.IdleTimeout. This differs from
+	// http.Transport.IdleConnTimeout, where 0 means no limit.
 	IdleConnTimeout time.Duration
 
 	// Via, if not empty, is the pseudonym that the server adds to the Via
@@ -263,14 +264,17 @@ type Server struct {
 	// responses among them.
 	ResponseHeader func(req *Request, status int, h *httphead.Header)
 
-	// HandshakeTimeout bounds reading each request head and authenticating
-	// it; 0 means DefaultHandshakeTimeout (10s), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// HandshakeTimeout bounds reading each request head and authenticating it;
+	// 0 means DefaultHandshakeTimeout (10s), and a negative value means no
+	// timeout, as for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial; 0 means DefaultDialTimeout (10s), and
-	// a negative value means no timeout, as for http.Server.IdleTimeout. Unlike net.Dialer.Timeout, 0 is not no timeout.
+	// DialTimeout bounds Dial; 0 means DefaultDialTimeout (10s), and a negative
+	// value means no timeout, as for http.Server.IdleTimeout. This differs from
+	// net.Dialer.Timeout, where 0 means no timeout.
 	DialTimeout time.Duration
-	// IdleTimeout bounds the wait for the next request on a kept-alive
-	// client connection; 0 means DefaultIdleTimeout (2 minutes), and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// IdleTimeout bounds the wait for the next request on a kept-alive client
+	// connection; 0 means DefaultIdleTimeout (2 minutes), and a negative value
+	// means no timeout, as for http.Server.IdleTimeout.
 	IdleTimeout time.Duration
 	// ResponseHeaderTimeout bounds the wait for the head of a forwarded
 	// request's response once the request has been sent; the client then

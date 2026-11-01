@@ -37,13 +37,13 @@ const (
 )
 
 // TrustPrefixes returns a function for Listener.PolicyFor under which peers
-// whose IP address is in one of the prefixes must send a header and other
-// peers are passed through without one, as Required and Ignore do. An IPv4 address and its
-// IPv4-mapped IPv6 form (::ffff:a.b.c.d) are the same peer, for addresses and
-// prefixes alike, so ::ffff:10.0.0.0/104 is 10.0.0.0/8, and an IPv6 prefix
-// that holds the IPv4-mapped form of an IPv4 peer, such as ::/0, holds the
-// peer. Zones are ignored. Peers without an IP address, such as those of a
-// Unix socket, are passed through.
+// whose IP address is in one of the prefixes must send a header and other peers
+// are passed through without one, as Required and Ignore do. An IPv4 address
+// and its IPv4-mapped IPv6 form (::ffff:a.b.c.d) are the same peer, for
+// addresses and prefixes alike, so ::ffff:10.0.0.0/104 is 10.0.0.0/8, and an
+// IPv6 prefix that holds the IPv4-mapped form of an IPv4 peer, such as ::/0,
+// holds the peer. Zones are ignored. Peers without an IP address, such as those
+// of a Unix socket, are passed through.
 func TrustPrefixes(p ...netip.Prefix) func(peer net.Addr) Policy {
 	prefixes := make([]netip.Prefix, 0, len(p))
 	for _, pfx := range p {

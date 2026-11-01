@@ -18,8 +18,8 @@ import (
 )
 
 // PacketConn is the outbound side of a UDP association: it sends the client's
-// datagrams to their destinations and receives the replies. Implementations
-// may forward the datagrams elsewhere, such as through a tunnel; netx.Addr keeps
+// datagrams to their destinations and receives the replies. Implementations may
+// forward the datagrams elsewhere, such as through a tunnel; netx.Addr keeps
 // domain names unresolved for that purpose.
 type PacketConn interface {
 	// WriteTo sends p to dst. It must not retain p, which the caller reuses

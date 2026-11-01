@@ -39,15 +39,15 @@ const (
 // CertStore holds certificates by ID and picks one for each TLS handshake,
 // for a tls.Config's GetCertificate.
 //
-// Certificates are added with Add, AddPEM or AddFiles, whose files are kept
-// in sync as CertFiles does, under an ID of the caller's choosing, else, for
-// AddFiles, the path of the certificate file, and for Add and AddPEM the
-// leaf's fingerprint (CertID). A fingerprint names one exact certificate, so
-// give a certificate that gets renewed a stable ID, such as the ID of the
-// host configuration that names it, or its domain. Each serves the names of its leaf, DNS names
-// (wildcards such as *.example.com included) and IP addresses, or the names
-// given when it is added. One name can match several certificates, issued by
-// an authority or self-signed, for the name exactly or by wildcard.
+// Certificates are added with Add, AddPEM or AddFiles, whose files are kept in
+// sync as CertFiles does, under an ID of the caller's choosing, else, for
+// AddFiles, the path of the certificate file, and for Add and AddPEM the leaf's
+// fingerprint (CertID). A fingerprint names one exact certificate, so give a
+// certificate that gets renewed a stable ID, such as the ID of the host
+// configuration that names it, or its domain. Each serves the names of its
+// leaf, DNS names (wildcards such as *.example.com included) and IP addresses,
+// or the names given when it is added. One name can match several certificates,
+// issued by an authority or self-signed, for the name exactly or by wildcard.
 //
 // A handshake gets, in this order:
 //

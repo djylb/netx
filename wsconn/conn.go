@@ -764,12 +764,12 @@ func (c *Conn) writeControl(op byte, data []byte) error {
 	return c.writeControlLocked(op, data)
 }
 
-// queuePong answers a ping without waiting for a write in progress: the
-// writer that holds frameMu sends the pong when it lets go. Only the pong
-// for the last ping is sent, as RFC 6455 allows. When no write is in
-// progress the reader writes the pong itself, bounded by the close
-// timeout, so that a peer that sends pings but does not read cannot hold
-// the reader, nor past its read deadline: a pong that does not go out in
+// queuePong answers a ping without waiting for a write in progress: the writer
+// that holds frameMu sends the pong when it lets go. Only the pong for the last
+// ping is sent, as RFC 6455 allows. When no write is in progress the reader
+// writes the pong itself, bounded by the close timeout, or DefaultCloseTimeout
+// when it is none, so that a peer that sends pings but does not read cannot
+// hold the reader, nor past its read deadline: a pong that does not go out in
 // time is dropped, and one that went out in part fails the writes.
 func (c *Conn) queuePong(data []byte) {
 	c.pongMu.Lock()
@@ -778,6 +778,9 @@ func (c *Conn) queuePong(data []byte) {
 	c.pongPending.Store(true)
 	for c.pongPending.Load() && c.frameMu.TryLock() {
 		d := c.closeTimeout
+		if d == netutil.NoTimeout {
+			d = DefaultCloseTimeout // a pong is always bounded
+		}
 		c.wdMu.Lock()
 		c.pongBound = time.Now().Add(d)
 		if !c.rd.IsZero() && c.rd.Before(c.pongBound) {

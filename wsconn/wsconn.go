@@ -203,13 +203,16 @@ type Options struct {
 	// CloseTimeout bounds the closing handshake: sending the close frame
 	// and waiting for the peer's, and on a client then waiting for the
 	// server to end the connection beneath, which the server does at once.
-	// 0 means DefaultCloseTimeout (5s), and a negative value means no timeout, as for http.Server.IdleTimeout; DisableCloseHandshake
-	// skips the handshake.
+	// 0 means DefaultCloseTimeout (5s), and a negative value means no
+	// timeout, as for http.Server.IdleTimeout. DisableCloseHandshake skips
+	// the handshake. The pongs that the reader writes are bounded by the
+	// close timeout too, by DefaultCloseTimeout when it is negative.
 	CloseTimeout time.Duration
 	// DisableCloseHandshake closes without the closing handshake: no close
 	// frame is sent, neither by Close, which closes the connection beneath
 	// at once, nor when the connection fails, and CloseWrite fails.
-	// CloseTimeout then still bounds the pongs that the reader writes.
+	// CloseTimeout then still bounds the pongs that the reader writes, as
+	// described there.
 	DisableCloseHandshake bool
 	// OnPing and OnPong, if set, are called by the reader with the payload
 	// of each ping and pong, which is valid only during the call; a ping
