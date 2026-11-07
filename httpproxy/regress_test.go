@@ -171,3 +171,62 @@ func TestFastAnswerToCompleteRequestKeepsConns(t *testing.T) {
 		t.Fatalf("%d target connections, want 1", n)
 	}
 }
+
+// A Handle may read and write Request.Conn from two goroutines, as a relay
+// of a CONNECT it takes over does.
+func TestHandleRelaysConnConcurrently(t *testing.T) {
+	s := &httpproxy.Server{Handle: func(_ context.Context, req *httpproxy.Request) (bool, error) {
+		if _, err := io.WriteString(req.Conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+			return true, err
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			buf := make([]byte, 64)
+			for {
+				n, err := req.Conn.Read(buf)
+				if err != nil {
+					return
+				}
+				if _, err := req.Conn.Write(buf[:n]); err != nil {
+					return
+				}
+			}
+		}()
+		for range 100 {
+			if _, err := io.WriteString(req.Conn, "."); err != nil {
+				break
+			}
+		}
+		<-done
+		return true, nil
+	}}
+	addr := serve(t, s)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("CONNECT = %v, %v", resp, err)
+	}
+	for range 100 {
+		if _, err := io.WriteString(c, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := 0
+	for got < 200 {
+		b, err := br.ReadByte()
+		if err != nil {
+			t.Fatalf("after %d bytes: %v", got, err)
+		}
+		if b == '.' || b == 'x' {
+			got++
+		}
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/djylb/netx"
@@ -111,17 +112,23 @@ type Result struct {
 type reqConn struct {
 	net.Conn
 	br   *bufio.Reader
-	used bool
+	used atomic.Bool // a Handle may read and write at once
 }
 
 func (c *reqConn) Read(b []byte) (int, error) {
-	c.used = true
+	c.markUsed()
 	return c.br.Read(b)
 }
 
 func (c *reqConn) Write(b []byte) (int, error) {
-	c.used = true
+	c.markUsed()
 	return c.Conn.Write(b)
+}
+
+func (c *reqConn) markUsed() {
+	if !c.used.Load() {
+		c.used.Store(true)
+	}
 }
 
 // NetConn returns the client's connection; see netx.InnermostConn.
@@ -629,7 +636,7 @@ func (sc *serverConn) serveRequest1(ctx context.Context, req *Request) (bool, er
 	if s.Handle != nil {
 		handled, err := s.Handle(ctx, req)
 		switch {
-		case handled || req.conn.used:
+		case handled || req.conn.used.Load():
 			return false, err
 		case err != nil:
 			return sc.refuse(req, StatusFor(err), err)
