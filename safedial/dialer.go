@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -288,12 +289,7 @@ func familyFits(network string, a netip.Addr) bool {
 }
 
 func containsAddrPort(aps []netip.AddrPort, ap netip.AddrPort) bool {
-	for _, x := range aps {
-		if x == ap {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(aps, ap)
 }
 
 func indexOf(strs []string, s string) int {

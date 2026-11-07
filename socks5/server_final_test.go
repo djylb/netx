@@ -64,8 +64,7 @@ func TestServerUDPStoppedSharedSocket(t *testing.T) {
 		}
 		_, err := socks5.ReadReply(c)
 		_ = c.Close()
-		var replyErr *socks5.ReplyError
-		if errors.As(err, &replyErr) {
+		if _, ok := errors.AsType[*socks5.ReplyError](err); ok {
 			return
 		}
 		if time.Now().After(deadline) {

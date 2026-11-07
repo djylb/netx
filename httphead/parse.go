@@ -120,7 +120,7 @@ func ParseResponse(head string, fields Header) (Response, error) {
 		return Response{}, malformed("status line " + quote(first))
 	}
 	code := 0
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		c := codeStr[i]
 		if c < '0' || c > '9' {
 			return Response{}, malformed("status line " + quote(first))
@@ -181,18 +181,18 @@ func split(head string, fields Header) (string, Header, error) {
 
 // nextLine returns the first line of s, without its ending, and the rest.
 func nextLine(s string) (string, string, error) {
-	i := strings.IndexByte(s, '\n')
-	if i < 0 {
+	before, after, ok := strings.Cut(s, "\n")
+	if !ok {
 		return "", "", malformed("unterminated line")
 	}
-	line := s[:i]
+	line := before
 	if n := len(line); n > 0 && line[n-1] == '\r' {
 		line = line[:n-1]
 	}
 	if strings.IndexByte(line, '\r') >= 0 {
 		return "", "", malformed("CR inside a line")
 	}
-	return line, s[i+1:], nil
+	return line, after, nil
 }
 
 // parseField parses a field line "name: value".

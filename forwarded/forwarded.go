@@ -21,6 +21,7 @@ package forwarded
 
 import (
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -152,8 +153,8 @@ func (r *Resolver) Resolve(peer netip.AddrPort, header map[string][]string) Clie
 // walkList walks X-Forwarded-For entries from the right, c holding the
 // trusted peer.
 func (r *Resolver) walkList(c *Client, lines []string) {
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
+	for _, line := range slices.Backward(lines) {
+
 		for end := len(line); end >= 0; {
 			comma := strings.LastIndexByte(line[:end], ',')
 			entry := trimOWS(line[comma+1 : end])
@@ -178,8 +179,8 @@ func (r *Resolver) walkList(c *Client, lines []string) {
 // walkForwarded walks Forwarded elements from the right, c holding the
 // trusted peer.
 func (r *Resolver) walkForwarded(c *Client, lines []string) {
-	for i := len(lines) - 1; i >= 0; i-- {
-		rest := lines[i]
+	for _, rest := range slices.Backward(lines) {
+
 		for more := true; more; {
 			var e element
 			var ok bool

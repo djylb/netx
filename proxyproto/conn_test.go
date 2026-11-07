@@ -144,8 +144,8 @@ func TestConnForwardsWriteCloseAndDeadline(t *testing.T) {
 // through NetConn.
 func TestConnHasNoExportedFields(t *testing.T) {
 	typ := reflect.TypeFor[Conn]()
-	for i := range typ.NumField() {
-		if f := typ.Field(i); f.IsExported() {
+	for f := range typ.Fields() {
+		if f.IsExported() {
 			t.Fatalf("Conn exports field %s", f.Name)
 		}
 	}

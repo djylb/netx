@@ -32,8 +32,7 @@ func Example() {
 	}}
 	for _, address := range []string{"127.1:6379", "[::ffff:10.0.0.1]:22", "metadata.example:80"} {
 		_, err := d.DialContext(context.Background(), "tcp", address)
-		var denied *safedial.DeniedError
-		if errors.As(err, &denied) {
+		if denied, ok := errors.AsType[*safedial.DeniedError](err); ok {
 			fmt.Println(denied.Target, "->", errors.Is(err, safedial.ErrScope))
 		}
 		fmt.Println(err)

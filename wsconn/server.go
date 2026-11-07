@@ -356,8 +356,7 @@ func AcceptRequest(ctx context.Context, conn net.Conn, br *bufio.Reader, req *ht
 func accept(conn net.Conn, br *bufio.Reader, req *httphead.Request, opts *ServerOptions) (*Conn, error) {
 	hs, err := CheckRequest(req, opts)
 	if err != nil {
-		var he *HandshakeError
-		if errors.As(err, &he) {
+		if he, ok := errors.AsType[*HandshakeError](err); ok {
 			return nil, reject(conn, he)
 		}
 		return nil, err

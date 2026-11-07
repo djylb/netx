@@ -153,8 +153,7 @@ func validityError(c *x509.Certificate, at time.Time) error {
 
 // chainError classifies an error of x509.Certificate.Verify for leaf at at.
 func chainError(leaf *x509.Certificate, at time.Time, err error) error {
-	var invalid x509.CertificateInvalidError
-	if errors.As(err, &invalid) {
+	if invalid, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
 		switch invalid.Reason {
 		case x509.Expired:
 			if invalid.Cert != nil {
@@ -171,8 +170,7 @@ func chainError(leaf *x509.Certificate, at time.Time, err error) error {
 			// An invalid chain, reported below.
 		}
 	}
-	var unknown x509.UnknownAuthorityError
-	if errors.As(err, &unknown) {
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
 		if IsSelfSigned(leaf) {
 			return fmt.Errorf("%w: %w: %w", ErrSelfSigned, ErrUnknownAuthority, err)
 		}

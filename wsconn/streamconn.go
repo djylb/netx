@@ -57,8 +57,7 @@ func (s *StreamConn) Read(p []byte) (int, error) {
 
 // streamErr returns the error that a StreamConn's Read returns for err.
 func streamErr(err error) error {
-	var ce *CloseError
-	if errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CloseError](err); ok {
 		switch ce.Code {
 		case StatusNormalClosure, StatusGoingAway, StatusNoStatusReceived:
 			return io.EOF

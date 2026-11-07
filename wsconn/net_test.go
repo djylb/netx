@@ -484,9 +484,7 @@ func TestConcurrentWritersAndPings(t *testing.T) {
 	const writers, each = 8, 200
 	var wg sync.WaitGroup
 	for i := range writers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			msg := bytes.Repeat([]byte{byte(i)}, 1000+i)
 			for range each {
 				if i%2 == 0 {
@@ -504,7 +502,7 @@ func TestConcurrentWritersAndPings(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	pingDone := make(chan struct{})
 	go func() {

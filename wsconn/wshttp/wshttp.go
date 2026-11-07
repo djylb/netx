@@ -71,8 +71,7 @@ func Upgrade(w http.ResponseWriter, r *http.Request, opts *wsconn.ServerOptions)
 			return c, nil
 		}
 	}
-	var he *wsconn.HandshakeError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*wsconn.HandshakeError](err); ok {
 		if he.Status == http.StatusUpgradeRequired {
 			if !extendedConnect(r) {
 				w.Header().Set("Upgrade", "websocket")

@@ -55,8 +55,7 @@ func ParseRules(text string, vars Vars) ([]Rule, error) {
 }
 
 func lineError(n int, err error) error {
-	var re *rewriteError
-	if errors.As(err, &re) {
+	if re, ok := errors.AsType[*rewriteError](err); ok {
 		return &rewriteError{re.kind, "line " + strconv.Itoa(n) + ": " + re.msg}
 	}
 	return err
