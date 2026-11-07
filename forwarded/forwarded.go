@@ -154,7 +154,6 @@ func (r *Resolver) Resolve(peer netip.AddrPort, header map[string][]string) Clie
 // trusted peer.
 func (r *Resolver) walkList(c *Client, lines []string) {
 	for _, line := range slices.Backward(lines) {
-
 		for end := len(line); end >= 0; {
 			comma := strings.LastIndexByte(line[:end], ',')
 			entry := trimOWS(line[comma+1 : end])
@@ -180,7 +179,6 @@ func (r *Resolver) walkList(c *Client, lines []string) {
 // trusted peer.
 func (r *Resolver) walkForwarded(c *Client, lines []string) {
 	for _, rest := range slices.Backward(lines) {
-
 		for more := true; more; {
 			var e element
 			var ok bool
