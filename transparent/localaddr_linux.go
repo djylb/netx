@@ -192,6 +192,8 @@ func routeLookupError(errno syscall.Errno) error {
 	switch errno {
 	case syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.EACCES:
 		return nil
+	default:
+		// Any other errno is an error of the lookup.
 	}
 	return fmt.Errorf("netlink route lookup: %w", errno)
 }

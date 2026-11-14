@@ -22,53 +22,46 @@ import (
 // Conn is a WebSocket connection after the opening handshake. See the
 // package documentation for the rules of concurrent use.
 type Conn struct {
-	conn   net.Conn
-	br     *bufio.Reader
-	client bool
-	// writev is set for connections whose net.Buffers writes are one
-	// writev(2), so that a server writes a header and a payload at once
-	// without copying the payload.
-	writev bool
-
+	// The fields are ordered for the memory layout, as the kind of field
+	// and its size allow: those with pointers first, then the 8-byte ones,
+	// the 4-byte ones and last the bytes. Comments name what belongs
+	// together.
+	conn        net.Conn
+	br          *bufio.Reader
 	subprotocol string
 	request     *httphead.Request
 	response    *httphead.Response
-
-	readLimit    int64
-	closeTimeout time.Duration
-	skipClose    bool // Options.DisableCloseHandshake
-	onPing       func(*Conn, []byte)
-	onPong       func(*Conn, []byte)
-	deflate      *deflateConfig // nil without permessage-deflate
+	onPing      func(*Conn, []byte)
+	onPong      func(*Conn, []byte)
+	deflate     *deflateConfig // nil without permessage-deflate
+	done        chan struct{}  // closed with the connection beneath
+	closeErr    error
 
 	// The read side, used by the one reader and by Close, which may drain
 	// it: rsem is held through each read call.
 	rsem    chan struct{}
 	rerr    error // sticky
-	rmsg    byte  // opcode of the message being read; 0 between messages
-	rfin    bool  // the current frame is its message's last
-	rcomp   bool  // the message is compressed
-	rmasked bool
-	rkey    uint32
+	rawErr  error // the last error that raw returned to the inflater
+	inflate io.ReadCloser
+	raw     rawReader
+	rutf    utf8State
 	rpos    int
 	rremain int64 // payload bytes left in the current frame
 	rlen    int64 // bytes of the message delivered
 	rlimit  int64 // bound of the current message; negative for none
 	rtail   int   // bytes of deflateTail handed to the inflater
 	rseq    uint64
-	rutf    utf8State
-	rawErr  error // the last error that raw returned to the inflater
-	inflate io.ReadCloser
-	raw     rawReader
+	rkey    uint32
+	rmsg    byte // opcode of the message being read; 0 between messages
+	rfin    bool // the current frame is its message's last
+	rcomp   bool // the message is compressed
+	rmasked bool
 	ctrl    [maxControlPayload]byte
 
-	// msgMu is held from the first to the last frame of a data message,
-	// frameMu through the writing of one frame.
-	msgMu   sync.Mutex
-	frameMu sync.Mutex
+	// The write side; msgMu, below, is held from the first to the last frame
+	// of a data message, frameMu through the writing of one frame, and whb
+	// and wctrl, below, are the frames' headers and control frames.
 	werr    error // sticky; under frameMu
-	whb     [maxHeaderLen]byte
-	wctrl   [maxHeaderLen + maxControlPayload]byte
 	wbufArr [2][]byte
 	wbufs   net.Buffers
 
@@ -78,25 +71,39 @@ type Conn struct {
 	zbuf  []byte
 	bsegs net.Buffers
 
-	// wdMu guards wd, the write deadline set through the Conn or by
-	// Close, and pongBound, the bound of a pong that the reader writes.
-	wdMu      sync.Mutex
+	// wd and pongBound are under wdMu, which guards the write deadline set
+	// through the Conn or by Close and the bound of a pong that the reader
+	// writes; rd is the read deadline set through the Conn.
 	wd        time.Time
-	rd        time.Time // the read deadline set through the Conn
+	rd        time.Time
 	pongBound time.Time
 
+	readLimit    int64
+	closeTimeout time.Duration
+	pongLen      int          // under pongMu
+	closeBy      atomic.Int64 // Close's deadline, in Unix nanoseconds
+
+	// msgMu and frameMu are described above; wdMu guards wd and pongBound,
+	// and pongMu pongLen and pongData.
+	msgMu       sync.Mutex
+	frameMu     sync.Mutex
+	wdMu        sync.Mutex
+	pongMu      sync.Mutex
+	closeOnce   sync.Once
 	closeSent   atomic.Bool // set under frameMu, or when Close gave up on it
 	pongPending atomic.Bool
-	pongMu      sync.Mutex
-	pongLen     int
-	pongData    [maxControlPayload]byte
+	closing     atomic.Bool // Close was called
+	closed      atomic.Bool
 
-	closing   atomic.Bool  // Close was called
-	closeBy   atomic.Int64 // Close's deadline, in Unix nanoseconds
-	closed    atomic.Bool
-	closeOnce sync.Once
-	closeErr  error
-	done      chan struct{} // closed with the connection beneath
+	client bool
+	// writev is set for connections whose net.Buffers writes are one
+	// writev(2), so that a server writes a header and a payload at once
+	// without copying the payload.
+	writev    bool
+	skipClose bool // Options.DisableCloseHandshake
+	whb       [maxHeaderLen]byte
+	wctrl     [maxHeaderLen + maxControlPayload]byte
+	pongData  [maxControlPayload]byte // under pongMu
 }
 
 // NewConn returns a connection over conn, whose opening handshake is done,
@@ -866,7 +873,7 @@ func (c *Conn) writeDone(wrote bool, err error) error {
 // choosing the bytes on the wire (RFC 6455, section 10.3); the runtime's
 // generator, ChaCha8 seeded from the system, is unpredictable enough for
 // that, and crypto/rand would add its FIPS machinery to a program.
-func maskKey() uint32 { return rand.Uint32() }
+func maskKey() uint32 { return rand.Uint32() } //nolint:gosec // RFC 6455 asks for an unpredictable mask, not a secret one; see above
 
 // writeControlLocked writes a control frame in one write.
 func (c *Conn) writeControlLocked(op byte, data []byte) error {

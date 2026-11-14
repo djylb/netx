@@ -205,6 +205,8 @@ func refScope(a netip.Addr) Scope {
 				c[i] ^= 0xff
 			}
 			return global(v4(4), netip.AddrFrom4(c))
+		default:
+			// An entry of any other scope is that scope.
 		}
 		return e.scope
 	}

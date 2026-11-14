@@ -35,7 +35,7 @@ const (
 // authentication: SOCKS4 has none.
 func ReadRequest4(r io.Reader) (cmd Command, dst netx.Addr, userID string, err error) {
 	var hdr [8]byte // version, command, port, IPv4 address
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
 		return 0, netx.Addr{}, "", err
 	}
 	if hdr[0] != Version4 {

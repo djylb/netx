@@ -29,7 +29,7 @@ func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayF
 	e := newRelayEnds(dst, src)
 	s, d := &e.src, &e.dst
 	if !f.active() {
-		return relayCopy(d, s)
+		return relayCopy(d, s) //nolint:contextcheck // a relay without a flow is ended by deadlines, as ctx does
 	}
 	var prefix int64
 	if f.First != nil && !s.readsDatagrams() {

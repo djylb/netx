@@ -188,7 +188,7 @@ func TestServeDoesNotReportHooksEndedByClose(t *testing.T) {
 			}
 			entered <- struct{}{}
 			<-ctx.Done()
-			return fmt.Errorf("allow: %v", ctx.Err()) // not wrapped
+			return fmt.Errorf("allow: %v", ctx.Err()) //nolint:errorlint // not wrapped, on purpose
 		},
 		Dial: func(ctx context.Context, req *socks5.Request) (net.Conn, error) {
 			entered <- struct{}{}

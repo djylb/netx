@@ -125,7 +125,8 @@ func (f TLVs) Append(t TLVType, v []byte) (TLVs, error) {
 	if len(v) > 0xffff {
 		return f, fmt.Errorf("proxyproto: TLV 0x%02x value of %d bytes", t, len(v))
 	}
-	out := append(f, byte(t))
+	out := f
+	out = append(out, byte(t))
 	out = binary.BigEndian.AppendUint16(out, uint16(len(v)))
 	return append(out, v...), nil
 }
@@ -343,7 +344,7 @@ func (h *Header) addrs() (headerAddrs, error) {
 		return headerAddrs{}, errNilAddr
 	case h.Version == V1:
 		return headerAddrs{}, errors.New("proxyproto: version 1 cannot carry Unix addresses")
-	case (s.Net == "unixgram") != (d.Net == "unixgram"):
+	case (s.Net == netUnixgram) != (d.Net == "unixgram"):
 		return headerAddrs{}, fmt.Errorf("proxyproto: Unix addresses of networks %q and %q", s.Net, d.Net)
 	case len(s.Name) > unixPathLen || len(d.Name) > unixPathLen:
 		return headerAddrs{}, fmt.Errorf("proxyproto: Unix address name longer than %d bytes", unixPathLen)
@@ -392,7 +393,7 @@ func appendV2(b []byte, h *Header, a headerAddrs) ([]byte, error) {
 		}
 	case addrUnix:
 		famProto, size = 0x31, 2*unixPathLen
-		if a.unixSrc.Net == "unixgram" {
+		if a.unixSrc.Net == netUnixgram {
 			famProto = 0x32
 		}
 	case addrNone:
@@ -443,3 +444,6 @@ func appendUnixPath(b []byte, name string) []byte {
 	var zero [unixPathLen]byte
 	return append(b, zero[len(name):]...)
 }
+
+// netUnixgram is the network of a datagram Unix socket address.
+const netUnixgram = "unixgram"

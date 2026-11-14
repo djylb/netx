@@ -317,7 +317,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	if addr == "" {
 		addr = ":1080"
 	}
-	l, err := net.Listen("tcp", addr)
+	l, err := new(net.ListenConfig).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -523,7 +523,7 @@ func (s *Server) handshake5(ctx context.Context, c net.Conn, first []byte) (*Req
 		_ = WriteMethod(c, MethodNoAcceptable)
 		return nil, ErrNoAcceptableMethod
 	}
-	if err := WriteMethod(c, auth.Method()); err != nil {
+	if err = WriteMethod(c, auth.Method()); err != nil {
 		return nil, err
 	}
 	user, err := auth.Authenticate(ctx, c)
@@ -617,7 +617,7 @@ func (s *Server) connect(ctx context.Context, req *Request) error {
 	if err != nil {
 		return refuse(req, ReplyFor(err), err)
 	}
-	if err := req.Reply(ReplySucceeded, netx.AddrFromNetAddr(target.LocalAddr())); err != nil {
+	if err = req.Reply(ReplySucceeded, netx.AddrFromNetAddr(target.LocalAddr())); err != nil {
 		_ = target.Close()
 		return err
 	}

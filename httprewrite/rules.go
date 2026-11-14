@@ -128,7 +128,7 @@ func validFieldName(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c < 0x80 && strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0 {
 			continue
@@ -184,7 +184,8 @@ func ApplyRedirects(h http.Header, redirects []Redirect, c *Context) error {
 					continue
 				}
 				bp := getBuf()
-				b := append((*bp)[:0], line[:start]...)
+				b := (*bp)[:0]
+				b = append(b, line[:start]...)
 				b, err := rd.To.Append(b, c)
 				if err == nil {
 					b = append(append(b, u[n:]...), line[end:]...)

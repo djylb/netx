@@ -240,7 +240,7 @@ func validName(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 			return false
 		}
@@ -323,7 +323,7 @@ func (t *Template) invalid() error {
 
 // validValue reports whether s has no control character other than tab.
 func validValue[T string | []byte](s T) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; c < ' ' && c != '\t' || c == 0x7f {
 			return false
 		}
@@ -336,7 +336,7 @@ func validValue[T string | []byte](s T) bool {
 func quote(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		switch c := s[i]; {
 		case c == '"' || c == '\\':
 			b.WriteByte('\\')

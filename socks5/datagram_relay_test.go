@@ -700,6 +700,7 @@ func BenchmarkDatagramRelay(b *testing.B) {
 // benchmarkDatagramRelay measures round trips from a FramedConn over TCP
 // through the relay to a UDP echo and back.
 func benchmarkDatagramRelay(b *testing.B, size int, name bool) {
+	b.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Skip(err)

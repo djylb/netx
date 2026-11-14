@@ -44,7 +44,7 @@ func peerConn(l *PacketListener, from *net.UDPConn) *packetConn {
 	return c
 }
 
-// send writes msg from from until the read loop of l has queued it on the
+// send writes msg through from until the read loop of l has queued it on the
 // peer's connection, since a loopback datagram can be lost on a busy host.
 func send(t *testing.T, l *PacketListener, from *net.UDPConn, msg string) {
 	t.Helper()
@@ -94,7 +94,7 @@ func newCountingUDPListener(t *testing.T, opts ...PacketListenerOption) (*Packet
 	return l, cpc
 }
 
-// sendCounted writes msg from from until the read loop has read one more
+// sendCounted writes msg through from until the read loop has read one more
 // datagram, which it has then delivered or dropped before reading the next.
 func sendCounted(t *testing.T, pc *countingPacketConn, from *net.UDPConn, msg string) {
 	t.Helper()

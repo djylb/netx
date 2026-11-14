@@ -68,7 +68,7 @@ func (g *guard) route(p []byte, name string, port uint16) (ap netip.AddrPort, he
 		return netip.AddrPort{}, false, err
 	}
 	t.Network, t.Port = packetNetwork, port
-	if err := g.d.check(t); err != nil {
+	if err = g.d.check(t); err != nil {
 		return netip.AddrPort{}, false, err
 	}
 	if t.Addr.IsValid() { // a legacy IPv4 form
@@ -124,7 +124,7 @@ func (g *guard) lookup(ctx context.Context, name string) ([]netip.Addr, error) {
 		return 1
 	})
 	if len(addrs) == 0 {
-		return nil, &net.DNSError{Err: "no suitable address", Name: name, IsNotFound: true}
+		return nil, &net.DNSError{Err: noSuitableAddress, Name: name, IsNotFound: true}
 	}
 	return addrs, nil
 }

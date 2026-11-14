@@ -101,7 +101,7 @@ func equalLower(s, lower string) bool {
 	if len(s) != len(lower) {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			c += 'a' - 'A'
@@ -305,7 +305,7 @@ func VerifyDomain(chain []*x509.Certificate, domain string, opts VerifyOptions) 
 	if err != nil {
 		return DomainCoverage{}, err
 	}
-	if _, err := VerifyChain(chain, opts); err != nil {
+	if _, err = VerifyChain(chain, opts); err != nil {
 		return DomainCoverage{}, err
 	}
 	c, err := CertNames(chain[0]).Under(d)

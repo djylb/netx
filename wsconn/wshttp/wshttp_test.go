@@ -144,7 +144,7 @@ func TestCheckThenAccept(t *testing.T) {
 	}
 	// A plain request is refused by Check with the status to answer with.
 	rec := httptest.NewRecorder()
-	if _, err := wshttp.Check(rec, httptest.NewRequest("GET", "/", nil), nil); err == nil || rec.Body.Len() != 0 {
+	if _, err := wshttp.Check(rec, httptest.NewRequest(http.MethodGet, "/", nil), nil); err == nil || rec.Body.Len() != 0 {
 		t.Fatalf("plain request: %v, wrote %q", err, rec.Body.String())
 	}
 }
@@ -152,7 +152,7 @@ func TestCheckThenAccept(t *testing.T) {
 // Accept on a ResponseWriter that cannot be hijacked writes nothing and
 // returns a 500 handshake error.
 func TestAcceptWithoutHijacker(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")
 	r.Header.Set("Sec-WebSocket-Version", "13")
@@ -170,10 +170,10 @@ func TestAcceptWithoutHijacker(t *testing.T) {
 }
 
 func TestRequest(t *testing.T) {
-	r := httptest.NewRequest("GET", "/a?b=c", nil)
+	r := httptest.NewRequest(http.MethodGet, "/a?b=c", nil)
 	r.Header.Set("X-A", "1")
 	req := wshttp.Request(r)
-	if req.Method != "GET" || req.Target != "/a?b=c" || req.Minor != 1 || req.Header[0] != (httphead.Field{Name: "Host", Value: "example.com"}) || req.Header.Get("x-a") != "1" {
+	if req.Method != http.MethodGet || req.Target != "/a?b=c" || req.Minor != 1 || req.Header[0] != (httphead.Field{Name: "Host", Value: "example.com"}) || req.Header.Get("x-a") != "1" {
 		t.Fatalf("%+v", req)
 	}
 }

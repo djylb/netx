@@ -69,6 +69,7 @@ func BenchmarkConnectSetup(b *testing.B) {
 }
 
 func benchConnect(b *testing.B, proxy, target string) {
+	b.Helper()
 	req := []byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n")
 	buf := make([]byte, 64)
 	b.ReportAllocs()
@@ -129,6 +130,7 @@ func BenchmarkForwardBody(b *testing.B) {
 }
 
 func benchForward(b *testing.B, proxy, origin string, size int) {
+	b.Helper()
 	c, err := net.Dial("tcp", proxy)
 	if err != nil {
 		b.Fatal(err)

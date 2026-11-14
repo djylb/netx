@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -522,7 +523,7 @@ func TestCertStoreConcurrentChanges(t *testing.T) {
 		})
 	}
 	for i := range 200 {
-		id := fmt.Sprint(i % len(certs))
+		id := strconv.Itoa(i % len(certs))
 		if i%3 == 0 {
 			s.Remove(id)
 		} else {

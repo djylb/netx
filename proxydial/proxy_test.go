@@ -111,7 +111,7 @@ func TestHTTPConnectRejected(t *testing.T) {
 		_, _ = io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
 	})
 	_, err := mustDialer(t, "http://"+addr).DialContext(context.Background(), "tcp", "example.com:80")
-	if ce, ok := errors.AsType[*ConnectError](err); !ok || ce.StatusCode != 407 {
+	if ce, ok := errors.AsType[*ConnectError](err); !ok || ce.StatusCode != http.StatusProxyAuthRequired {
 		t.Fatalf("DialContext() error = %v, want a 407 ConnectError", err)
 	}
 }
@@ -214,6 +214,7 @@ func TestHTTPSProxyUsesTLS(t *testing.T) {
 // socksServer answers one SOCKS5 handshake. It accepts credentials alice/pw
 // when user/password authentication is offered.
 func socksServer(t *testing.T, reply socks5.Reply, requests chan<- netx.Addr) string {
+	t.Helper()
 	return serveOnce(t, func(c net.Conn) {
 		methods, err := socks5.ReadMethods(c)
 		if err != nil {

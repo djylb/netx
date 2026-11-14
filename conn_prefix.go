@@ -114,12 +114,24 @@ func (c *PrefixConn) inner() net.Conn {
 	return orClosed(c.conn)
 }
 
-func (c *PrefixConn) Write(b []byte) (int, error)        { return c.inner().Write(b) }
-func (c *PrefixConn) Close() error                       { return c.inner().Close() }
-func (c *PrefixConn) LocalAddr() net.Addr                { return c.inner().LocalAddr() }
-func (c *PrefixConn) RemoteAddr() net.Addr               { return c.inner().RemoteAddr() }
-func (c *PrefixConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
-func (c *PrefixConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *PrefixConn) Write(b []byte) (int, error) { return c.inner().Write(b) }
+
+// Close implements net.Conn.
+func (c *PrefixConn) Close() error { return c.inner().Close() }
+
+// LocalAddr implements net.Conn.
+func (c *PrefixConn) LocalAddr() net.Addr { return c.inner().LocalAddr() }
+
+// RemoteAddr implements net.Conn.
+func (c *PrefixConn) RemoteAddr() net.Addr { return c.inner().RemoteAddr() }
+
+// SetDeadline implements net.Conn.
+func (c *PrefixConn) SetDeadline(t time.Time) error { return c.inner().SetDeadline(t) }
+
+// SetReadDeadline implements net.Conn.
+func (c *PrefixConn) SetReadDeadline(t time.Time) error { return c.inner().SetReadDeadline(t) }
+
+// SetWriteDeadline implements net.Conn.
 func (c *PrefixConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
 // CloseWrite shuts down the writing side of the wrapped connection; see

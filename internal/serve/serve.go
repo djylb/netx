@@ -18,9 +18,9 @@ type Tracker struct {
 	draining  bool // Shutdown was called
 	closed    bool // Close was called
 	mu        sync.Mutex
-	ctx       context.Context // canceled by Close
+	ctx       context.Context //nolint:containedctx // owned by the Tracker, canceled by Close
 	cancel    context.CancelFunc
-	drain     context.Context // canceled by Shutdown and Close
+	drain     context.Context //nolint:containedctx // owned by the Tracker, canceled by Shutdown and Close
 	stopDrain context.CancelFunc
 	// Tracked by pointer, as in net/http, since the dynamic types of a
 	// net.Listener or a net.Conn need not be comparable.

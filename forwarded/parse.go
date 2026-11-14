@@ -68,7 +68,7 @@ func parsePort(s string, hasPort bool) (uint16, bool) {
 		return 0, false
 	}
 	n := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c < '0' || c > '9' {
 			return 0, false
@@ -87,7 +87,7 @@ func obfChars(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if !isAlnum(c) && c != '.' && c != '_' && c != '-' {
 			return false
@@ -157,15 +157,17 @@ func lastElement(s string) (e element, rest string, more, ok bool) {
 				return fail() // the closing quote is escaped
 			}
 			j := i - 2
+		scan:
 			for ; j >= 0; j-- {
-				if s[j] == '"' {
+				switch {
+				case s[j] == '"':
 					if backslashes(s[:j])%2 == 0 {
-						break
+						break scan
 					}
 					escaped = true
-				} else if s[j] == '\\' {
+				case s[j] == '\\':
 					escaped = true
-				} else if s[j] < ' ' && s[j] != '\t' || s[j] == 0x7f {
+				case s[j] < ' ' && s[j] != '\t' || s[j] == 0x7f:
 					return fail()
 				}
 			}
@@ -291,7 +293,7 @@ func validHost(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if !isAlnum(c) && strings.IndexByte("-._~!$&'()*+,;=%:[]", c) < 0 {
 			return false

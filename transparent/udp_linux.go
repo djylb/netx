@@ -78,7 +78,7 @@ func sameAddrPort(a, b netip.AddrPort) bool {
 	return a.Port() == b.Port() && a.Addr().WithZone("") == b.Addr().WithZone("")
 }
 
-// writeFrom sends b to to from c with from as its source address, which an
+// writeFrom sends b to the address to from c with from as its source address, which an
 // IP_PKTINFO or IPV6_PKTINFO control message sets, so that a socket on a
 // wildcard address answers from the address it was sent to rather than one
 // the kernel picks for the route.

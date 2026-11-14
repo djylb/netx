@@ -2,15 +2,18 @@
 
 package netx
 
-import "syscall"
+import (
+	"slices"
+	"syscall"
+)
 
 // platformErrnos are the errnos of each errnoID; see errors.go. Plan 9
 // reports network failures as error strings and package syscall has no
 // errno for most of them, so those classifiers rely on their text fallback.
-// errnoValue is the type of the errors in platformErrnos.
-type errnoValue = error
+// errnoError is the type of the errors in platformErrnos.
+type errnoError = error
 
-var platformErrnos = [numErrnoIDs][]errnoValue{
+var platformErrnos = [numErrnoIDs][]errnoError{
 	eAccess:   {syscall.EACCES},
 	ePerm:     {syscall.EPERM},
 	eTimedOut: {syscall.ETIMEDOUT},
@@ -25,16 +28,13 @@ func errnoOf(error) (int, string) { return 0, "" }
 //
 //goland:noinspection GoTypeAssertionOnErrors
 func errnoValueSet(err error) (errnoSet, bool) {
-	if _, ok := err.(syscall.ErrorString); !ok {
+	if _, ok := err.(syscall.ErrorString); !ok { //nolint:errorlint // one link of the chain, as for errno values
 		return 0, false
 	}
 	var set errnoSet
 	for id, targets := range platformErrnos {
-		for _, target := range targets {
-			if target == err {
-				set |= 1 << id
-				break
-			}
+		if slices.Contains(targets, err) {
+			set |= 1 << id
 		}
 	}
 	return set, true

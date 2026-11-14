@@ -84,7 +84,7 @@ func (stop relayCloser) Close() error {
 	return nil
 }
 
-func (stop relayCloser) closeMember(cause error, _ bool) error {
+func (stop relayCloser) closeMember(cause error, _ bool) error { //nolint:unparam // implements the member interface of ConnGroup
 	if cause == nil {
 		stop(ErrRelayGroupClosed)
 	} else {
@@ -281,10 +281,10 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int6
 		return 0, err
 	}
 	interrupt := afterFuncSync(ctx, func() {
-		if r, ok := src.(interface{ SetReadDeadline(time.Time) error }); ok {
+		if r, ok := src.(interface{ SetReadDeadline(t time.Time) error }); ok {
 			_ = r.SetReadDeadline(dgram.Past)
 		}
-		if w, ok := dst.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if w, ok := dst.(interface{ SetWriteDeadline(t time.Time) error }); ok {
 			_ = w.SetWriteDeadline(dgram.Past)
 		}
 	})

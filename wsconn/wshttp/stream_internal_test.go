@@ -35,7 +35,7 @@ func TestAcceptStreamCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for range 20000 {
-		r, _ := http.NewRequestWithContext(ctx, "CONNECT", "http://x/", io.NopCloser(strings.NewReader("")))
+		r, _ := http.NewRequestWithContext(ctx, http.MethodConnect, "http://x/", io.NopCloser(strings.NewReader("")))
 		r.ProtoMajor = 2
 		c, err := acceptStream(&fakeRW{h: http.Header{}}, r, hs)
 		if err != nil {

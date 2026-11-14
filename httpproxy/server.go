@@ -236,9 +236,6 @@ type Server struct {
 	// other parts of the request, such as a field, must have a ReuseKey
 	// that holds them.
 	ReuseKey func(req *Request) (key string, ok bool)
-	// DisableKeepAlives keeps no connection to a target: each serves one
-	// request, as with http.Transport.DisableKeepAlives.
-	DisableKeepAlives bool
 	// MaxIdleConnsPerKey bounds the kept connections of one key; 0 means
 	// DefaultMaxIdleConnsPerKey (16), as for
 	// http.Transport.MaxIdleConnsPerHost. A negative bound is an error;
@@ -298,7 +295,11 @@ type Server struct {
 
 	life     serve.Tracker
 	poolOnce sync.Once
-	pool     pool
+	// DisableKeepAlives keeps no connection to a target: each serves one
+	// request, as with http.Transport.DisableKeepAlives. It is declared
+	// here, in the padding after poolOnce, to keep the Server smaller.
+	DisableKeepAlives bool
+	pool              pool
 }
 
 // ListenAndServe listens on the TCP address addr, ":8080" when empty, and
@@ -308,7 +309,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	l, err := net.Listen("tcp", addr)
+	l, err := new(net.ListenConfig).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -489,7 +490,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 		}
 	}()
 	for first := true; ; first = false {
-		req, err := sc.readRequest(first)
+		req, err := sc.readRequest(first) //nolint:contextcheck // reads are ended by the drain deadline, which the connection sets from the tracker
 		if err != nil {
 			if errors.Is(err, errIdleEnd) || ctx.Err() != nil {
 				return nil
@@ -652,7 +653,7 @@ func (sc *serverConn) serveRequest1(ctx context.Context, req *Request) (bool, er
 			return keep, err
 		}
 		return sc.forward(ctx, req)
-	case req.tgt.Form == httphead.AsteriskForm && req.Method == "OPTIONS":
+	case req.tgt.Form == httphead.AsteriskForm && req.Method == methodOptions:
 		// About the proxy itself (RFC 9110, section 9.3.7).
 		keep := req.body == httphead.NoBody && req.keepAlive
 		sc.reply(req, 200, nil, !keep)
@@ -665,13 +666,13 @@ func (sc *serverConn) serveRequest1(ctx context.Context, req *Request) (bool, er
 // itself, as its last recipient, and counts it down otherwise (RFC 9110,
 // section 7.6.2). It reports whether it answered.
 func (sc *serverConn) maxForwards(req *Request) (bool, bool, error) {
-	if req.Method != "TRACE" && req.Method != "OPTIONS" || req.Header.Count("Max-Forwards") != 1 {
+	if req.Method != "TRACE" && req.Method != methodOptions || req.Header.Count("Max-Forwards") != 1 {
 		return false, false, nil
 	}
 	v := req.Header.Get("Max-Forwards")
 	n, err := strconv.ParseUint(v, 10, 31)
 	if err != nil {
-		return false, false, nil // forwarded as it is
+		return false, false, nil //nolint:nilerr // a Max-Forwards that does not parse is forwarded as it is
 	}
 	if n > 0 {
 		h := append(httphead.Header(nil), req.Header...)
@@ -680,7 +681,7 @@ func (sc *serverConn) maxForwards(req *Request) (bool, bool, error) {
 		return false, false, nil
 	}
 	keep := req.body == httphead.NoBody && req.keepAlive
-	if req.Method == "OPTIONS" {
+	if req.Method == methodOptions {
 		sc.reply(req, 200, nil, !keep)
 		return true, keep, nil
 	}
@@ -857,7 +858,7 @@ func (sc *serverConn) connect(ctx context.Context, req *Request) error {
 	// Ending ctx closes the client connection, which ends the reply, and
 	// the relay, which closes both ends.
 	defer func() { _ = target.Close() }()
-	if _, err := sc.c.Write(connectReply); err != nil {
+	if _, err = sc.c.Write(connectReply); err != nil {
 		return err
 	}
 	req.result.Status = 200

@@ -65,6 +65,7 @@ func (t *Table[K, S]) Room() bool {
 // Result is the outcome of Add.
 type Result uint8
 
+// The results of Add.
 const (
 	Added  Result = iota // the connection was added
 	Exists               // a connection under the key was there already

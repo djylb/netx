@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,7 +166,7 @@ func response(r *http.Response) *httphead.Response {
 		Proto:  r.Proto,
 		Minor:  r.ProtoMinor,
 		Code:   r.StatusCode,
-		Reason: strings.TrimSpace(strings.TrimPrefix(r.Status, fmt.Sprint(r.StatusCode))),
+		Reason: strings.TrimSpace(strings.TrimPrefix(r.Status, strconv.Itoa(r.StatusCode))),
 		Header: h,
 	}
 }

@@ -99,7 +99,7 @@ func appendNode(dst []byte, ap netip.AddrPort) []byte {
 // other than tab, which a field value cannot carry.
 func appendValue(dst []byte, v string) []byte {
 	token := true
-	for i := 0; i < len(v); i++ {
+	for i := range len(v) {
 		if !isTchar(v[i]) {
 			token = false
 			break
@@ -109,7 +109,7 @@ func appendValue(dst []byte, v string) []byte {
 		return append(dst, v...)
 	}
 	dst = append(dst, '"')
-	for i := 0; i < len(v); i++ {
+	for i := range len(v) {
 		switch c := v[i]; {
 		case c == '"' || c == '\\':
 			dst = append(dst, '\\', c)

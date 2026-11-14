@@ -342,12 +342,12 @@ func TestChanListenerTryDeliver(t *testing.T) {
 	}
 }
 
-// tempErr is an Accept error that reports itself temporary.
-type tempErr struct{}
+// tempError is an Accept error that reports itself temporary.
+type tempError struct{}
 
-func (tempErr) Error() string   { return "temporary" }
-func (tempErr) Timeout() bool   { return false }
-func (tempErr) Temporary() bool { return true }
+func (tempError) Error() string   { return "temporary" }
+func (tempError) Timeout() bool   { return false }
+func (tempError) Temporary() bool { return true }
 
 // failingListener fails its first Accepts with errs and then returns conn.
 type failingListener struct {
@@ -368,21 +368,21 @@ func (l *failingListener) Accept() (net.Conn, error) {
 func TestAcceptRetries(t *testing.T) {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close(); _ = b.Close() }()
-	l := &failingListener{errs: []error{tempErr{}, &net.OpError{Op: "accept", Err: tempErr{}}, tempErr{}}, conn: a}
+	l := &failingListener{errs: []error{tempError{}, &net.OpError{Op: "accept", Err: tempError{}}, tempError{}}, conn: a}
 	if c, err := Accept(context.Background(), l); c != a || err != nil {
 		t.Fatalf("Accept() = %v, %v, want the connection after the temporary errors", c, err)
 	}
-	l = &failingListener{errs: []error{tempErr{}, net.ErrClosed}, conn: a}
+	l = &failingListener{errs: []error{tempError{}, net.ErrClosed}, conn: a}
 	if _, err := Accept(context.Background(), l); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Accept() = %v, want the error of a closed listener", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	l = &failingListener{errs: []error{tempErr{}, tempErr{}}, conn: a}
+	l = &failingListener{errs: []error{tempError{}, tempError{}}, conn: a}
 	if _, err := Accept(ctx, l); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Accept() = %v, want ctx's error while it waits to retry", err)
 	}
-	if IsAcceptRetryable(nil) || IsAcceptRetryable(net.ErrClosed) || IsAcceptRetryable(errors.New("x")) || !IsAcceptRetryable(tempErr{}) {
+	if IsAcceptRetryable(nil) || IsAcceptRetryable(net.ErrClosed) || IsAcceptRetryable(errors.New("x")) || !IsAcceptRetryable(tempError{}) {
 		t.Fatal("IsAcceptRetryable misclassifies")
 	}
 }

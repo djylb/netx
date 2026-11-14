@@ -32,17 +32,26 @@ func (c *AddrOverrideConn) inner() net.Conn {
 	return orClosed(c.conn)
 }
 
-func (c *AddrOverrideConn) Read(b []byte) (int, error)         { return c.inner().Read(b) }
-func (c *AddrOverrideConn) Write(b []byte) (int, error)        { return c.inner().Write(b) }
-func (c *AddrOverrideConn) Close() error                       { return c.inner().Close() }
-func (c *AddrOverrideConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
-func (c *AddrOverrideConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *AddrOverrideConn) Read(b []byte) (int, error)  { return c.inner().Read(b) }
+func (c *AddrOverrideConn) Write(b []byte) (int, error) { return c.inner().Write(b) }
+
+// Close implements net.Conn.
+func (c *AddrOverrideConn) Close() error { return c.inner().Close() }
+
+// SetDeadline implements net.Conn.
+func (c *AddrOverrideConn) SetDeadline(t time.Time) error { return c.inner().SetDeadline(t) }
+
+// SetReadDeadline implements net.Conn.
+func (c *AddrOverrideConn) SetReadDeadline(t time.Time) error { return c.inner().SetReadDeadline(t) }
+
+// SetWriteDeadline implements net.Conn.
 func (c *AddrOverrideConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
 // CloseWrite shuts down the writing side of the wrapped connection; see
 // TimeoutConn.CloseWrite.
 func (c *AddrOverrideConn) CloseWrite() error { return closeWrite(c.inner()) }
 
+// LocalAddr implements net.Conn.
 func (c *AddrOverrideConn) LocalAddr() net.Addr {
 	if c != nil && c.lAddr != nil {
 		return c.lAddr
@@ -50,6 +59,7 @@ func (c *AddrOverrideConn) LocalAddr() net.Addr {
 	return c.inner().LocalAddr()
 }
 
+// RemoteAddr implements net.Conn.
 func (c *AddrOverrideConn) RemoteAddr() net.Addr {
 	if c != nil && c.rAddr != nil {
 		return c.rAddr

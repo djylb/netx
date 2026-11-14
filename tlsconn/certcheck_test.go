@@ -24,16 +24,16 @@ import (
 var (
 	rsaKeyOnce sync.Once
 	rsaKeyVal  *rsa.PrivateKey
-	rsaKeyErr  error
+	errRSAKey  error
 )
 
 // testRSAKey returns one RSA 2048 key for the whole test binary, since
 // generating it is slow, above all on wasm.
 func testRSAKey(t testing.TB) *rsa.PrivateKey {
 	t.Helper()
-	rsaKeyOnce.Do(func() { rsaKeyVal, rsaKeyErr = rsa.GenerateKey(rand.Reader, 2048) })
-	if rsaKeyErr != nil {
-		t.Fatal(rsaKeyErr)
+	rsaKeyOnce.Do(func() { rsaKeyVal, errRSAKey = rsa.GenerateKey(rand.Reader, 2048) })
+	if errRSAKey != nil {
+		t.Fatal(errRSAKey)
 	}
 	return rsaKeyVal
 }
@@ -201,7 +201,7 @@ func TestParseKeyPairForms(t *testing.T) {
 				if len(cert.Certificate) != 2 || cert.Leaf == nil || !bytes.Equal(cert.Leaf.Raw, leaf.Raw) || !bytes.Equal(cert.Certificate[1], p.inter.Raw) {
 					t.Fatalf("ParseKeyPair() chain = %d certificates, leaf set %t", len(cert.Certificate), cert.Leaf != nil)
 				}
-				if signer, ok := cert.PrivateKey.(crypto.Signer); !ok || !tt.key.Public().(interface{ Equal(crypto.PublicKey) bool }).Equal(signer.Public()) {
+				if signer, ok := cert.PrivateKey.(crypto.Signer); !ok || !tt.key.Public().(interface{ Equal(x crypto.PublicKey) bool }).Equal(signer.Public()) {
 					t.Fatalf("ParseKeyPair() key = %T, want the key", cert.PrivateKey)
 				}
 				if _, err := VerifyCertificate(&cert, VerifyOptions{Roots: p.roots}); err != nil {

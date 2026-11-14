@@ -118,7 +118,7 @@ func TestNetErrorClassifiersMatchErrnoTables(t *testing.T) {
 	tables := []struct {
 		kind   ErrorKind
 		name   string
-		errnos []errnoValue
+		errnos []errnoError
 	}{
 		{kind: "conn_reset", name: "ECONNRESET", errnos: platformErrnos[eConnReset]},
 		{kind: "conn_aborted", name: "ECONNABORTED", errnos: platformErrnos[eConnAborted]},

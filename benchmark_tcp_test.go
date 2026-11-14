@@ -52,6 +52,7 @@ func BenchmarkTimeoutConnWriteTCP(b *testing.B) {
 }
 
 func benchmarkFramedReadTCP(b *testing.B, opts ...FramedOption) {
+	b.Helper()
 	client, server := benchTCPPair(b)
 	payload := make([]byte, 64)
 	frame := append([]byte{0, byte(len(payload))}, payload...)

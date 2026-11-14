@@ -88,7 +88,7 @@ func DoHandshake(ctx context.Context, c net.Conn, fn func() error) error {
 func CloseBeneathTLS(c net.Conn) {
 	if tc, ok := c.(interface {
 		NetConn() net.Conn
-		HandshakeContext(context.Context) error
+		HandshakeContext(ctx context.Context) error
 	}); ok && !netutil.IsNilPointer(tc) {
 		if raw := tc.NetConn(); raw != nil && !netutil.IsNilPointer(raw) {
 			_ = raw.Close()

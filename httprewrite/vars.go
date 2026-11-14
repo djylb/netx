@@ -125,7 +125,7 @@ func stripPort(h string) string {
 }
 
 func lowerASCII(s string) string {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; c >= 'A' && c <= 'Z' {
 			return strings.ToLower(s)
 		}

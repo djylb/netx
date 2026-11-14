@@ -36,7 +36,7 @@ func errnoName(errno syscall.Errno) string {
 //
 //goland:noinspection GoTypeAssertionOnErrors
 func errnoValueSet(err error) (errnoSet, bool) {
-	errno, ok := err.(syscall.Errno)
+	errno, ok := err.(syscall.Errno) //nolint:errorlint // a single link of the chain, which chainErrnos walks
 	if !ok {
 		return 0, false
 	}
@@ -55,4 +55,20 @@ func errnoSetOf(errno syscall.Errno) errnoSet {
 		}
 	}
 	return set
+}
+
+// errnoNames names each errnoID, in the order of platformErrnos.
+var errnoNames = [numErrnoIDs]string{
+	eConnReset:    "ECONNRESET",
+	eConnAborted:  "ECONNABORTED",
+	ePipe:         "EPIPE",
+	eConnRefused:  "ECONNREFUSED",
+	eHostUnreach:  "EHOSTUNREACH",
+	eNetUnreach:   "ENETUNREACH",
+	eAccess:       "EACCES",
+	ePerm:         "EPERM",
+	eTimedOut:     "ETIMEDOUT",
+	eAddrInUse:    "EADDRINUSE",
+	eAddrNotAvail: "EADDRNOTAVAIL",
+	eMsgSize:      "EMSGSIZE",
 }

@@ -57,8 +57,8 @@ func RequestBody(h Header, minor int) (Framing, int64, error) {
 	return Chunked, 0, nil
 }
 
-// ResponseBody returns how the body of a response with code code and
-// header h to a request with method method is delimited, the length for
+// ResponseBody returns how the body of a response with status
+// code and header h, to a request with method method, is delimited, the length for
 // Length, and, for Chunked and UntilClose, the transfer codings other than
 // chunked as sent, such as "gzip", which the body is still encoded with. A
 // response to HEAD and one with a 1xx, 204 or 304 code has no body, whatever
@@ -138,7 +138,7 @@ func parseLength(s string) (int64, bool) {
 		return 0, false
 	}
 	var n int64
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !isDigit(s[i]) {
 			return 0, false
 		}

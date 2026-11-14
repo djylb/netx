@@ -221,7 +221,7 @@ func (fc *FramedConn) readDatagramLocked(p []byte) (int, error) {
 		return 0, err
 	}
 	k := min(len(p), n)
-	if err := fc.readFrameLocked(p[:k], n); err != nil {
+	if err = fc.readFrameLocked(p[:k], n); err != nil {
 		return 0, err
 	}
 	if rest := n - k; rest > 0 {
@@ -403,6 +403,7 @@ func (fc *FramedConn) WriteFrame(p []byte) error {
 	return fc.writeFrameLocked(p)
 }
 
+// SetDeadline implements net.Conn.
 func (fc *FramedConn) SetDeadline(t time.Time) error {
 	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
@@ -413,6 +414,7 @@ func (fc *FramedConn) SetDeadline(t time.Time) error {
 	return fc.conn.SetDeadline(t)
 }
 
+// SetReadDeadline implements net.Conn.
 func (fc *FramedConn) SetReadDeadline(t time.Time) error {
 	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
@@ -429,10 +431,17 @@ func (fc *FramedConn) inner() net.Conn {
 	return orClosed(fc.conn)
 }
 
+// SetWriteDeadline implements net.Conn.
 func (fc *FramedConn) SetWriteDeadline(t time.Time) error { return fc.inner().SetWriteDeadline(t) }
-func (fc *FramedConn) LocalAddr() net.Addr                { return fc.inner().LocalAddr() }
-func (fc *FramedConn) RemoteAddr() net.Addr               { return fc.inner().RemoteAddr() }
-func (fc *FramedConn) Close() error                       { return fc.inner().Close() }
+
+// LocalAddr implements net.Conn.
+func (fc *FramedConn) LocalAddr() net.Addr { return fc.inner().LocalAddr() }
+
+// RemoteAddr implements net.Conn.
+func (fc *FramedConn) RemoteAddr() net.Addr { return fc.inner().RemoteAddr() }
+
+// Close implements net.Conn.
+func (fc *FramedConn) Close() error { return fc.inner().Close() }
 
 // CloseWrite shuts down the writing side of the wrapped connection after the
 // frames written so far; see TimeoutConn.CloseWrite.

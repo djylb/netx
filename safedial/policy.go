@@ -213,16 +213,16 @@ func AllowPorts(ports ...uint16) Policy { return newPortPolicy(ports, true) }
 // DenyPorts returns a policy that refuses ports.
 func DenyPorts(ports ...uint16) Policy { return newPortPolicy(ports, false) }
 
-// AllowPortRange returns a policy that allows only the ports from from to
-// to, inclusive; none if to is below from.
+// AllowPortRange returns a policy that allows only the ports between
+// from and to, inclusive; none if to is below from.
 func AllowPortRange(from, to uint16) Policy {
 	p := &portPolicy{allow: true}
 	p.add(from, to)
 	return p
 }
 
-// DenyPortRange returns a policy that refuses the ports from from to to,
-// inclusive.
+// DenyPortRange returns a policy that refuses the ports between
+// from and to, inclusive.
 func DenyPortRange(from, to uint16) Policy {
 	p := &portPolicy{}
 	p.add(from, to)

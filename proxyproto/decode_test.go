@@ -159,7 +159,7 @@ func TestDecodeErrors(t *testing.T) {
 		wireOf(V2, tcp("2001:db8::1", 1), tcp("2001:db8::2", 2)),
 	}
 	for _, wire := range valid {
-		for i := range len(wire) {
+		for i := range wire {
 			if _, _, err := Decode(wire[:i]); !errors.Is(err, io.ErrUnexpectedEOF) {
 				t.Fatalf("Decode(%q) error = %v, want %v", wire[:i], err, io.ErrUnexpectedEOF)
 			}

@@ -12,6 +12,7 @@ type discardConn struct{ memConn }
 func (*discardConn) Write(p []byte) (int, error) { return len(p), nil }
 
 func benchStream(b *testing.B, size int, fromServer, compress bool) {
+	b.Helper()
 	var so ServerOptions
 	var co ClientOptions
 	if compress {
@@ -50,6 +51,7 @@ func benchStream(b *testing.B, size int, fromServer, compress bool) {
 
 // pairB is pair for benchmarks.
 func pairB(b *testing.B, so *ServerOptions, co *ClientOptions) (*Conn, *Conn) {
+	b.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatal(err)
@@ -145,6 +147,7 @@ func BenchmarkMask(b *testing.B) {
 }
 
 func benchBatch(b *testing.B, batch bool, compress bool) {
+	b.Helper()
 	var so ServerOptions
 	var co ClientOptions
 	if compress {

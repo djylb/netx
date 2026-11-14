@@ -60,7 +60,7 @@ func TestEarlyResponseFromTargetThatStopsReading(t *testing.T) {
 		}
 	}()
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
-	if err != nil || resp.StatusCode != 413 {
+	if err != nil || resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("response = %v, %v", resp, err)
 	}
 	waitFor(t, "the exchange to end", func() bool { return s.ActiveConns() == 0 })
@@ -199,7 +199,7 @@ func TestHandleRelaysConnConcurrently(t *testing.T) {
 			}
 		}
 		<-done
-		return true, nil
+		return true, nil //nolint:nilerr // the write loop ends on the error that is expected
 	}}
 	addr := serve(t, s)
 	c, err := net.Dial("tcp", addr)
@@ -211,7 +211,7 @@ func TestHandleRelaysConnConcurrently(t *testing.T) {
 	_, _ = io.WriteString(c, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT = %v, %v", resp, err)
 	}
 	for range 100 {

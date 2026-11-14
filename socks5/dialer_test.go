@@ -265,6 +265,7 @@ func (c *sharedParentConn) Close() error {
 }
 
 func newSharedParent(t *testing.T) *sharedParentConn {
+	t.Helper()
 	a, b := net.Pipe()
 	t.Cleanup(func() {
 		_ = a.Close()
@@ -285,6 +286,7 @@ func (d borrowingDialer) DialContext(ctx context.Context, network, address strin
 
 // silentListener accepts connections and never answers them.
 func silentListener(t *testing.T) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

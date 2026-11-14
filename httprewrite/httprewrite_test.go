@@ -18,7 +18,7 @@ import (
 )
 
 func testRequest() *http.Request {
-	r := httptest.NewRequest("GET", "/a%20b/c?x=1&y=two&x=3", nil)
+	r := httptest.NewRequest(http.MethodGet, "/a%20b/c?x=1&y=two&x=3", nil)
 	r.Host = "Example.COM:8080"
 	r.RemoteAddr = "10.0.0.1:41000"
 	r.Header.Set("User-Agent", "test/1")
@@ -36,7 +36,7 @@ func TestVariables(t *testing.T) {
 	r := testRequest()
 	tlsReq := r.Clone(r.Context())
 	tlsReq.TLS = &tls.ConnectionState{}
-	res := &http.Response{StatusCode: 302, Header: http.Header{"Location": {"/next"}, "X-Up": {"u1", "u2"}}}
+	res := &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"/next"}, "X-Up": {"u1", "u2"}}}
 	when := time.Date(2026, 10, 24, 1, 2, 3, 456e6, time.UTC)
 	client := forwarded.Client{Addr: netip.MustParseAddrPort("198.51.100.1:0"), Hops: 2, Proto: "https", Host: "public.example"}
 	for _, tt := range []struct {
@@ -164,7 +164,7 @@ func TestCallerVars(t *testing.T) {
 // TestInjection checks that values decoded from the request cannot add
 // fields.
 func TestInjection(t *testing.T) {
-	r := httptest.NewRequest("GET", "/x%0d%0aX-Evil:%201", nil)
+	r := httptest.NewRequest(http.MethodGet, "/x%0d%0aX-Evil:%201", nil)
 	c := &Context{Request: r}
 	for _, tmpl := range []string{"${uri}", "/p${uri}", "${uri}${uri}"} {
 		if v, err := MustCompile(tmpl, nil).Expand(c); !errors.Is(err, ErrInvalidValue) {
@@ -285,7 +285,7 @@ func TestApplyRedirects(t *testing.T) {
 		t.Errorf("without response: %v %v", h, err)
 	}
 	bad := []Redirect{{To: MustCompile("http://x${uri}", nil)}}
-	evil := httptest.NewRequest("GET", "/%0d%0a", nil)
+	evil := httptest.NewRequest(http.MethodGet, "/%0d%0a", nil)
 	h = http.Header{"Location": {"http://backend.internal:8080/"}}
 	if err := ApplyRedirects(h, bad, &Context{Request: evil, Response: res}); !errors.Is(err, ErrInvalidValue) || h.Get("Location") != "http://backend.internal:8080/" {
 		t.Errorf("invalid expansion: %v %v", h, err)
@@ -333,7 +333,7 @@ func TestModifyResponseNoRequest(t *testing.T) {
 		Resolver:  &forwarded.Resolver{},
 		Data:      func(in *http.Request) any { t.Error("Data called"); return nil },
 	}
-	res := &http.Response{StatusCode: 301, Header: http.Header{"Location": {"http://b/x"}, "X-Client": {"old"}}}
+	res := &http.Response{StatusCode: http.StatusMovedPermanently, Header: http.Header{"Location": {"http://b/x"}, "X-Client": {"old"}}}
 	if err := rw.ModifyResponse(res); err != nil {
 		t.Fatal(err)
 	}
@@ -387,14 +387,14 @@ Host: ${host}
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			seen = r
 			return &http.Response{
-				StatusCode: 302,
+				StatusCode: http.StatusFound,
 				Header:     http.Header{"Location": {"http://backend.internal:8080/login"}, "Server": {"secret/1.0"}, "Content-Length": {"0"}},
 				Body:       http.NoBody,
 				Request:    r,
 			}, nil
 		}),
 	}
-	in := httptest.NewRequest("GET", "http://Public.Example/app?q=1", nil)
+	in := httptest.NewRequest(http.MethodGet, "http://Public.Example/app?q=1", nil)
 	in.RemoteAddr = "10.0.0.1:5000"
 	in.Header.Set("X-Forwarded-For", "198.51.100.1")
 	in.Header.Set("X-Forwarded-Proto", "https")
@@ -430,7 +430,7 @@ Host: ${host}
 	}
 
 	// ModifyResponse without Rewrite reads the response's request.
-	res := &http.Response{StatusCode: 200, Header: http.Header{}, Request: in}
+	res := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: in}
 	if err := rw.ModifyResponse(res); err != nil || res.Header.Get("X-Client") != "198.51.100.1" {
 		t.Errorf("ModifyResponse alone: %v %v", res.Header, err)
 	}
@@ -449,10 +449,10 @@ func TestRewriterUpgrade(t *testing.T) {
 		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			seen = r
-			return &http.Response{StatusCode: 400, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
 		}),
 	}
-	in := httptest.NewRequest("GET", "http://public.example/ws", nil)
+	in := httptest.NewRequest(http.MethodGet, "http://public.example/ws", nil)
 	in.Header.Set("Connection", "Upgrade")
 	in.Header.Set("Upgrade", "websocket")
 	proxy.ServeHTTP(httptest.NewRecorder(), in)
@@ -496,7 +496,7 @@ func FuzzCompile(f *testing.F) {
 		if err != nil {
 			return
 		}
-		r := &http.Request{Method: "GET", URL: u, Host: "h", RequestURI: target, RemoteAddr: "192.0.2.1:1",
+		r := &http.Request{Method: http.MethodGet, URL: u, Host: "h", RequestURI: target, RemoteAddr: "192.0.2.1:1",
 			Header: http.Header{"Cookie": {target}, "X-Y": {target}}}
 		v, err := tm.Expand(&Context{Request: r})
 		if err != nil {

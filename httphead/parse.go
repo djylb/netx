@@ -89,7 +89,7 @@ func ParseRequest(head string, fields Header) (Request, error) {
 	if !ok1 || !ok2 || !ValidFieldName(method) || target == "" {
 		return Request{}, malformed("request line " + quote(first))
 	}
-	for i := 0; i < len(target); i++ {
+	for i := range len(target) {
 		if c := target[i]; c <= ' ' || c >= 0x7f {
 			return Request{}, malformed("request target " + quote(target))
 		}

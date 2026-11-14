@@ -152,7 +152,7 @@ func validName(s string) bool {
 	if s == "" || len(s) > 255 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		switch c := s[i]; {
 		case isAlpha(c), isDigit(c), c == '-', c == '.', c == '_':
 		default:
@@ -170,7 +170,7 @@ func parsePort(s string) (uint16, bool) {
 		return 0, false
 	}
 	n := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !isDigit(s[i]) {
 			return 0, false
 		}

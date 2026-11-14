@@ -47,6 +47,7 @@ func BenchmarkFramedConnRead(b *testing.B) {
 }
 
 func benchmarkFramedConnReadSmallBuffer(b *testing.B, opts ...FramedOption) {
+	b.Helper()
 	payload := bytes.Repeat([]byte("x"), MaxFramePayload)
 	wire := make([]byte, 2+len(payload))
 	binary.BigEndian.PutUint16(wire[:2], uint16(len(payload)))

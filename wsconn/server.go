@@ -258,8 +258,8 @@ func (hs *Handshake) Accept(ctx context.Context, conn net.Conn, br *bufio.Reader
 		return nil, err
 	}
 	err = doHandshake(ctx, conn, hs.opts.HandshakeTimeout, func() error {
-		_, err := conn.Write(resp)
-		return err
+		_, werr := conn.Write(resp)
+		return werr
 	})
 	if err != nil {
 		return nil, err

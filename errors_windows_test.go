@@ -16,11 +16,11 @@ func TestWindowsErrnoConstantsMatchSyscall(t *testing.T) {
 		name      string
 		got, want syscall.Errno
 	}{
-		{name: "ERROR_ACCESS_DENIED", got: errorAccessDenied, want: syscall.ERROR_ACCESS_DENIED},
-		{name: "ERROR_NETNAME_DELETED", got: errorNetnameDeleted, want: syscall.ERROR_NETNAME_DELETED},
-		{name: "WSAEACCES", got: wsaEACCES, want: syscall.WSAEACCES},
-		{name: "WSAECONNABORTED", got: wsaECONNABORTED, want: syscall.WSAECONNABORTED},
-		{name: "WSAECONNRESET", got: wsaECONNRESET, want: syscall.WSAECONNRESET},
+		{name: "ERROR_ACCESS_DENIED", got: errAccessDenied, want: syscall.ERROR_ACCESS_DENIED},
+		{name: "ERROR_NETNAME_DELETED", got: errNetnameDeleted, want: syscall.ERROR_NETNAME_DELETED},
+		{name: "WSAEACCES", got: errWSAEACCES, want: syscall.WSAEACCES},
+		{name: "WSAECONNABORTED", got: errWSAECONNABORTED, want: syscall.WSAECONNABORTED},
+		{name: "WSAECONNRESET", got: errWSAECONNRESET, want: syscall.WSAECONNRESET},
 	} {
 		if tt.got != tt.want {
 			t.Errorf("%s = %d, want %d", tt.name, tt.got, tt.want)

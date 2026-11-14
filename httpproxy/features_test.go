@@ -96,12 +96,12 @@ func TestKeptConnRetry(t *testing.T) {
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	br := bufio.NewReader(c)
-	if resp := doGet(t, c, br, "http://"+origin+"/1", "GET"); resp.StatusCode != 200 {
+	if resp := doGet(t, c, br, "http://"+origin+"/1", "GET"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("first GET = %d", resp.StatusCode)
 	}
 	// The second GET goes over the kept connection, which closes: it is
 	// sent again on a new one.
-	if resp := doGet(t, c, br, "http://"+origin+"/2", "GET"); resp.StatusCode != 200 {
+	if resp := doGet(t, c, br, "http://"+origin+"/2", "GET"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("retried GET = %d", resp.StatusCode)
 	}
 	if n := conns.Load(); n != 2 {
@@ -113,7 +113,7 @@ func TestKeptConnRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 502 {
+	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("POST on a dying kept connection = %d, want 502", resp.StatusCode)
 	}
 	if n := requests.Load(); n != 4 {
@@ -237,7 +237,7 @@ func TestLargeBodiesSplicedExactly(t *testing.T) {
 		}
 		h := sha256.New()
 		n, err := io.Copy(h, resp.Body)
-		if resp.StatusCode != 200 || err != nil || n != size || !bytes.Equal(h.Sum(nil), sum[:]) {
+		if resp.StatusCode != http.StatusOK || err != nil || n != size || !bytes.Equal(h.Sum(nil), sum[:]) {
 			t.Fatalf("exchange %d: %d, %d bytes, %v", i, resp.StatusCode, n, err)
 		}
 	}
@@ -344,7 +344,7 @@ func TestLingeringClose(t *testing.T) {
 			}
 		}()
 		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
-		if err != nil || resp.StatusCode != 407 {
+		if err != nil || resp.StatusCode != http.StatusProxyAuthRequired {
 			t.Fatalf("refusal = %v, %v", resp, err)
 		}
 		_ = c.Close()

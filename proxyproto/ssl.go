@@ -53,7 +53,8 @@ func (f TLVs) AppendSSL(s SSL) (TLVs, error) {
 	if 5+len(s.TLVs) > 0xffff {
 		return f, fmt.Errorf("proxyproto: SSL value of %d bytes", 5+len(s.TLVs))
 	}
-	out := append(f, byte(TLVSSL))
+	out := f
+	out = append(out, byte(TLVSSL))
 	out = binary.BigEndian.AppendUint16(out, uint16(5+len(s.TLVs)))
 	out = append(out, byte(s.Client))
 	out = binary.BigEndian.AppendUint32(out, s.Verify)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -444,21 +445,6 @@ const (
 	numErrnoIDs
 )
 
-var errnoNames = [numErrnoIDs]string{
-	eConnReset:    "ECONNRESET",
-	eConnAborted:  "ECONNABORTED",
-	ePipe:         "EPIPE",
-	eConnRefused:  "ECONNREFUSED",
-	eHostUnreach:  "EHOSTUNREACH",
-	eNetUnreach:   "ENETUNREACH",
-	eAccess:       "EACCES",
-	ePerm:         "EPERM",
-	eTimedOut:     "ETIMEDOUT",
-	eAddrInUse:    "EADDRINUSE",
-	eAddrNotAvail: "EADDRNOTAVAIL",
-	eMsgSize:      "EMSGSIZE",
-}
-
 // errnoSet is a set of errnoIDs.
 type errnoSet uint16
 
@@ -468,7 +454,7 @@ func chainErrnos(err error) errnoSet {
 	var set errnoSet
 	for err != nil {
 		set |= errnosOf(err)
-		switch u := err.(type) {
+		switch u := err.(type) { //nolint:errorlint // the walk of the chain itself
 		case interface{ Unwrap() error }:
 			err = u.Unwrap()
 		case interface{ Unwrap() []error }:
@@ -491,17 +477,14 @@ func errnosOf(err error) errnoSet {
 	if set, ok := errnoValueSet(err); ok {
 		return set
 	}
-	is, ok := err.(interface{ Is(error) bool })
+	is, ok := err.(interface{ Is(target error) bool })
 	if !ok {
 		return 0
 	}
 	var set errnoSet
 	for id, targets := range platformErrnos {
-		for _, target := range targets {
-			if is.Is(target) {
-				set |= 1 << id
-				break
-			}
+		if slices.ContainsFunc(targets, func(target errnoError) bool { return is.Is(target) }) {
+			set |= 1 << id
 		}
 	}
 	return set

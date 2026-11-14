@@ -374,7 +374,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	a.mu.Unlock()
 	if !relay.add(a) {
 		// The reason, before a.close closes a relay of its own.
-		err := errUDPIdleBeforeStart
+		err = errUDPIdleBeforeStart
 		switch {
 		case ctx.Err() != nil:
 			err = ErrServerClosed
@@ -387,7 +387,7 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	defer a.close()
 
 	bound := s.udpAddr(req, relay.l.Addr())
-	if err := req.Reply(ReplySucceeded, bound); err != nil {
+	if err = req.Reply(ReplySucceeded, bound); err != nil {
 		return err
 	}
 	// The association lasts while the control connection is open; it ending

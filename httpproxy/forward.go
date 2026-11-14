@@ -108,7 +108,7 @@ var errRetry = errors.New("httpproxy: retry on a new connection")
 // idempotent method without a body, which the server has not read beyond.
 func idempotent(req *Request) bool {
 	switch req.Method {
-	case "GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE":
+	case "GET", "HEAD", methodOptions, "TRACE", "PUT", "DELETE":
 		return req.body == httphead.NoBody && !req.upgrade
 	}
 	return false
@@ -732,3 +732,6 @@ func (x *exchange) closeTarget() error {
 	x.abort()
 	return x.up.c.Close()
 }
+
+// methodOptions is the method of a request for the options of a server.
+const methodOptions = "OPTIONS"

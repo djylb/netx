@@ -158,7 +158,7 @@ func MatchKey(leaf *x509.Certificate, key crypto.PrivateKey) error {
 	if !ok || signer == nil {
 		return fmt.Errorf("%w: %T", ErrUnsupportedKey, key)
 	}
-	pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool })
+	pub, ok := signer.Public().(interface{ Equal(x crypto.PublicKey) bool })
 	if !ok {
 		return fmt.Errorf("%w: %T", ErrUnsupportedKey, key)
 	}

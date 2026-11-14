@@ -19,6 +19,7 @@ import (
 )
 
 func testContext(t *testing.T) context.Context {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	return ctx

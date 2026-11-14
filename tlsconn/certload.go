@@ -86,7 +86,7 @@ func (s *CertStore) loaded(ctx context.Context, name string, now time.Time) (*tl
 	if e == nil {
 		e = &storeEntry{name: name, ready: make(chan struct{})}
 		s.addLocked(e)
-		go s.load(e, false)
+		go s.load(e, false) //nolint:contextcheck // a load is shared by every caller waiting for it, so it is not bound to one of their contexts
 	}
 	e.lastUsed = now
 	if !isClosed(e.ready) {
@@ -102,7 +102,7 @@ func (s *CertStore) loaded(ctx context.Context, name string, now time.Time) (*tl
 	// Not for an entry that Forget, Add or an eviction dropped meanwhile.
 	if cert != nil && !e.refreshing && !now.Before(e.refreshAt) && s.current(e) {
 		e.refreshing = true
-		go s.load(e, true)
+		go s.load(e, true) //nolint:contextcheck // a refresh outlives the call that started it
 	}
 	s.mu.Unlock()
 	return cert, err

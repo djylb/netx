@@ -324,9 +324,9 @@ func same(a, b any) (eq bool) {
 	return a == b
 }
 
-type readDeadliner interface{ SetReadDeadline(time.Time) error }
-type writeDeadliner interface{ SetWriteDeadline(time.Time) error }
-type deadliner interface{ SetDeadline(time.Time) error }
+type readDeadliner interface{ SetReadDeadline(t time.Time) error }
+type writeDeadliner interface{ SetWriteDeadline(t time.Time) error }
+type deadliner interface{ SetDeadline(t time.Time) error }
 
 // SetReadDeadline sets the read deadline of the read half; see the package
 // documentation.

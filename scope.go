@@ -283,6 +283,8 @@ func scope6(hi, lo uint64) Scope {
 				return ScopeReserved
 			}
 			return embedded(^uint32(lo))
+		default:
+			// An entry of any other scope is that scope.
 		}
 		return e.scope
 	}

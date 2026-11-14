@@ -185,7 +185,7 @@ func ValidFieldName(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !tokenChars[s[i]] {
 			return false
 		}
@@ -197,7 +197,7 @@ func ValidFieldName(s string) bool {
 // spaces, tabs and bytes from 0x80, without other control characters
 // (RFC 9110, section 5.5).
 func ValidFieldValue(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; c < ' ' && c != '\t' || c == 0x7f {
 			return false
 		}
@@ -238,7 +238,7 @@ func quote(s string) string {
 	}
 	b := make([]byte, 0, len(s)+2)
 	b = append(b, '"')
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c == '"' || c == '\\':

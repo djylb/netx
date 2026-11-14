@@ -114,8 +114,8 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 			// A full pipe is a full read, which the next piece reads
 			// without waiting.
 			want = int(s.limited(int64(min(want, p.size))))
-			m, err := syscall.Splice(int(fd), nil, p.fds[1], nil, want, spliceMove|spliceNonblock)
-			switch err {
+			m, serr := syscall.Splice(int(fd), nil, p.fds[1], nil, want, spliceMove|spliceNonblock)
+			switch serr {
 			case syscall.EINTR:
 				continue
 			case syscall.EAGAIN:
@@ -124,23 +124,23 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 				p = nil
 				return false
 			}
-			inPipe, spliceErr = max(int(m), 0), err
+			inPipe, spliceErr = max(int(spliceCount(m)), 0), serr
 			s.consumed(inPipe)
 			return true
 		}
 	}
 	drain := func(fd uintptr) bool {
 		for inPipe > 0 {
-			m, err := syscall.Splice(p.fds[0], nil, int(fd), nil, inPipe, spliceMove|spliceNonblock)
-			switch err {
+			m, derr := syscall.Splice(p.fds[0], nil, int(fd), nil, inPipe, spliceMove|spliceNonblock)
+			switch derr {
 			case nil:
-				inPipe -= int(m)
-				out += int64(m)
+				inPipe -= int(spliceCount(m))
+				out += spliceCount(m)
 			case syscall.EINTR:
 			case syscall.EAGAIN:
 				return false
 			default:
-				spliceErr = err
+				spliceErr = derr
 				return true
 			}
 		}
@@ -246,3 +246,7 @@ func copyPrefix(ctx context.Context, dst io.Writer, s *relaySource, f *RelayFlow
 	}
 	return written, false, nil
 }
+
+// spliceCount returns the byte count that syscall.Splice returned, which is an
+// int on 32-bit platforms and an int64 elsewhere.
+func spliceCount[T int | int64](n T) int64 { return int64(n) }

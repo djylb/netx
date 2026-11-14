@@ -72,29 +72,29 @@ func Client(ctx context.Context, conn net.Conn, rawURL string, opts *ClientOptio
 	var c *Conn
 	var resp *httphead.Response
 	err = doHandshake(ctx, conn, opts.HandshakeTimeout, func() error {
-		if _, err := conn.Write(req); err != nil {
-			return err
+		if _, herr := conn.Write(req); herr != nil {
+			return herr
 		}
 		br := bufio.NewReaderSize(conn, opts.readBufferSize())
 		limit := opts.MaxHeaderBytes
 		if limit <= 0 {
 			limit = DefaultMaxHeaderBytes
 		}
-		head, err := httphead.Read(br, nil, limit)
-		if err != nil {
-			if err == io.EOF {
-				err = errors.New("wsconn: connection closed before the handshake response")
+		head, herr := httphead.Read(br, nil, limit)
+		if herr != nil {
+			if herr == io.EOF {
+				herr = errors.New("wsconn: connection closed before the handshake response")
 			}
-			return err
+			return herr
 		}
-		r, err := httphead.ParseResponse(string(head), nil)
-		if err != nil {
-			return &HandshakeError{Msg: err.Error()}
+		r, herr := httphead.ParseResponse(string(head), nil)
+		if herr != nil {
+			return &HandshakeError{Msg: herr.Error()}
 		}
 		resp = &r
-		dc, sub, err := checkResponse(resp, key, opts)
-		if err != nil {
-			return err
+		dc, sub, herr := checkResponse(resp, key, opts)
+		if herr != nil {
+			return herr
 		}
 		c = newConn(conn, br, true, &opts.Options, dc)
 		c.subprotocol = sub
@@ -145,11 +145,11 @@ func buildRequest(u *url.URL, opts *ClientOptions) ([]byte, string, error) {
 		}
 	}
 	var raw [16]byte
-	binary.LittleEndian.PutUint64(raw[:], rand.Uint64())
-	binary.LittleEndian.PutUint64(raw[8:], rand.Uint64())
+	binary.LittleEndian.PutUint64(raw[:], rand.Uint64())  //nolint:gosec // the key is a nonce, not a secret: see maskKey
+	binary.LittleEndian.PutUint64(raw[8:], rand.Uint64()) //nolint:gosec // the key is a nonce, not a secret: see maskKey
 	key := base64.StdEncoding.EncodeToString(raw[:])
 	target := u.RequestURI()
-	for i := 0; i < len(target); i++ {
+	for i := range len(target) {
 		if c := target[i]; c <= ' ' || c == 0x7f {
 			return nil, "", errors.New("wsconn: URL path or query with a space or control character")
 		}

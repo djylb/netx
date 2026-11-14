@@ -171,24 +171,6 @@ func readsDatagrams(r io.Reader) bool {
 	return newRelaySource(r).readsDatagrams()
 }
 
-// limited caps n to the bytes left within the source's bound, if it has one.
-func (s *relaySource) limited(n int64) int64 {
-	if s.limit != nil {
-		return min(n, max(s.limit.N, 0))
-	}
-	return n
-}
-
-// consumed counts n bytes read beneath the source's bound down.
-func (s *relaySource) consumed(n int) {
-	if s.limit != nil {
-		s.limit.N -= int64(n)
-	}
-}
-
-// exhausted reports whether the source's bound is used up.
-func (s *relaySource) exhausted() bool { return s.limit != nil && s.limit.N <= 0 }
-
 // prefixPending reports whether a PrefixConn around base still holds prefix
 // bytes.
 func (s *relaySource) prefixPending() bool {

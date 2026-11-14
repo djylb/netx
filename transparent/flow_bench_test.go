@@ -69,6 +69,7 @@ func BenchmarkFlowCopy(b *testing.B) {
 }
 
 func benchFlowListener(b *testing.B, opts ...FlowOption) *FlowListener {
+	b.Helper()
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		b.Fatal(err)
@@ -79,6 +80,7 @@ func benchFlowListener(b *testing.B, opts ...FlowOption) *FlowListener {
 }
 
 func benchAccept(b *testing.B, l *FlowListener) *FlowConn {
+	b.Helper()
 	c, err := l.Accept()
 	if err != nil {
 		b.Fatal(err)

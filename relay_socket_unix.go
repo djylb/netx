@@ -126,7 +126,7 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 	switch {
 	case err != nil, s.blocked:
 		// wait reports a failure as a read would.
-		return 0, true, nil
+		return 0, true, nil //nolint:nilerr // the error is left for wait to report
 	case s.err != nil:
 		return 0, false, sockOpError(s.conn, "read", "read", s.err)
 	case s.n == 0 && len(b) > 0:
@@ -159,3 +159,21 @@ func rawOpError(err error, op string) error {
 	}
 	return err
 }
+
+// limited caps n to the bytes left within the source's bound, if it has one.
+func (s *relaySource) limited(n int64) int64 {
+	if s.limit != nil {
+		return min(n, max(s.limit.N, 0))
+	}
+	return n
+}
+
+// consumed counts n bytes read beneath the source's bound down.
+func (s *relaySource) consumed(n int) {
+	if s.limit != nil {
+		s.limit.N -= int64(n)
+	}
+}
+
+// exhausted reports whether the source's bound is used up.
+func (s *relaySource) exhausted() bool { return s.limit != nil && s.limit.N <= 0 }

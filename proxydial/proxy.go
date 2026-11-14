@@ -69,15 +69,15 @@ func FromURL(u *url.URL, forward netx.ContextDialer, tlsConfig *tls.Config) (net
 	base, overTLS := strings.CutSuffix(strings.ToLower(u.Scheme), "+tls")
 	defaultPort := "1080"
 	switch base {
-	case "http", "https":
+	case schemeHTTP, schemeHTTPS:
 		if overTLS {
 			return nil, unsupportedScheme(u)
 		}
 		defaultPort = "80"
-		if base == "https" {
+		if base == schemeHTTPS {
 			overTLS, defaultPort = true, "443"
 		}
-	case "socks5", "socks5h", "socks4", "socks4a":
+	case "socks5", "socks5h", schemeSOCKS4, "socks4a":
 	default:
 		return nil, unsupportedScheme(u)
 	}
@@ -91,17 +91,17 @@ func FromURL(u *url.URL, forward netx.ContextDialer, tlsConfig *tls.Config) (net
 		user = u.User.Username()
 		password, _ = u.User.Password()
 	}
-	if base == "http" || base == "https" {
+	if base == schemeHTTP || base == schemeHTTPS {
 		return &HTTPDialer{ProxyAddr: addr, Username: user, Password: password, Forward: forward}, nil
 	}
 	d := &socks5.Dialer{
 		ProxyAddr: addr,
-		SOCKS4:    base == "socks4" || base == "socks4a",
+		SOCKS4:    base == schemeSOCKS4 || base == "socks4a",
 		Username:  user,
 		Password:  password,
 		Forward:   forward,
 	}
-	if base == "socks4" {
+	if base == schemeSOCKS4 {
 		d.Resolver = net.DefaultResolver
 	}
 	return d, nil
@@ -129,7 +129,7 @@ func ParseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	switch {
 	case err == nil && u.Scheme == "" && u.Host != "":
-		u.Scheme = "http" // "//host:port"
+		u.Scheme = schemeHTTP // "//host:port"
 	case (err != nil || u.Scheme == "" || u.Host == "") && !strings.Contains(raw, "://"):
 		//goland:noinspection HttpUrlsUsage
 		u, err = url.Parse("http://" + raw)
@@ -267,3 +267,9 @@ func forwardOf(forward netx.ContextDialer) netx.ContextDialer {
 	}
 	return forward
 }
+
+const (
+	schemeHTTP   = "http"
+	schemeHTTPS  = "https"
+	schemeSOCKS4 = "socks4"
+)

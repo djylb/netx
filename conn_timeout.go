@@ -146,8 +146,13 @@ func (c *TimeoutConn) inner() net.Conn {
 	return orClosed(c.conn)
 }
 
-func (c *TimeoutConn) Close() error         { return c.inner().Close() }
-func (c *TimeoutConn) LocalAddr() net.Addr  { return c.inner().LocalAddr() }
+// Close implements net.Conn.
+func (c *TimeoutConn) Close() error { return c.inner().Close() }
+
+// LocalAddr implements net.Conn.
+func (c *TimeoutConn) LocalAddr() net.Addr { return c.inner().LocalAddr() }
+
+// RemoteAddr implements net.Conn.
 func (c *TimeoutConn) RemoteAddr() net.Addr { return c.inner().RemoteAddr() }
 
 // CloseWrite shuts down the writing side of the wrapped connection, so the
@@ -155,6 +160,7 @@ func (c *TimeoutConn) RemoteAddr() net.Addr { return c.inner().RemoteAddr() }
 // errors.ErrUnsupported when the wrapped connection cannot do that.
 func (c *TimeoutConn) CloseWrite() error { return closeWrite(c.inner()) }
 
+// SetDeadline implements net.Conn.
 func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	if c == nil || c.conn == nil {
 		return net.ErrClosed
@@ -166,6 +172,7 @@ func (c *TimeoutConn) SetDeadline(t time.Time) error {
 	return c.conn.SetDeadline(c.capDeadline(t))
 }
 
+// SetReadDeadline implements net.Conn.
 func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
 	if c == nil || c.conn == nil {
 		return net.ErrClosed
@@ -177,6 +184,7 @@ func (c *TimeoutConn) SetReadDeadline(t time.Time) error {
 	return c.conn.SetReadDeadline(c.capDeadline(t))
 }
 
+// SetWriteDeadline implements net.Conn.
 func (c *TimeoutConn) SetWriteDeadline(t time.Time) error {
 	if c == nil || c.conn == nil {
 		return net.ErrClosed

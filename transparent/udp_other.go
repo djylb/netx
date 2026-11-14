@@ -28,7 +28,7 @@ func readDatagram(syscall.RawConn) (*[]byte, int, error) {
 	return nil, 0, ErrListenUnsupported
 }
 
-// writeFrom sends b to to from c; the source address is the kernel's choice.
+// writeFrom sends b to the address to from c; the source address is the kernel's choice.
 //
 //goland:noinspection GoUnusedParameter
 func writeFrom(c *net.UDPConn, b []byte, _, to netip.AddrPort) (int, error) {

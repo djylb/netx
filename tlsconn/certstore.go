@@ -171,6 +171,7 @@ type CertStore struct {
 // CertSource is how a certificate came into a CertStore.
 type CertSource uint8
 
+// The sources of a certificate in a CertStore.
 const (
 	SourceAdd   CertSource = iota // Add
 	SourcePEM                     // AddPEM

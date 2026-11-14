@@ -194,7 +194,7 @@ func v2Addrs(af, proto byte, b []byte) (src, dst net.Addr) {
 	case 3:
 		network := "unix"
 		if proto == 2 {
-			network = "unixgram"
+			network = netUnixgram
 		}
 		return &net.UnixAddr{Name: unixPath(b[:unixPathLen]), Net: network},
 			&net.UnixAddr{Name: unixPath(b[unixPathLen:]), Net: network}

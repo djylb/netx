@@ -74,22 +74,22 @@ type closerHalf struct {
 	*calls
 }
 
-func (h *closerHalf) Close() error { return h.count(&h.calls.close) }
+func (h *closerHalf) Close() error { return h.count(&h.close) }
 
 // tcpHalf has CloseRead, CloseWrite and Close, as a *net.TCPConn does.
 type tcpHalf struct{ closerHalf }
 
-func (h *tcpHalf) CloseRead() error  { return h.count(&h.calls.closeRead) }
-func (h *tcpHalf) CloseWrite() error { return h.count(&h.calls.closeWrite) }
+func (h *tcpHalf) CloseRead() error  { return h.count(&h.closeRead) }
+func (h *tcpHalf) CloseWrite() error { return h.count(&h.closeWrite) }
 
 // tlsHalf has CloseWrite and Close, as a *tls.Conn does.
 type tlsHalf struct{ closerHalf }
 
-func (h *tlsHalf) CloseWrite() error { return h.count(&h.calls.closeWrite) }
+func (h *tlsHalf) CloseWrite() error { return h.count(&h.closeWrite) }
 
 // valueHalf is a half of a type that is not comparable.
 type valueHalf struct {
-	b []byte
+	_ []byte
 	n *int
 }
 

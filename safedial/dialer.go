@@ -163,14 +163,14 @@ func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.A
 	}
 	if t.Addr.IsValid() {
 		if !familyFits(network, t.Addr) {
-			return nil, &net.AddrError{Err: "no suitable address", Addr: address}
+			return nil, &net.AddrError{Err: noSuitableAddress, Addr: address}
 		}
-		if err := d.check(t); err != nil {
+		if err = d.check(t); err != nil {
 			return nil, err
 		}
 		return []netip.AddrPort{t.AddrPort()}, nil
 	}
-	if err := d.check(t); err != nil {
+	if err = d.check(t); err != nil {
 		return nil, err
 	}
 	ips, err := d.resolver().LookupNetIP(ctx, lookupNetwork(network), t.Name)
@@ -205,7 +205,7 @@ func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.A
 	case denied != nil:
 		return nil, denied
 	}
-	return nil, &net.DNSError{Err: "no suitable address", Name: t.Name, IsNotFound: true}
+	return nil, &net.DNSError{Err: noSuitableAddress, Name: t.Name, IsNotFound: true}
 }
 
 // DialContext dials address on network, "tcp", "tcp4", "tcp6", "udp",
@@ -327,3 +327,7 @@ func interleave(addrs []netip.AddrPort) []netip.AddrPort {
 	}
 	return out
 }
+
+// noSuitableAddress is the text of the errors for a target without an address
+// that the policy and the network allow.
+const noSuitableAddress = "no suitable address"

@@ -54,11 +54,21 @@ func (c *RecordingConn) Read(p []byte) (n int, err error) {
 // Release.
 func (c *RecordingConn) inner() net.Conn { return orClosed(c.conn()) }
 
-func (c *RecordingConn) Write(p []byte) (int, error)        { return c.inner().Write(p) }
-func (c *RecordingConn) LocalAddr() net.Addr                { return c.inner().LocalAddr() }
-func (c *RecordingConn) RemoteAddr() net.Addr               { return c.inner().RemoteAddr() }
-func (c *RecordingConn) SetDeadline(t time.Time) error      { return c.inner().SetDeadline(t) }
-func (c *RecordingConn) SetReadDeadline(t time.Time) error  { return c.inner().SetReadDeadline(t) }
+func (c *RecordingConn) Write(p []byte) (int, error) { return c.inner().Write(p) }
+
+// LocalAddr implements net.Conn.
+func (c *RecordingConn) LocalAddr() net.Addr { return c.inner().LocalAddr() }
+
+// RemoteAddr implements net.Conn.
+func (c *RecordingConn) RemoteAddr() net.Addr { return c.inner().RemoteAddr() }
+
+// SetDeadline implements net.Conn.
+func (c *RecordingConn) SetDeadline(t time.Time) error { return c.inner().SetDeadline(t) }
+
+// SetReadDeadline implements net.Conn.
+func (c *RecordingConn) SetReadDeadline(t time.Time) error { return c.inner().SetReadDeadline(t) }
+
+// SetWriteDeadline implements net.Conn.
 func (c *RecordingConn) SetWriteDeadline(t time.Time) error { return c.inner().SetWriteDeadline(t) }
 
 // CloseWrite shuts down the writing side of the underlying connection; see
@@ -93,6 +103,7 @@ func (c *RecordingConn) stop(discard bool) {
 	c.mu.Unlock()
 }
 
+// Close implements net.Conn.
 func (c *RecordingConn) Close() error {
 	if c == nil {
 		return nil

@@ -5,10 +5,10 @@ package netx
 import "syscall"
 
 // platformErrnos are the errnos of each errnoID; see errors.go.
-// errnoValue is the type of the errors in platformErrnos.
-type errnoValue = syscall.Errno
+// errnoError is the type of the errors in platformErrnos.
+type errnoError = syscall.Errno
 
-var platformErrnos = [numErrnoIDs][]errnoValue{
+var platformErrnos = [numErrnoIDs][]errnoError{
 	eConnReset:    {syscall.ECONNRESET},
 	eConnAborted:  {syscall.ECONNABORTED},
 	ePipe:         {syscall.EPIPE},

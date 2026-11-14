@@ -18,7 +18,7 @@ func ExampleCompile() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/search?q=go", nil)
+	r := httptest.NewRequest(http.MethodGet, "/search?q=go", nil)
 	r.Host = "Example.com:8080"
 	v, err := t.Expand(&httprewrite.Context{Request: r})
 	fmt.Println(v, err)
@@ -76,11 +76,11 @@ X-Real-IP: ${remote_addr}
 		Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 			fmt.Println("backend got", r.Host, r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Real-Ip"))
 			h := http.Header{"Location": {"http://backend.internal:8080/login"}}
-			return &http.Response{StatusCode: 302, Header: h, Body: http.NoBody, Request: r}, nil
+			return &http.Response{StatusCode: http.StatusFound, Header: h, Body: http.NoBody, Request: r}, nil
 		}),
 	}
 
-	in := httptest.NewRequest("GET", "/account", nil)
+	in := httptest.NewRequest(http.MethodGet, "/account", nil)
 	in.Host = "www.example.com"
 	in.RemoteAddr = "10.0.0.2:40000" // the load balancer
 	in.Header.Set("X-Forwarded-For", "198.51.100.7")

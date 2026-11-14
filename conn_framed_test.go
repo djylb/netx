@@ -845,7 +845,7 @@ func TestFramedConnLostFrameBytesDesync(t *testing.T) {
 		t.Run(tt.name+"/"+tt.mode.String(), func(t *testing.T) {
 			// A complete frame after the failure must not be decoded from the
 			// desynced stream.
-			steps := append(tt.steps, framedReadStep{err: io.EOF}, framedReadStep{data: frameBytes("abc")})
+			steps := slices.Concat(tt.steps, []framedReadStep{{err: io.EOF}, {data: frameBytes("abc")}})
 			fc := tt.mode.conn(&framedScriptConn{steps: steps})
 			if tt.first != "" {
 				if b, err := tt.mode.read(fc, tt.bufLen); err != nil || string(b) != tt.first {

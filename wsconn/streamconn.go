@@ -61,6 +61,8 @@ func streamErr(err error) error {
 		switch ce.Code {
 		case StatusNormalClosure, StatusGoingAway, StatusNoStatusReceived:
 			return io.EOF
+		default:
+			// Any other close is an error.
 		}
 	}
 	return err

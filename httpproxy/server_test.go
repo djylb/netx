@@ -107,8 +107,8 @@ func TestConnectEarlyData(t *testing.T) {
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\n\r\nearly", echo)
 	br := bufio.NewReader(c)
-	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
-	if err != nil || resp.StatusCode != 200 {
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT = %v, %v", resp, err)
 	}
 	got := make([]byte, 5)
@@ -239,7 +239,7 @@ func TestAuth(t *testing.T) {
 	d.Password = "nope"
 	_, err = d.DialContext(context.Background(), "tcp", echo)
 	var ce *proxydial.ConnectError
-	if !errors.As(err, &ce) || ce.StatusCode != 407 || ce.Header.Get("Proxy-Authenticate") == "" {
+	if !errors.As(err, &ce) || ce.StatusCode != http.StatusProxyAuthRequired || ce.Header.Get("Proxy-Authenticate") == "" {
 		t.Fatalf("wrong password = %v", err)
 	}
 }
@@ -398,7 +398,7 @@ func TestForwardWithTransport(t *testing.T) {
 		if tt.method == "HEAD" {
 			want = ""
 		}
-		if resp.StatusCode != 200 || string(b) != want || resp.Header.Get("X-Origin") != "yes" {
+		if resp.StatusCode != http.StatusOK || string(b) != want || resp.Header.Get("X-Origin") != "yes" {
 			t.Fatalf("%s %s = %d %q %v", tt.method, tt.query, resp.StatusCode, b, resp.Header)
 		}
 		s := <-got
@@ -535,7 +535,7 @@ func TestExpectContinue(t *testing.T) {
 func TestEarlyResponse(t *testing.T) {
 	o := origin(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "close")
-		w.WriteHeader(413)
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
 	})
 	addr := serve(t, &httpproxy.Server{})
 	c, err := net.Dial("tcp", addr)
@@ -550,7 +550,7 @@ func TestEarlyResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 413 {
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("response = %d", resp.StatusCode)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -562,7 +562,7 @@ func TestEarlyResponse(t *testing.T) {
 func TestUpgradePassthrough(t *testing.T) {
 	o := origin(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Upgrade") != "websocket" || !strings.EqualFold(r.Header.Get("Connection"), "upgrade") {
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		c, brw, err := w.(http.Hijacker).Hijack()
@@ -584,7 +584,7 @@ func TestUpgradePassthrough(t *testing.T) {
 	_, _ = fmt.Fprintf(c, "GET %s/ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n", o.URL)
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 101 || resp.Header.Get("Upgrade") != "websocket" {
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols || resp.Header.Get("Upgrade") != "websocket" {
 		t.Fatalf("upgrade = %v, %v", resp, err)
 	}
 	_, _ = io.WriteString(c, "frames")

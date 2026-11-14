@@ -25,14 +25,14 @@ func (e fakeNetError) Temporary() bool { return e.temporary }
 func (e fakeNetError) Timeout() bool   { return e.timeout }
 
 type connStateProbe interface {
-	Read([]byte) (int, error)
-	Write([]byte) (int, error)
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
 	Close() error
 	LocalAddr() net.Addr
 	RemoteAddr() net.Addr
-	SetDeadline(time.Time) error
-	SetReadDeadline(time.Time) error
-	SetWriteDeadline(time.Time) error
+	SetDeadline(t time.Time) error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 }
 
 type rawConnStateProbe interface {

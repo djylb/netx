@@ -83,7 +83,7 @@ func FuzzCovers(f *testing.F) {
 			}
 			return
 		}
-		for i := 0; i < len(c); i++ {
+		for i := range len(c) {
 			if c[i] >= utf8.RuneSelf || c[i] >= 'A' && c[i] <= 'Z' {
 				t.Fatalf("CanonicalName(%q) = %q, not lowercase ASCII", name, c)
 			}

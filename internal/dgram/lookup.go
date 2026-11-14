@@ -39,7 +39,7 @@ type Lookups[V any] struct {
 	resolve func(ctx context.Context, name string) (V, error)
 	send    func(p []byte, name string, v V, port uint16)
 	busy    error           // returned for a datagram beyond the bounds
-	ctx     context.Context // canceled by Close, ending lookups
+	ctx     context.Context //nolint:containedctx // owned by the Lookups, canceled by Close, ending lookups
 	cancel  context.CancelFunc
 	names   map[string]lookupEntry[V]
 	queues  map[string][]heldDatagram // by name, while it is looked up
@@ -64,7 +64,7 @@ type heldDatagram struct {
 // bounded by timeout, send held datagrams with send, and fail datagrams
 // beyond the bounds with busy.
 func NewLookups[V any](timeout time.Duration, busy error, resolve func(ctx context.Context, name string) (V, error), send func(p []byte, name string, v V, port uint16)) *Lookups[V] {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is kept in the struct and called by Close
 	return &Lookups[V]{
 		resolve: resolve, send: send, busy: busy, ctx: ctx, cancel: cancel,
 		names:   make(map[string]lookupEntry[V]),

@@ -135,7 +135,7 @@ func (a Addr) Network() string { return "" }
 // lowerASCII returns s with ASCII letters in lower case, s itself when it
 // has none in upper case.
 func lowerASCII(s string) string {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; c >= 'A' && c <= 'Z' {
 			b := []byte(s)
 			for j := i; j < len(b); j++ {
