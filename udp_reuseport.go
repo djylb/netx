@@ -33,8 +33,8 @@ func ListenUDPReusePort(ctx context.Context, lc *net.ListenConfig, network, addr
 		}
 		return []*net.UDPConn{pc.(*net.UDPConn)}, nil
 	}
-	if !reusePortBalances {
-		return nil, ErrReusePortUnsupported
+	if err := reusePortSupport(); err != nil {
+		return nil, err
 	}
 	control := cfg.Control
 	cfg.Control = func(network, address string, c syscall.RawConn) error {

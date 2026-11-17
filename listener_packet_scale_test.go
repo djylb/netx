@@ -141,8 +141,8 @@ func TestPacketListenerMoreConns(t *testing.T) {
 func TestListenUDPReusePort(t *testing.T) {
 	ctx := context.Background()
 	conns, err := ListenUDPReusePort(ctx, nil, "udp4", "127.0.0.1:0", 3)
-	if !reusePortBalances {
-		if !errors.Is(err, ErrReusePortUnsupported) {
+	if unsupported := reusePortSupport(); unsupported != nil {
+		if !errors.Is(err, unsupported) {
 			t.Fatalf("err = %v, want ErrReusePortUnsupported", err)
 		}
 		return
@@ -161,12 +161,19 @@ func TestListenUDPReusePort(t *testing.T) {
 	defer func() { _ = l.Close() }()
 	const peers = 16
 	go func() {
+		// Each peer keeps its socket, so its address stays distinct.
+		var dialed []*net.UDPConn
+		defer func() {
+			for _, c := range dialed {
+				_ = c.Close()
+			}
+		}()
 		for i := range peers {
 			c, err := net.DialUDP("udp4", nil, l.Addr().(*net.UDPAddr))
 			if err != nil {
 				return
 			}
-			defer func() { _ = c.Close() }()
+			dialed = append(dialed, c)
 			for range 3 {
 				_, _ = c.Write(fmt.Appendf(nil, "peer %d", i))
 			}

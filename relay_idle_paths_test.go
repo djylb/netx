@@ -254,7 +254,9 @@ func TestRelayIdleKeepsSplice(t *testing.T) {
 		t.Fatalf("read %q, %v", buf, err)
 	}
 	_ = a1.Close()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	want := "stream" // a TCP connection's WriteTo would use a buffer of its own
 	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 		want = "splice"

@@ -34,7 +34,7 @@ func newWheelTable(t *testing.T, clock *timeshim.Fake, onShutdown func(*wheelCon
 	return tab
 }
 
-func addWheelConn(t *testing.T, tab *Table[int, *wheelConn], clock *timeshim.Fake, key int) *wheelConn {
+func addWheelConn(t *testing.T, tab *Table[int, *wheelConn], key int) *wheelConn {
 	t.Helper()
 	c := &wheelConn{key: key, tab: tab}
 	c.q.Init(4, tab.wheel.epoch)
@@ -62,7 +62,7 @@ func TestWheelRemoveUnlinks(t *testing.T) {
 	tab := newWheelTable(t, clock, nil)
 	conns := make([]*wheelConn, 5)
 	for i := range conns {
-		conns[i] = addWheelConn(t, tab, clock, i)
+		conns[i] = addWheelConn(t, tab, i)
 	}
 	tab.Remove(1, conns[1])
 	tab.Remove(4, conns[4])
@@ -102,7 +102,7 @@ func TestWheelShutsDownOutsideLock(t *testing.T) {
 			tab.wheel.mu.Unlock()
 		}
 	})
-	c := addWheelConn(t, tab, clock, 1)
+	c := addWheelConn(t, tab, 1)
 	clock.Advance(2 * time.Minute)
 	if !c.q.Closed() {
 		t.Fatal("the idle connection was not shut down")

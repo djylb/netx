@@ -2,7 +2,9 @@ package netx
 
 import "syscall"
 
-const reusePortBalances = true
+// reusePortSupport reports nil: Linux spreads unicast datagrams over
+// SO_REUSEPORT sockets.
+func reusePortSupport() error { return nil }
 
 func setReusePort(c syscall.RawConn) error {
 	var serr error
