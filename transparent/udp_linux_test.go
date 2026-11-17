@@ -261,10 +261,8 @@ func TestIsLocalAddrCached(t *testing.T) {
 			t.Fatalf("isLocalAddrCached(%v) = %v, %v; want false", remote, got, err)
 		}
 	}
-	localAddrs.Lock()
-	_, cachedLocal := localAddrs.set[localAddrKey{ip: local}]
-	_, cachedRemote := localAddrs.set[localAddrKey{ip: remote}]
-	localAddrs.Unlock()
+	cachedLocal := localAddrs.has(localAddrKey{ip: local})
+	cachedRemote := localAddrs.has(localAddrKey{ip: remote})
 	if !cachedLocal || cachedRemote {
 		t.Fatalf("cached local %v remote %v; want true, false", cachedLocal, cachedRemote)
 	}

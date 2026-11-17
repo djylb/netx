@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestIsLocalAddr(t *testing.T) {
@@ -136,5 +137,35 @@ func TestIsLocalAddrInVRF(t *testing.T) {
 	}
 	if got, err := isLocalAddr(raw, ip); err != nil || !got {
 		t.Fatalf("isLocalAddr(bound to %s, %v) = %v, %v; want true", vrf, ip, got, err)
+	}
+}
+
+// Each cached answer expires on its own, and the bound drops only expired
+// ones instead of the whole cache.
+func TestLocalAddrCachePerEntryExpiry(t *testing.T) {
+	c := &localAddrCache{base: time.Now().Add(-time.Hour), ttl: time.Hour}
+	old := localAddrKey{ip: netip.MustParseAddr("127.0.0.1")}
+	c.add(old)
+	c.base = c.base.Add(-30 * time.Minute) // old is 30 minutes in
+	fresh := localAddrKey{ip: netip.MustParseAddr("127.0.0.2")}
+	c.add(fresh)
+	if !c.has(old) || !c.has(fresh) {
+		t.Fatal("answers within their time to live are missing")
+	}
+	c.base = c.base.Add(-40 * time.Minute) // old expired, fresh 40 minutes in
+	if c.has(old) {
+		t.Fatal("an expired answer is still used")
+	}
+	if !c.has(fresh) {
+		t.Fatal("a fresh answer was dropped with an expired one")
+	}
+	for i := range localAddrsMax + 10 {
+		c.add(localAddrKey{ip: netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)})})
+	}
+	if n := c.n.Load(); n > localAddrsMax {
+		t.Fatalf("cache holds %d, want at most %d", n, localAddrsMax)
+	}
+	if !c.has(fresh) {
+		t.Fatal("the bound dropped an unexpired answer")
 	}
 }

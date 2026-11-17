@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -137,37 +138,30 @@ func routeIsLocal(ip netip.Addr, ifindex int) (bool, error) {
 }
 
 // isLocalAddrCached is isLocalAddr for every datagram: addresses found local
-// are remembered for a minute, so that only datagrams to other addresses ask
-// the routing table. Only local answers are kept, so that an address added
-// meanwhile is not reported as redirected, which would loop; at worst one
-// removed meanwhile is reported as direct. At most localAddrsMax are kept.
+// are remembered for localAddrTTL each, so that only datagrams to other
+// addresses ask the routing table. Only local answers are kept, so that an
+// address added meanwhile is not reported as redirected, which would loop;
+// at worst one removed meanwhile is reported as direct. Lookups take no
+// lock, and at most localAddrsMax are kept.
 func isLocalAddrCached(raw syscall.RawConn, ip netip.Addr) (bool, error) {
 	ifindex, err := boundIfindex(raw)
 	if err != nil {
 		return false, err
 	}
 	key := localAddrKey{ip: ip.Unmap(), ifindex: ifindex}
-	localAddrs.Lock()
-	if now := time.Now(); localAddrs.set == nil || now.After(localAddrs.expires) {
-		localAddrs.set, localAddrs.expires = make(map[localAddrKey]struct{}), now.Add(time.Minute)
-	}
-	_, ok := localAddrs.set[key]
-	localAddrs.Unlock()
-	if ok {
+	if localAddrs.has(key) {
 		return true, nil
 	}
 	local, err := routeIsLocal(key.ip, ifindex)
 	if err != nil || !local {
 		return false, err
 	}
-	localAddrs.Lock()
-	if len(localAddrs.set) >= localAddrsMax {
-		clear(localAddrs.set)
-	}
-	localAddrs.set[key] = struct{}{}
-	localAddrs.Unlock()
+	localAddrs.add(key)
 	return true, nil
 }
+
+// localAddrTTL is how long isLocalAddrCached trusts a local answer.
+const localAddrTTL = time.Minute
 
 // localAddrsMax bounds the addresses isLocalAddrCached keeps: far more than a
 // host has, but a local route such as 127.0.0.0/8 covers millions.
@@ -178,10 +172,55 @@ type localAddrKey struct {
 	ifindex int
 }
 
-var localAddrs struct {
-	sync.Mutex
-	set     map[localAddrKey]struct{}
-	expires time.Time
+// localAddrCache maps addresses found local to when that answer expires,
+// each on its own, in time since base.
+type localAddrCache struct {
+	base time.Time
+	m    sync.Map // localAddrKey → int64
+	n    atomic.Int64
+	ttl  time.Duration
+}
+
+var localAddrs = &localAddrCache{base: time.Now(), ttl: localAddrTTL}
+
+func (c *localAddrCache) now() int64 { return int64(time.Since(c.base)) }
+
+// has reports whether key was found local within the time to live, and
+// drops its expired answer.
+func (c *localAddrCache) has(key localAddrKey) bool {
+	v, ok := c.m.Load(key)
+	if !ok {
+		return false
+	}
+	if c.now() < v.(int64) {
+		return true
+	}
+	if c.m.CompareAndDelete(key, v) {
+		c.n.Add(-1)
+	}
+	return false
+}
+
+// add remembers that key is local. At the bound it first drops the expired
+// answers, and keeps the new one only if that made room.
+func (c *localAddrCache) add(key localAddrKey) {
+	exp := c.now() + int64(c.ttl)
+	if _, loaded := c.m.Swap(key, exp); loaded {
+		return
+	}
+	if c.n.Add(1) <= localAddrsMax {
+		return
+	}
+	now := c.now()
+	c.m.Range(func(k, v any) bool {
+		if now >= v.(int64) && c.m.CompareAndDelete(k, v) {
+			c.n.Add(-1)
+		}
+		return true
+	})
+	if c.n.Load() > localAddrsMax && c.m.CompareAndDelete(key, exp) {
+		c.n.Add(-1)
+	}
 }
 
 // routeLookupError returns nil for the errors of a lookup that found no
