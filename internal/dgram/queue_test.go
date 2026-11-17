@@ -5,7 +5,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"slices"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,7 +51,7 @@ func TestQueueBoundsBytes(t *testing.T) {
 		if got := readAll(); !slices.Equal(got, tt.want) {
 			t.Fatalf("%s: read %v, want %v", tt.name, got, tt.want)
 		}
-		if n := q.queued.Load(); n != 0 {
+		if n := q.queued; n != 0 {
 			t.Fatalf("%s: %d bytes still counted as queued", tt.name, n)
 		}
 	}
@@ -127,5 +131,93 @@ func TestQueueDoesNotAllocate(t *testing.T) {
 	})
 	if allocs > 0 {
 		t.Fatalf("allocations per queued datagram = %v, want 0", allocs)
+	}
+}
+
+// The ring grows with the datagrams queued, keeping the bound, and a burst's
+// room is let go once it is read.
+func TestQueueGrowsOnDemand(t *testing.T) {
+	q := newQueue(128)
+	if q.ring != nil {
+		t.Fatalf("a new queue holds %d slots, want none", len(q.ring))
+	}
+	q.Enqueue([]byte("x"))
+	if len(q.ring) > minRing {
+		t.Fatalf("one datagram holds %d slots, want at most %d", len(q.ring), minRing)
+	}
+	accepted := 1
+	for range 200 {
+		if q.Enqueue([]byte("x")) {
+			accepted++
+		}
+	}
+	if accepted != 128 || q.Len() != 128 {
+		t.Fatalf("queued %d (Len %d), want the bound of 128", accepted, q.Len())
+	}
+	buf := make([]byte, 8)
+	for range 128 {
+		if _, err := q.Read(buf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(q.ring) > minRing {
+		t.Fatalf("a drained queue holds %d slots, want at most %d", len(q.ring), minRing)
+	}
+}
+
+// Several readers take every datagram, also when they are queued faster
+// than one wake-up each.
+func TestQueueSeveralReaders(t *testing.T) {
+	q := newQueue(1024)
+	const total = 1000
+	var got atomic.Int64
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			buf := make([]byte, 8)
+			for {
+				if _, err := q.Read(buf); err != nil {
+					return
+				}
+				if got.Add(1) == total {
+					q.Close(net.ErrClosed)
+				}
+			}
+		})
+	}
+	for range total {
+		for !q.Enqueue([]byte("x")) {
+			runtime.Gosched()
+		}
+	}
+	wg.Wait()
+	if n := got.Load(); n != total {
+		t.Fatalf("read %d datagrams, want %d", n, total)
+	}
+}
+
+// BenchmarkIdleQueueMemory reports the memory of the queue of an idle flow
+// with the default bound, after one datagram passed.
+func BenchmarkIdleQueueMemory(b *testing.B) {
+	for _, n := range []int{10, 1 << 20} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			buf := make([]byte, 8)
+			for b.Loop() {
+				var before, after runtime.MemStats
+				runtime.GC()
+				runtime.GC()
+				runtime.ReadMemStats(&before)
+				qs := make([]Queue, n)
+				for i := range qs {
+					qs[i].Init(128, nil)
+					qs[i].Enqueue(buf)
+					_, _ = qs[i].Read(buf)
+				}
+				runtime.GC()
+				runtime.ReadMemStats(&after)
+				b.ReportMetric(float64(after.HeapInuse-before.HeapInuse)/float64(n), "B/flow")
+				runtime.KeepAlive(qs)
+			}
+		})
 	}
 }
