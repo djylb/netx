@@ -347,6 +347,7 @@ type association struct {
 	once    sync.Once      // closes done
 	pending timeshim.Timer // ends an association that never receives a datagram
 	conn    net.Conn       // the client's datagram stream once bound
+	control net.Conn       // the control connection once replied to, which close closes
 	done    chan struct{}
 }
 
@@ -393,10 +394,14 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	// The association lasts while the control connection is open; it ending
 	// first closes the control connection, which also ends the read below
 	// on connections without deadline support.
-	go func() {
-		<-a.done
+	a.mu.Lock()
+	if isDone(a.done) {
+		a.mu.Unlock()
 		_ = req.Conn.Close()
-	}()
+	} else {
+		a.control = req.Conn
+		a.mu.Unlock()
+	}
 	_, err = io.Copy(io.Discard, req.Conn)
 	if isDone(a.done) {
 		err = nil // the association ended and closed the connection
@@ -530,8 +535,11 @@ func (a *association) close() {
 		a.mu.Lock()
 		close(a.done)
 		a.pending.Stop()
-		conn := a.conn
+		conn, control := a.conn, a.control
 		a.mu.Unlock()
+		if control != nil {
+			_ = control.Close()
+		}
 		// After done is closed, so that relay.add refuses a.
 		a.relay.remove(a)
 		if conn != nil {
