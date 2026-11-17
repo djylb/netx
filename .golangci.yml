@@ -106,6 +106,11 @@ linters:
         linters:
           - gosec
         text: G103
+      # So does the batch read of a PacketListener, through recvmmsg.
+      - path: ^listener_packet_batch_linux\.go$
+        linters:
+          - gosec
+        text: G103
       # Tests listen and dial on loopback with the plain net functions, bind
       # and configure TLS as the test needs (self-signed, unverified), use
       # local paths and weak randomness, and run the test binary by path.

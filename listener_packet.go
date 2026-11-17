@@ -33,9 +33,11 @@ import (
 // its Accept waits until Close, its Addr is nil, and its Dial and WriteTo
 // fail.
 type PacketListener struct {
-	pc   net.PacketConn
-	udp  *net.UDPConn // pc, when it is one: alloc-free reads and writes
-	opts packetListenerOptions
+	pc     net.PacketConn
+	udp    *net.UDPConn // pc, when it is one: alloc-free reads and writes
+	more   []packetSocket
+	reject *rejectCache // nil without WithPacketRejectCache
+	opts   packetListenerOptions
 
 	conns     dgram.Table[peerKey, *packetConn]
 	closeOnce sync.Once
@@ -48,12 +50,16 @@ type PacketListener struct {
 
 type packetListenerOptions struct {
 	filter      func(peer net.Addr, first []byte) bool
+	clock       timeshim.Clock
+	more        []net.PacketConn
 	queue       int
 	backlog     int
 	maxConns    int
 	idle        time.Duration
-	clock       timeshim.Clock
 	maxDatagram int
+	batch       int
+	rejectSize  int
+	rejectTTL   time.Duration
 	// beforeFilter, set by tests, runs before the accept filter.
 	beforeFilter func(*PacketListener)
 }
@@ -154,6 +160,43 @@ func WithPacketMaxDatagram(n int) PacketListenerOption {
 	}
 }
 
+// WithPacketConns adds more packet connections to the listener, which reads
+// each with a read loop of its own into the same connections, so that peers
+// are read on several cores: sockets bound to the same address with
+// SO_REUSEPORT, as ListenPacketReusePort makes them, among which the kernel
+// spreads peers by their address, so that the datagrams of one peer keep
+// their order. A connection writes from the packet connection that its peer
+// first came through, and Dial and WriteTo from pc. The listener owns them
+// as it owns pc.
+func WithPacketConns(more ...net.PacketConn) PacketListenerOption {
+	return func(o *packetListenerOptions) {
+		o.more = append(o.more, more...)
+	}
+}
+
+// WithPacketReadBatch reads up to n datagrams with one system call, where the
+// platform has one for it (recvmmsg on Linux and Android) and the packet
+// connection is a *net.UDPConn; elsewhere a datagram is read at a time. Each
+// read loop then holds n buffers of the WithPacketMaxDatagram size, so lower
+// that to what the protocol sends. A non-positive or single n, the default,
+// reads a datagram at a time.
+func WithPacketReadBatch(n int) PacketListenerOption {
+	return func(o *packetListenerOptions) {
+		o.batch = n
+	}
+}
+
+// WithPacketRejectCache remembers up to size peers that the accept filter
+// rejected, for ttl each, and drops their datagrams without calling the
+// filter again meanwhile, so that a peer that keeps sending costs a lookup.
+// The cache grows with the peers it holds; at size, the older half of them
+// is forgotten. A non-positive size or ttl, the default, keeps none.
+func WithPacketRejectCache(size int, ttl time.Duration) PacketListenerOption {
+	return func(o *packetListenerOptions) {
+		o.rejectSize, o.rejectTTL = size, ttl
+	}
+}
+
 // NewPacketListener starts reading pc and returns a listener for its peers.
 // The listener owns pc and closes it on Close. A read error meaning that pc
 // is closed or exhausted (net.ErrClosed, io.EOF) closes the listener; other
@@ -170,11 +213,25 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 	cfg.backlog = max(cfg.backlog, 1)
 	cfg.maxDatagram = max(cfg.maxDatagram, 1)
 	l := &PacketListener{pc: pc, opts: cfg, epoch: dgram.NewEpoch(cfg.clock)}
-	l.conns.Init(cfg.backlog, cfg.maxConns, (*packetConn).queue, (*packetConn).shutdown)
+	l.conns.Init(dgram.TableOptions[*packetConn]{Queue: (*packetConn).queue, Shutdown: (*packetConn).shutdown,
+		Epoch: l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle})
 	l.udp, _ = pc.(*net.UDPConn)
-	l.wg.Go(l.readLoop)
-	if cfg.idle > 0 {
-		l.wg.Go(func() { l.conns.Sweep(cfg.idle, l.epoch) })
+	if cfg.rejectSize > 0 && cfg.rejectTTL > 0 {
+		l.reject = newRejectCache(cfg.rejectSize, cfg.rejectTTL, l.epoch)
+	}
+	for _, more := range cfg.more {
+		if more != nil {
+			sock := packetSocket{pc: more}
+			sock.udp, _ = more.(*net.UDPConn)
+			l.more = append(l.more, sock)
+		}
+	}
+	l.opts.more = nil
+	if pc != nil {
+		l.wg.Go(func() { l.readLoop(l.primary()) })
+	}
+	for i := range l.more {
+		l.wg.Go(func() { l.readLoop(&l.more[i]) })
 	}
 	return l
 }
@@ -201,6 +258,11 @@ func (l *PacketListener) Close() error {
 		l.conns.Close(net.ErrClosed)
 		if l.pc != nil {
 			l.closeErr = l.pc.Close()
+		}
+		for _, sock := range l.more {
+			if err := sock.pc.Close(); l.closeErr == nil {
+				l.closeErr = err
+			}
 		}
 	})
 	// Wait for the read loop to stop, unless the accept filter called Close
@@ -270,7 +332,7 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	} else {
 		peer = net.UDPAddrFromAddrPort(k.ap)
 	}
-	c := l.makeConn(k, peer)
+	c := l.makeConn(k, peer, nil)
 	c.q.Accepted()
 	switch _, res := l.conns.Add(k, c, false); res {
 	case dgram.Added:
@@ -284,10 +346,55 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	return c, nil
 }
 
-func (l *PacketListener) readLoop() {
-	buf := make([]byte, max(l.opts.maxDatagram, dgram.MaxDatagram))
+// packetSocket is a packet connection that a PacketListener reads.
+type packetSocket struct {
+	pc  net.PacketConn
+	udp *net.UDPConn // pc, when it is one: alloc-free reads and writes
+}
+
+// primary returns the listener's own packet connection.
+func (l *PacketListener) primary() *packetSocket {
+	return &packetSocket{pc: l.pc, udp: l.udp}
+}
+
+func (l *PacketListener) readLoop(sock *packetSocket) {
 	done := l.conns.Done()
 	var backoff dgram.Backoff
+	// handle handles a read error and reports whether the loop goes on.
+	handle := func(err error) bool {
+		if dgram.IsClosed(done) {
+			return false
+		}
+		if IsClosed(err) || errors.Is(err, io.EOF) {
+			go func() { _ = l.Close() }()
+			return false
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			// The listener owns pc's reads; a deadline left on pc would
+			// fail every one of them.
+			_ = sock.pc.SetReadDeadline(time.Time{})
+		}
+		// ICMP errors reported on a UDP socket and the like do not end the
+		// loop; errors that persist are retried with a growing delay.
+		return backoff.Wait(done)
+	}
+	if b := newBatchReader(sock.udp, l.opts.batch, l.opts.maxDatagram); b != nil {
+		for {
+			n, err := b.read()
+			if err != nil {
+				if !handle(err) {
+					return
+				}
+				continue
+			}
+			backoff.Reset()
+			for i := range n {
+				p, ap := b.datagram(i)
+				l.deliver(p, netutil.UnmapAddrPort(ap), nil, sock)
+			}
+		}
+	}
+	buf := make([]byte, max(l.opts.maxDatagram, dgram.MaxDatagram))
 	for {
 		var (
 			n    int
@@ -295,42 +402,28 @@ func (l *PacketListener) readLoop() {
 			addr net.Addr
 			err  error
 		)
-		if l.udp != nil {
-			n, ap, err = l.udp.ReadFromUDPAddrPort(buf)
+		if sock.udp != nil {
+			n, ap, err = sock.udp.ReadFromUDPAddrPort(buf)
 		} else {
-			n, addr, err = l.pc.ReadFrom(buf)
+			n, addr, err = sock.pc.ReadFrom(buf)
 			if ua, ok := addr.(*net.UDPAddr); ok && ua != nil {
 				ap = ua.AddrPort()
 				addr = nil // reported from ap
 			}
 		}
 		if err != nil {
-			if dgram.IsClosed(done) {
-				return
-			}
-			if IsClosed(err) || errors.Is(err, io.EOF) {
-				go func() { _ = l.Close() }()
-				return
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				// The listener owns pc's reads; a deadline left on pc would
-				// fail every one of them.
-				_ = l.pc.SetReadDeadline(time.Time{})
-			}
-			// ICMP errors reported on a UDP socket and the like do not end the
-			// loop; errors that persist are retried with a growing delay.
-			if !backoff.Wait(done) {
+			if !handle(err) {
 				return
 			}
 			continue
 		}
 		backoff.Reset()
-		l.deliver(buf[:min(n, l.opts.maxDatagram)], netutil.UnmapAddrPort(ap), addr)
+		l.deliver(buf[:min(n, l.opts.maxDatagram)], netutil.UnmapAddrPort(ap), addr, sock)
 	}
 }
 
 // deliver queues one datagram for its peer's connection.
-func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
+func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr, sock *packetSocket) {
 	k := peerKey{ap: ap}
 	if !ap.IsValid() {
 		if addr == nil {
@@ -340,7 +433,7 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
 	}
 	c, ok := l.conns.Get(k)
 	if !ok {
-		if c = l.newConn(p, k, addr); c == nil {
+		if c = l.newConn(p, k, addr, sock); c == nil {
 			return
 		}
 	}
@@ -351,7 +444,7 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr) {
 // rejects it, the backlog or the connection limit is full or the listener is
 // closed, or returns the connection that Dial made for the peer meanwhile.
 // Only the read loop and Dial start connections.
-func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr) *packetConn {
+func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr, sock *packetSocket) *packetConn {
 	// Drop the datagram before anything is allocated for it while Accept
 	// falls behind or the limit is reached. Only the read loop adds to the
 	// backlog, so a full one stays full until Add checks it again below.
@@ -367,6 +460,9 @@ func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr) *packetConn
 	// the filter running and does not wait for it, or the filter does not
 	// run: Close cannot wait for a filter that waits for the caller of Close.
 	if l.opts.filter != nil {
+		if l.reject.has(k) {
+			return nil
+		}
 		if l.opts.beforeFilter != nil {
 			l.opts.beforeFilter(l)
 		}
@@ -374,28 +470,37 @@ func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr) *packetConn
 		ok := !l.closing.Load() && l.opts.filter(addr, p)
 		l.filtering.Store(false)
 		if !ok {
+			l.reject.add(k)
 			return nil
 		}
 	}
 	// Dial, or the filter, may have connected the peer meanwhile; the
 	// datagram is then its.
-	c, res := l.conns.Add(k, l.makeConn(k, addr), true)
+	c, res := l.conns.Add(k, l.makeConn(k, addr, sock), true)
 	if res != dgram.Added && res != dgram.Exists {
 		return nil
 	}
 	return c
 }
 
-// makeConn returns a connection to peer under k.
-func (l *PacketListener) makeConn(k peerKey, peer net.Addr) *packetConn {
+// makeConn returns a connection to peer under k, which writes from sock, or
+// from the listener's own packet connection when sock is nil.
+func (l *PacketListener) makeConn(k peerKey, peer net.Addr, sock *packetSocket) *packetConn {
 	c := &packetConn{l: l, key: k, peer: peer, writeDeadline: dgram.MakeDeadline()}
+	if sock != nil && sock.pc != l.pc {
+		c.sock = sock
+	}
 	c.q.Init(l.opts.queue, l.epoch)
 	return c
 }
 
 func (l *PacketListener) writeTo(p []byte, c *packetConn) (int, error) {
-	if l.udp != nil && c.key.ap.IsValid() {
-		return l.udp.WriteToUDPAddrPort(p, c.key.ap)
+	pc, udp := l.pc, l.udp
+	if c.sock != nil {
+		pc, udp = c.sock.pc, c.sock.udp
 	}
-	return l.pc.WriteTo(p, c.peer)
+	if udp != nil && c.key.ap.IsValid() {
+		return udp.WriteToUDPAddrPort(p, c.key.ap)
+	}
+	return pc.WriteTo(p, c.peer)
 }

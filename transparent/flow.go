@@ -161,10 +161,8 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
 	l := &FlowListener{c: c, opts: cfg, epoch: dgram.NewEpoch(cfg.clock)}
-	l.flows.Init(cfg.backlog, cfg.maxConns, (*FlowConn).queue, (*FlowConn).shutdown)
-	if cfg.idle > 0 {
-		l.wg.Go(func() { l.flows.Sweep(cfg.idle, l.epoch) })
-	}
+	l.flows.Init(dgram.TableOptions[*FlowConn]{Queue: (*FlowConn).queue, Shutdown: (*FlowConn).shutdown,
+		Epoch: l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle})
 	return l
 }
 

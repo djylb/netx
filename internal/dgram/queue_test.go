@@ -110,8 +110,8 @@ func TestQueueActivityIsMonotonic(t *testing.T) {
 	if d := time.Duration(RealEpoch.Now() - q.active.Load()); d < 0 || d > time.Second {
 		t.Fatalf("activity stamp is %v behind the monotonic clock, want about 0", d)
 	}
-	if q.IdleAt(RealEpoch.Now(), time.Hour) || !q.IdleAt(RealEpoch.At(time.Now().Add(time.Hour)), time.Hour) {
-		t.Fatal("IdleAt does not follow the activity stamp")
+	if last, accepted := q.Activity(); !accepted || last > RealEpoch.Now() || last < RealEpoch.At(time.Now().Add(-time.Hour)) {
+		t.Fatal("Activity does not follow the activity stamp")
 	}
 }
 

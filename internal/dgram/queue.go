@@ -169,11 +169,12 @@ func (q *Queue) Accepted() {
 	q.accepted.Store(true)
 }
 
-// IdleAt reports whether the accepted connection has been idle for at least
-// d at now, a time of its Epoch. A connection waiting for Accept is not idle: the
-// backlog is bounded, and closing it would lose its datagrams.
-func (q *Queue) IdleAt(now int64, d time.Duration) bool {
-	return q.accepted.Load() && now-q.active.Load() >= int64(d)
+// Activity returns the Epoch time of the last activity, and whether the
+// connection was accepted, which starts its idle timeout.
+func (q *Queue) Activity() (last int64, accepted bool) {
+	// accepted first: Accepted touches before it sets it.
+	accepted = q.accepted.Load()
+	return q.active.Load(), accepted
 }
 
 // drain releases the queued datagrams of a closed queue.

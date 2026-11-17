@@ -20,6 +20,7 @@ type peerKey struct {
 // packetConn is one peer of a PacketListener.
 type packetConn struct {
 	l    *PacketListener
+	sock *packetSocket // the packet connection it writes from; nil for l's own
 	key  peerKey
 	peer net.Addr
 
