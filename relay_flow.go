@@ -131,6 +131,56 @@ func newRelayIdle(d time.Duration, c timeshim.Clock) *relayIdle {
 
 func (i *relayIdle) touch() { i.activity.Store(i.epoch.Now()) }
 
+// done records n bytes written, as a RelayFlow's Done.
+func (i *relayIdle) done(n int64) error {
+	if n > 0 {
+		i.touch()
+	}
+	return nil
+}
+
+// writer returns w recording the data written to it, or w for a nil i.
+func (i *relayIdle) writer(w io.Writer) io.Writer {
+	if i == nil {
+		return w
+	}
+	return idleWriter{w: w, i: i}
+}
+
+// reader returns r recording the data read from it, or r for a nil i.
+func (i *relayIdle) reader(r io.Reader) io.Reader {
+	if i == nil {
+		return r
+	}
+	return idleReader{r: r, i: i}
+}
+
+type idleWriter struct {
+	w io.Writer
+	i *relayIdle
+}
+
+func (w idleWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 {
+		w.i.touch()
+	}
+	return n, err
+}
+
+type idleReader struct {
+	r io.Reader
+	i *relayIdle
+}
+
+func (r idleReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if n > 0 {
+		r.i.touch()
+	}
+	return n, err
+}
+
 // watch returns f recording the data that passes, and its waits.
 func (i *relayIdle) watch(f RelayFlow) RelayFlow {
 	done := f.Done

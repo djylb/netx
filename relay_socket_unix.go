@@ -3,6 +3,7 @@
 package netx
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -85,7 +86,7 @@ func socketSource(s *relaySource) relaySocket {
 // error, such as a reset: peeking at it clears it on Linux, so a read would
 // report a clean end instead, and the error of the wait itself, as for a
 // closed connection or a passed deadline, as a read would.
-func (s *streamSocket) wait() (bool, error) {
+func (s *streamSocket) wait(context.Context) (bool, error) {
 	if s.src.exhausted() {
 		return true, nil // the bound ends the source
 	}
@@ -174,6 +175,3 @@ func (s *relaySource) consumed(n int) {
 		s.limit.N -= int64(n)
 	}
 }
-
-// exhausted reports whether the source's bound is used up.
-func (s *relaySource) exhausted() bool { return s.limit != nil && s.limit.N <= 0 }

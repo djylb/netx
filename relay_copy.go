@@ -3,11 +3,13 @@ package netx
 import (
 	"context"
 	"io"
+	"sync/atomic"
 )
 
 // relayDirection copies src to dst for Relay and Copy, through f when it is
-// active.
-func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int64, error) {
+// active, recording the data that passes in idle, if not nil, which Relay
+// has already put into an active f.
+func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow, idle *relayIdle) (int64, error) {
 	// A RelayEnd is copied as its reader and writer are.
 	for {
 		e, ok := dst.(*RelayEnd)
@@ -24,12 +26,12 @@ func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayF
 		src = e.Reader
 	}
 	if c, ok := src.(*ChainReader); ok && c != nil {
-		return copyChain(ctx, dst, c, f)
+		return copyChain(ctx, dst, c, f, idle)
 	}
 	e := newRelayEnds(dst, src)
 	s, d := &e.src, &e.dst
 	if !f.active() {
-		return relayCopy(d, s) //nolint:contextcheck // a relay without a flow is ended by deadlines, as ctx does
+		return relayCopy(ctx, d, s, idle)
 	}
 	var prefix int64
 	if f.First != nil && !s.readsDatagrams() {
@@ -59,29 +61,51 @@ func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayF
 	return prefix + n, err
 }
 
-// relayCopy copies s to d without a flow.
-func relayCopy(d *relaySink, s *relaySource) (int64, error) {
+// relayPath, set by tests, is told which way relayCopy copies.
+var relayPath atomic.Pointer[func(path string)]
+
+func tellPath(path string) {
+	if f := relayPath.Load(); f != nil {
+		(*f)(path)
+	}
+}
+
+// relayCopy copies s to d without a flow, recording the data that passes in
+// idle, if not nil, around the fast paths, which it keeps: splice, in
+// pieces that idle sees, the source's WriteTo, through a writer that tells
+// idle of each write, and the destination's ReadFrom, through a reader that
+// tells it of each read.
+func relayCopy(ctx context.Context, d *relaySink, s *relaySource, idle *relayIdle) (int64, error) {
+	var f *RelayFlow // reports to idle; not active, so it adds no buffer
+	if idle != nil {
+		f = &RelayFlow{Done: idle.done}
+	}
 	if canSplice(d, s) {
-		n, ok, err := spliceCopy(context.Background(), d, s, nil)
+		tellPath("splice")
+		n, ok, err := spliceCopy(ctx, d, s, f)
 		if !ok {
 			var m int64
-			m, err = io.Copy(d.w, s.r)
+			m, err = io.Copy(idle.writer(d.w), s.r)
 			n += m
 		}
 		return n, err
 	}
 	if wt, ok := s.ownWriterTo(); ok {
-		return wt.WriteTo(d.w)
+		tellPath("writeto")
+		return wt.WriteTo(idle.writer(d.w))
 	}
 	// Before the writing end's ReadFrom, which would copy datagrams through
 	// a buffer of its own, perhaps cutting them, and drop empty ones.
 	if s.readsDatagrams() {
-		return copyDatagrams(context.Background(), d.w, s, nil)
+		tellPath("datagrams")
+		return copyDatagrams(ctx, d.w, s, f)
 	}
 	if rf, ok := d.w.(io.ReaderFrom); ok && !isStdConn(d.w) {
-		return rf.ReadFrom(s.r)
+		tellPath("readfrom")
+		return rf.ReadFrom(idle.reader(s.r))
 	}
-	return copyStream(context.Background(), d.w, s, nil)
+	tellPath("stream")
+	return copyStream(ctx, d.w, s, f)
 }
 
 // relaySocket is a source that Relay can wait on without a buffer; see
@@ -89,7 +113,7 @@ func relayCopy(d *relaySink, s *relaySource) (int64, error) {
 type relaySocket interface {
 	// wait waits until the source has data, an end or an error, reports
 	// an end, and returns the error of a failed wait as a read would.
-	wait() (end bool, err error)
+	wait(ctx context.Context) (end bool, err error)
 	// readNow reads what the source holds without waiting, or reports
 	// blocked.
 	readNow(b []byte) (n int, blocked bool, err error)
@@ -134,7 +158,7 @@ func copyFirstPiece(ctx context.Context, dst io.Writer, s *relaySource, f *Relay
 		end := false
 		if sock != nil {
 			var err error
-			if end, err = sock.wait(); err != nil {
+			if end, err = sock.wait(ctx); err != nil {
 				return 0, true, err
 			}
 		}
@@ -179,7 +203,7 @@ func copyStream(ctx context.Context, dst io.Writer, s *relaySource, f *RelayFlow
 		if sock != nil && (!full || paced) {
 			release()
 			var err error
-			if end, err = sock.wait(); err != nil {
+			if end, err = sock.wait(ctx); err != nil {
 				return written, err
 			}
 		}

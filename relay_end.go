@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"context"
 	"io"
 	"net"
 	"strings"
@@ -187,9 +188,58 @@ func (s *relaySource) prefixPending() bool {
 func (s *relaySource) socket() relaySocket {
 	if !s.sockSet {
 		s.sock, s.sockSet = socketSource(s), true
+		if s.sock == nil {
+			s.sock = waiterSource(s)
+		}
 	}
 	return s.sock
 }
+
+// ReadableWaiter is a source that can wait until a Read would not block
+// without reading, such as a stream of a multiplexed connection. Relay and
+// Copy wait on it before they take a buffer for a stream, so that an idle
+// direction holds none; a TCP or Unix stream socket is waited on so without
+// it on Unix systems.
+type ReadableWaiter interface {
+	// WaitReadable returns once a Read would return data, the end of the
+	// stream or an error at once, or with an error once ctx is done or the
+	// source is closed, as Read would. Relay closes its ends to stop, and
+	// its ctx need not end then.
+	WaitReadable(ctx context.Context) error
+}
+
+// waiterSocket is a source that waits through a ReadableWaiter; it reads
+// only with the source's Read.
+type waiterSocket struct {
+	src *relaySource
+	w   ReadableWaiter
+}
+
+// waiterSource returns the source's ReadableWaiter, beneath the wrappers
+// that pass reads on, or nil.
+func waiterSource(s *relaySource) relaySocket {
+	w, ok := s.base.(ReadableWaiter)
+	if !ok || netutil.IsNilPointer(w) {
+		return nil
+	}
+	return waiterSocket{src: s, w: w}
+}
+
+func (s waiterSocket) wait(ctx context.Context) (bool, error) {
+	switch {
+	case s.src.exhausted():
+		return true, nil // the bound ends the source
+	case s.src.prefixPending():
+		return false, nil
+	}
+	if err := s.src.timeouts.refresh(); err != nil {
+		return false, err
+	}
+	return false, s.w.WaitReadable(ctx)
+}
+
+// readNow reports blocked: the source is read only after a wait.
+func (waiterSocket) readNow([]byte) (int, bool, error) { return 0, true, nil }
 
 // ownWriterTo returns the source's WriteTo unless it only falls back to a
 // buffer of its own: that of a *net.TCPConn or *net.UnixConn, or of a
@@ -295,3 +345,6 @@ func isStdConn(c any) bool {
 func canSplice(d *relaySink, s *relaySource) bool {
 	return netutil.Splices(d.base, s.base)
 }
+
+// exhausted reports whether the source's bound is used up.
+func (s *relaySource) exhausted() bool { return s.limit != nil && s.limit.N <= 0 }

@@ -158,7 +158,7 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 				splicePipePool.Put(p)
 				p = nil
 			}
-			if end, err = sock.wait(); err != nil {
+			if end, err = sock.wait(ctx); err != nil {
 				return written, true, err
 			}
 		}

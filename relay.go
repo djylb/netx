@@ -42,8 +42,10 @@ func WithRelayHalfClose() RelayOption {
 // direction for d, and Relay then returns ErrRelayIdle. Relay watches the
 // data it copies, also where it splices, and leaves the ends' deadlines
 // alone, so it works on ends without deadlines too; time spent in a
-// RelayFlow.Wait does not count as idle. As with RelayFlow hooks, the ends'
-// own WriteTo and ReadFrom are then not used. A non-positive d sets none.
+// RelayFlow.Wait does not count as idle. The idle timeout keeps the fast
+// paths of a direction without RelayFlow hooks: splice, in pieces, and the
+// ends' own WriteTo and ReadFrom, through a writer or reader that records
+// the data. A non-positive d sets none.
 func WithRelayIdleTimeout(d time.Duration) RelayOption {
 	return func(o *relayOptions) {
 		o.idle = d
@@ -171,8 +173,13 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 	var idle *relayIdle
 	if cfg.idle > 0 {
 		idle = newRelayIdle(cfg.idle, cfg.clock)
-		cfg.flows[0] = idle.watch(cfg.flows[0])
-		cfg.flows[1] = idle.watch(cfg.flows[1])
+		// An active flow reports to idle itself; the others keep their
+		// fast paths, around which the copy reports to idle.
+		for i := range cfg.flows {
+			if cfg.flows[i].active() {
+				cfg.flows[i] = idle.watch(cfg.flows[i])
+			}
+		}
 	}
 	// flowCtx, for the flows, ends with the relay.
 	parent := ctx
@@ -242,7 +249,11 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 
 	// direction copies src to dst and handles its end.
 	direction := func(dst, src io.ReadWriteCloser, f *RelayFlow) int64 {
-		n, copyErr := relayDirection(flowCtx, dst, src, f)
+		var dirIdle *relayIdle
+		if !f.active() {
+			dirIdle = idle
+		}
+		n, copyErr := relayDirection(flowCtx, dst, src, f, dirIdle)
 		endErr := copyErr
 		if endErr != nil && stopping.Load() {
 			endErr = net.ErrClosed // the relay's own Close ended it
@@ -288,7 +299,7 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int6
 			_ = w.SetWriteDeadline(dgram.Past)
 		}
 	})
-	n, err := relayDirection(ctx, dst, src, f)
+	n, err := relayDirection(ctx, dst, src, f, nil)
 	// A ctx that ended interrupted the copy: Stop then waits until the
 	// deadlines are set, so that they cannot undo deadlines the caller sets
 	// after Copy returns.

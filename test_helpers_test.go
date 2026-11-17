@@ -78,7 +78,7 @@ func assertClosedRawConnState(t *testing.T, label string, c rawConnStateProbe) {
 
 // copyPlain copies src to dst as Relay and Copy do without a flow.
 func copyPlain(dst io.Writer, src io.Reader) (int64, error) {
-	return relayDirection(context.Background(), dst, src, nil)
+	return relayDirection(context.Background(), dst, src, nil, nil)
 }
 
 // spliceable reports whether a copy from src to dst would splice.

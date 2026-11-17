@@ -129,14 +129,14 @@ func (c *ChainReader) Read(p []byte) (int, error) {
 }
 
 // copyChain copies the parts of c to dst, each as a source of its own.
-func copyChain(ctx context.Context, dst io.Writer, c *ChainReader, f *RelayFlow) (int64, error) {
+func copyChain(ctx context.Context, dst io.Writer, c *ChainReader, f *RelayFlow, idle *relayIdle) (int64, error) {
 	var total int64
 	for {
 		part, err := c.part()
 		if err != nil || part == nil {
 			return total, err
 		}
-		n, err := relayDirection(ctx, dst, part, f)
+		n, err := relayDirection(ctx, dst, part, f, idle)
 		total += n
 		if err != nil {
 			return total, err
