@@ -175,11 +175,16 @@ type localAddrKey struct {
 // localAddrCache maps addresses found local to when that answer expires,
 // each on its own, in time since base.
 type localAddrCache struct {
-	base time.Time
-	m    sync.Map // localAddrKey → int64
-	n    atomic.Int64
-	ttl  time.Duration
+	base  time.Time
+	m     sync.Map // localAddrKey → int64
+	n     atomic.Int64
+	swept atomic.Int64 // time of the last cleanup, since base
+	ttl   time.Duration
 }
+
+// localAddrSweepEvery is the least time between two cleanups of a full
+// cache, so that adds to a full one cost a cleanup at most that often.
+const localAddrSweepEvery = time.Second
 
 var localAddrs = &localAddrCache{base: time.Now(), ttl: localAddrTTL}
 
@@ -201,26 +206,43 @@ func (c *localAddrCache) has(key localAddrKey) bool {
 	return false
 }
 
-// add remembers that key is local. At the bound it first drops the expired
-// answers, and keeps the new one only if that made room.
+// add remembers that key is local. Past the bound it drops the expired
+// answers, and the whole cache if they were not enough, at most once per
+// localAddrSweepEvery; in between, a full cache takes no new answer.
 func (c *localAddrCache) add(key localAddrKey) {
-	exp := c.now() + int64(c.ttl)
-	if _, loaded := c.m.Swap(key, exp); loaded {
+	if c.n.Load() >= localAddrsMax && !c.sweep() {
 		return
 	}
-	if c.n.Add(1) <= localAddrsMax {
-		return
+	if _, loaded := c.m.Swap(key, c.now()+int64(c.ttl)); !loaded {
+		c.n.Add(1)
 	}
+}
+
+// sweep cleans a full cache up unless one did within localAddrSweepEvery,
+// and reports whether it did.
+func (c *localAddrCache) sweep() bool {
 	now := c.now()
+	last := c.swept.Load()
+	if last != 0 && now-last < int64(localAddrSweepEvery) || !c.swept.CompareAndSwap(last, now) {
+		return false
+	}
 	c.m.Range(func(k, v any) bool {
 		if now >= v.(int64) && c.m.CompareAndDelete(k, v) {
 			c.n.Add(-1)
 		}
 		return true
 	})
-	if c.n.Load() > localAddrsMax && c.m.CompareAndDelete(key, exp) {
-		c.n.Add(-1)
+	if c.n.Load() >= localAddrsMax {
+		// Every answer is live, as when a local route covers many
+		// addresses: start over rather than keep the old ones forever.
+		c.m.Range(func(k, v any) bool {
+			if c.m.CompareAndDelete(k, v) {
+				c.n.Add(-1)
+			}
+			return true
+		})
 	}
+	return true
 }
 
 // routeLookupError returns nil for the errors of a lookup that found no

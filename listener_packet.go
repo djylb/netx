@@ -97,9 +97,10 @@ func WithPacketAcceptFilter(filter func(peer net.Addr, first []byte) bool) Packe
 // WithPacketQueue sets how many datagrams a connection holds until they are
 // read, DefaultPacketQueue by default. A datagram larger than 2 KiB takes the
 // room of several in proportion to its size, so a connection holds at most
-// n × 2 KiB of queued datagrams, or a single larger one. Each connection also
-// takes a pointer-sized slot per datagram up front, when its first datagram
-// arrives.
+// n × 2 KiB of queued datagrams, or a single larger one. A connection's
+// queue grows with the datagrams waiting in it, a pointer-sized slot each,
+// up to n, and gives the room of a burst back once it is read, so the bound
+// costs nothing until datagrams pile up.
 func WithPacketQueue(n int) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.queue = n
@@ -163,7 +164,7 @@ func WithPacketMaxDatagram(n int) PacketListenerOption {
 // WithPacketConns adds more packet connections to the listener, which reads
 // each with a read loop of its own into the same connections, so that peers
 // are read on several cores: sockets bound to the same address with
-// SO_REUSEPORT, as ListenPacketReusePort makes them, among which the kernel
+// SO_REUSEPORT, as ListenUDPReusePort makes them, among which the kernel
 // spreads peers by their address, so that the datagrams of one peer keep
 // their order. A connection writes from the packet connection that its peer
 // first came through, and Dial and WriteTo from pc. The listener owns them
@@ -186,11 +187,17 @@ func WithPacketReadBatch(n int) PacketListenerOption {
 	}
 }
 
-// WithPacketRejectCache remembers up to size peers that the accept filter
-// rejected, for ttl each, and drops their datagrams without calling the
-// filter again meanwhile, so that a peer that keeps sending costs a lookup.
+// WithPacketRejectCache remembers up to size peers given to RejectPeer, for
+// ttl each, and drops the datagrams of a new connection from them before
+// the accept filter runs, so that a peer that keeps sending costs a lookup.
 // The cache grows with the peers it holds; at size, the older half of them
-// is forgotten. A non-positive size or ttl, the default, keeps none.
+// is forgotten. A non-positive size or ttl, the default, keeps none, and
+// RejectPeer then does nothing.
+//
+// The filter's own rejections are not remembered: a datagram's source can be
+// spoofed, and remembering it would let anyone lock a real peer out. Call
+// RejectPeer only for a source that the datagram proves, as one that echoes
+// a token the listener sent it does.
 func WithPacketRejectCache(size int, ttl time.Duration) PacketListenerOption {
 	return func(o *packetListenerOptions) {
 		o.rejectSize, o.rejectTTL = size, ttl
@@ -300,6 +307,32 @@ func (l *PacketListener) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return l.pc.WriteTo(p, addr)
 }
 
+// RejectPeer drops the datagrams of a new connection from peer, before the
+// accept filter runs, for the time to live of WithPacketRejectCache; without
+// that option it does nothing. It leaves a connection that peer has alone.
+// Call it only for a peer whose source address is proven, never for one
+// that a datagram merely claims, as a spoofed source would lock the real
+// peer out; the accept filter may call it for a peer it rejects.
+func (l *PacketListener) RejectPeer(peer net.Addr) {
+	if l.reject == nil || peer == nil || netutil.IsNilPointer(peer) {
+		return
+	}
+	l.reject.add(peerKeyOf(peer))
+}
+
+// peerKeyOf returns the key of peer, a *net.UDPAddr by its unmapped address
+// and port and others by String.
+func peerKeyOf(peer net.Addr) peerKey {
+	var k peerKey
+	if ua, ok := peer.(*net.UDPAddr); ok {
+		k.ap = netutil.UnmapAddrPort(ua.AddrPort())
+	}
+	if !k.ap.IsValid() {
+		k.s = peer.String()
+	}
+	return k
+}
+
 // ErrPacketPeerConnected is returned by PacketListener.Dial for a peer that
 // has a connection already.
 var ErrPacketPeerConnected = errors.New("netx: packet listener peer already connected")
@@ -323,13 +356,8 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	case l.pc == nil:
 		return nil, errNoPacketConn
 	}
-	var k peerKey
-	if ua, ok := peer.(*net.UDPAddr); ok {
-		k.ap = netutil.UnmapAddrPort(ua.AddrPort())
-	}
-	if !k.ap.IsValid() {
-		k.s = peer.String()
-	} else {
+	k := peerKeyOf(peer)
+	if k.ap.IsValid() {
 		peer = net.UDPAddrFromAddrPort(k.ap)
 	}
 	c := l.makeConn(k, peer, nil)
@@ -459,10 +487,10 @@ func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr, sock *packe
 	// before closing is looked at, both atomically, so either Close sees
 	// the filter running and does not wait for it, or the filter does not
 	// run: Close cannot wait for a filter that waits for the caller of Close.
+	if l.reject.has(k) {
+		return nil
+	}
 	if l.opts.filter != nil {
-		if l.reject.has(k) {
-			return nil
-		}
 		if l.opts.beforeFilter != nil {
 			l.opts.beforeFilter(l)
 		}
@@ -470,7 +498,6 @@ func (l *PacketListener) newConn(p []byte, k peerKey, addr net.Addr, sock *packe
 		ok := !l.closing.Load() && l.opts.filter(addr, p)
 		l.filtering.Store(false)
 		if !ok {
-			l.reject.add(k)
 			return nil
 		}
 	}

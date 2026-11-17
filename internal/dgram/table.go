@@ -148,6 +148,9 @@ func (t *Table[K, S]) Add(k K, s S, backlog bool) (S, Result) {
 func (t *Table[K, S]) drop(k K, s S) {
 	if t.conns.CompareAndDelete(k, s) {
 		t.n.Add(-1)
+		if t.wheel != nil {
+			t.wheel.remove(s)
+		}
 	}
 }
 
@@ -231,23 +234,25 @@ func (t *Table[K, S]) Pending() int { return len(t.accept) }
 const wheelSlots = 8
 
 // idleWheel is the timing wheel of a Table's idle timeout. Each connection
-// sits in the slot of the tick when it may first be idle. When its slot
-// comes up, a connection that is closed leaves the wheel, one that is idle
-// is shut down, and any other moves to the slot of its new due time, so
-// that traffic never touches the wheel. Its slots grow with the connections
-// they hold and give their room back when they empty.
+// sits in the slot of the tick when it may first be idle, at a position
+// that its Queue records, so that it leaves the wheel in constant time when
+// it is removed from the table. When its slot comes up, a connection that
+// is idle is shut down, and any other moves to the slot of its new due
+// time, so that traffic never touches the wheel. Its slots grow with the
+// connections they hold and give their room back when they empty.
 type idleWheel[S comparable] struct {
-	table   interface{ shutdownIdle(s S) }
-	queue   func(S) *Queue
-	epoch   *Epoch
-	timer   timeshim.Timer
-	slots   [wheelSlots][]S
-	idle    []S // scratch of a check
-	d       time.Duration
-	every   time.Duration
-	mu      sync.Mutex // guards the fields below and orders checks with stop
-	cur     int        // the slot of the last tick
-	stopped bool
+	table    interface{ shutdownIdle(s S) }
+	queue    func(S) *Queue
+	epoch    *Epoch
+	timer    timeshim.Timer
+	slots    [wheelSlots][]S
+	idle     []S            // the idle connections of a tick, shut down after it
+	inflight sync.WaitGroup // ticks shutting connections down
+	d        time.Duration
+	every    time.Duration
+	mu       sync.Mutex // guards the fields above, the queues' positions and those below
+	cur      int        // the slot of the last tick
+	stopped  bool
 }
 
 func (t *Table[K, S]) shutdownIdle(s S) { t.shutdown(s, io.EOF) }
@@ -266,10 +271,31 @@ func newIdleWheel[K comparable, S comparable](t *Table[K, S], d time.Duration, e
 // add puts a new connection into the wheel, due d from now.
 func (w *idleWheel[S]) add(s S) {
 	w.mu.Lock()
-	if !w.stopped {
+	if !w.stopped && !w.queue(s).Closed() {
 		w.place(s, w.d)
 	}
 	w.mu.Unlock()
+}
+
+// remove takes s out of the wheel, if it is in it.
+func (w *idleWheel[S]) remove(s S) {
+	q := w.queue(s)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if q.wheelSlot == 0 {
+		return
+	}
+	slot := &w.slots[q.wheelSlot-1]
+	last := len(*slot) - 1
+	if i := int(q.wheelPos); i != last {
+		moved := (*slot)[last]
+		(*slot)[i] = moved
+		w.queue(moved).wheelPos = int32(i)
+	}
+	var zero S
+	(*slot)[last] = zero
+	*slot = (*slot)[:last]
+	q.wheelSlot, q.wheelPos = 0, 0
 }
 
 // place puts s into the slot of the first tick at least in from now; mu is
@@ -278,10 +304,13 @@ func (w *idleWheel[S]) place(s S, in time.Duration) {
 	ticks := int((in + w.every - 1) / w.every)
 	ticks = min(max(ticks, 1), wheelSlots-1)
 	i := (w.cur + ticks) % wheelSlots
+	q := w.queue(s)
+	q.wheelSlot, q.wheelPos = int32(i+1), int32(len(w.slots[i]))
 	w.slots[i] = append(w.slots[i], s)
 }
 
-// tick checks the connections of the next slot.
+// tick checks the connections of the next slot, and shuts the idle ones
+// down after it lets mu go, so that adds and removes go on meanwhile.
 func (w *idleWheel[S]) tick() {
 	w.mu.Lock()
 	if w.stopped {
@@ -296,9 +325,7 @@ func (w *idleWheel[S]) tick() {
 	for i, s := range due {
 		due[i] = zero
 		q := w.queue(s)
-		if q.Closed() {
-			continue
-		}
+		q.wheelSlot, q.wheelPos = 0, 0
 		active, accepted := q.Activity()
 		left := w.d // one waiting for Accept is not idle yet
 		if accepted {
@@ -316,23 +343,36 @@ func (w *idleWheel[S]) tick() {
 		w.slots[w.cur] = due[:0]
 	}
 	idle := w.idle
+	w.idle = nil
 	w.timer.Reset(w.every)
-	// Shut down under mu, so that stop waits for it, as Close relies on.
+	w.inflight.Add(1)
+	w.mu.Unlock()
+	defer w.inflight.Done()
 	for i, s := range idle {
 		w.table.shutdownIdle(s)
 		idle[i] = zero
 	}
-	w.idle = idle[:0]
+	w.mu.Lock()
+	if w.idle == nil {
+		w.idle = idle[:0]
+	}
 	w.mu.Unlock()
 }
 
-// stop ends the checks, waiting for one in progress, and lets go of the
-// connections.
+// stop ends the checks, waiting for those shutting connections down, and
+// lets go of the connections.
 func (w *idleWheel[S]) stop() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.stopped = true
 	w.timer.Stop()
-	w.slots = [wheelSlots][]S{}
+	for i := range w.slots {
+		for _, s := range w.slots[i] {
+			q := w.queue(s)
+			q.wheelSlot, q.wheelPos = 0, 0
+		}
+		w.slots[i] = nil
+	}
 	w.idle = nil
+	w.mu.Unlock()
+	w.inflight.Wait()
 }

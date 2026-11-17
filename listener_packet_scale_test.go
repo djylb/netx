@@ -16,48 +16,56 @@ import (
 	"github.com/djylb/netx/internal/dgram"
 )
 
-// A peer that the accept filter rejected is dropped without the filter while
-// the reject cache remembers it, and asked again once its entry expires.
+// A peer given to RejectPeer is dropped without the filter while the reject
+// cache remembers it, and asked again once its entry expires; the filter's
+// own rejections are not remembered, as their source may be spoofed.
 func TestPacketListenerRejectCache(t *testing.T) {
 	clock := timeshim.NewFake(time.Unix(1000, 0))
-	var calls atomic.Int64
-	l := newUDPListener(t, WithPacketClock(clock), WithPacketRejectCache(16, time.Minute),
-		WithPacketAcceptFilter(func(net.Addr, []byte) bool {
+	var (
+		calls atomic.Int64
+		l     *PacketListener
+	)
+	l = newUDPListener(t, WithPacketClock(clock), WithPacketRejectCache(16, time.Minute),
+		WithPacketAcceptFilter(func(peer net.Addr, first []byte) bool {
 			calls.Add(1)
+			if string(first) == "proven" {
+				l.RejectPeer(peer)
+			}
 			return false
 		}))
-	c := dialUDP(t, l)
-	waitCalls := func(want int64) {
+	// sendUntil writes msg from c until the filter has run want times.
+	sendUntil := func(c *net.UDPConn, msg string, want int64) {
 		t.Helper()
 		for deadline := time.Now().Add(5 * time.Second); calls.Load() < want; time.Sleep(time.Millisecond) {
 			if time.Now().After(deadline) {
 				t.Fatalf("filter calls = %d, want %d", calls.Load(), want)
 			}
-			_, _ = c.Write([]byte("x"))
+			_, _ = c.Write([]byte(msg))
 		}
 	}
-	waitCalls(1)
-	k := peerKey{ap: c.LocalAddr().(*net.UDPAddr).AddrPort()}
-	if !l.reject.has(k) {
+	spoofed := dialUDP(t, l)
+	sendUntil(spoofed, "claimed", 1)
+	sendUntil(spoofed, "claimed", 2) // a plain rejection is not remembered
+	if l.reject.has(peerKeyOf(spoofed.LocalAddr())) {
+		t.Fatal("a plain rejection was cached")
+	}
+	c := dialUDP(t, l)
+	before := calls.Load()
+	sendUntil(c, "proven", before+1)
+	if !l.reject.has(peerKeyOf(c.LocalAddr())) {
 		t.Fatal("the rejected peer is not cached")
 	}
 	for range 20 {
-		_, _ = c.Write([]byte("x"))
+		_, _ = c.Write([]byte("proven"))
 	}
 	// A datagram from another peer runs through the read loop after those.
 	other := dialUDP(t, l)
-	before := calls.Load()
-	for deadline := time.Now().Add(5 * time.Second); calls.Load() == before; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the other peer never reached the filter")
-		}
-		_, _ = other.Write([]byte("y"))
-	}
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("filter calls = %d, want 2: the cached peer was filtered again", n)
+	sendUntil(other, "claimed", before+2)
+	if n := calls.Load(); n != before+2 {
+		t.Fatalf("filter calls = %d, want %d: the cached peer was filtered again", n, before+2)
 	}
 	clock.Advance(time.Minute)
-	waitCalls(3)
+	sendUntil(c, "proven", before+3)
 }
 
 func TestRejectCacheBound(t *testing.T) {
@@ -73,6 +81,13 @@ func TestRejectCacheBound(t *testing.T) {
 	}
 	if !c.has(key(9)) || c.has(key(0)) {
 		t.Fatal("the cache keeps old peers instead of new ones")
+	}
+	one := newRejectCache(1, time.Hour, dgram.NewEpoch(timeshim.NewFake(time.Unix(1, 0))))
+	for i := range 3 {
+		one.add(key(i))
+	}
+	if n := len(one.cur) + len(one.old); n != 1 {
+		t.Fatalf("a cache of size 1 holds %d peers", n)
 	}
 	var nilCache *rejectCache
 	nilCache.add(key(1))

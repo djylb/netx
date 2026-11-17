@@ -13,12 +13,12 @@ import (
 // tracks the connection's activity for the idle timeout. Any goroutines may
 // enqueue and read. Init it before use.
 //
-// The datagrams are in a ring that grows as they queue up, doubling up to
-// the bound, and is let go once it is read empty, so that an idle
+// The datagrams are in a ring that grows as they queue up, doubling until
+// it reaches the bound, which it never passes, and is let go once it is read empty, so that an idle
 // connection holds at most minRing slots, none before its first datagram,
 // whatever its bound.
 type Queue struct {
-	ring   []*[]byte // datagrams, in Small buffers when they fit; len is a power of two
+	ring   []*[]byte // datagrams, in Small buffers when they fit
 	ready  chan struct{}
 	closed chan struct{}
 	err    error // returned by reads once closed; set before closed is
@@ -35,6 +35,11 @@ type Queue struct {
 	// accepted is set by Accept; the idle timeout skips the connection
 	// until then.
 	accepted atomic.Bool
+	// The place of the connection in its Table's idle wheel: the slot
+	// plus one, zero when not in it, and its index there. The wheel's lock
+	// guards them.
+	wheelSlot int32
+	wheelPos  int32
 }
 
 // minRing is the size of a ring when the first datagram queues.
@@ -84,7 +89,7 @@ func (q *Queue) Enqueue(p []byte) bool {
 	if q.n == len(q.ring) {
 		q.grow()
 	}
-	q.ring[(q.head+q.n)&(len(q.ring)-1)] = bp
+	q.ring[(q.head+q.n)%len(q.ring)] = bp
 	q.n++
 	q.queued += cost
 	q.mu.Unlock()
@@ -93,12 +98,12 @@ func (q *Queue) Enqueue(p []byte) bool {
 	return true
 }
 
-// grow doubles the ring, or makes it, keeping the datagrams in order; mu is
+// grow doubles the ring, up to the bound, or makes it, keeping the datagrams in order; mu is
 // held.
 func (q *Queue) grow() {
-	ring := make([]*[]byte, max(len(q.ring)*2, minRing))
+	ring := make([]*[]byte, min(max(len(q.ring)*2, minRing), q.limit))
 	for i := range q.n {
-		ring[i] = q.ring[(q.head+i)&(len(q.ring)-1)]
+		ring[i] = q.ring[(q.head+i)%len(q.ring)]
 	}
 	q.ring, q.head = ring, 0
 }
@@ -121,7 +126,7 @@ func (q *Queue) pop() *[]byte {
 	}
 	bp := q.ring[q.head]
 	q.ring[q.head] = nil
-	q.head = (q.head + 1) & (len(q.ring) - 1)
+	q.head = (q.head + 1) % len(q.ring)
 	q.n--
 	q.queued -= Cost(len(*bp))
 	if q.n == 0 {
@@ -182,7 +187,7 @@ func (q *Queue) Close(err error) {
 	q.mu.Unlock()
 	q.readDeadline.Stop()
 	for i := range n {
-		Release(ring[(head+i)&(len(ring)-1)])
+		Release(ring[(head+i)%len(ring)])
 	}
 }
 

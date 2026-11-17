@@ -7,6 +7,8 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // mmsghdr is the struct mmsghdr of recvmmsg.
@@ -101,7 +103,8 @@ func (b *batchReader) datagram(i int) ([]byte, netip.AddrPort) {
 	case syscall.AF_INET6:
 		sa := (*syscall.RawSockaddrInet6)(unsafe.Pointer(name))
 		port := binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&sa.Port))[:])
-		return p, netip.AddrPortFrom(netip.AddrFrom16(sa.Addr), port)
+		ip := netip.AddrFrom16(sa.Addr)
+		return p, netip.AddrPortFrom(ip.WithZone(netutil.ScopeZone(ip, sa.Scope_id)), port)
 	}
 	return p, netip.AddrPort{}
 }

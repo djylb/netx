@@ -528,7 +528,8 @@ func forward(ctx context.Context, client, backend net.Conn) {
   either direction for `d`, returning `netx.ErrRelayIdle`. Relay watches the
   data it copies, also where it splices, and leaves the ends' deadlines
   alone, so ends without deadlines work too, and time blocked in a
-  `RelayFlow.Wait` is not idleness.
+  `RelayFlow.Wait` is not idleness. It keeps the fast paths: splice, in
+  pieces, and the ends' own `WriteTo` and `ReadFrom`.
 - `WithRelayFlows(aToB, bToA)` paces and counts each direction without
   wrapping the connections. `RelayFlow.Wait(ctx, n)` runs before each read
   and returns how many bytes may pass, which a stream reads at most and a
@@ -629,7 +630,9 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
   `*net.TCPConn`, whose data goes through a pooled 32 KiB buffer instead. On
   Unix systems a stream read straight from a socket takes that buffer only
   once the socket is readable, so idle relays hold no buffers either, and a
-  blocked `Wait` holds none.
+  blocked `Wait` holds none. Any other stream source can implement
+  `netx.ReadableWaiter` (`WaitReadable(ctx) error`), such as a stream of a
+  multiplexed connection, to be waited on the same way.
 - Sources that return one datagram per read (`*net.UDPConn`,
   `PacketListener` connections, `FramedConn` with `WithFramedDatagrams`, and
   connections of other packages whose local address is on a `udp`, `ip` or
@@ -787,7 +790,27 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   returned it; connections still waiting for `Accept` are not closed, and their
   datagrams are kept.
 - On a `*net.UDPConn` the read loop, queueing and writes do not allocate per
-  datagram up to 2 KiB.
+  datagram up to 2 KiB. A connection's queue grows with the datagrams waiting
+  in it, up to its bound, and gives that room back once read, so idle
+  connections hold only a few slots whatever the bound.
+- Lookups of a peer's connection take no lock, and the idle timeout checks
+  only the connections due, so a listener scales from a few peers to
+  millions without a separate mode.
+- `WithPacketConns(more...)` reads further sockets into the same
+  connections, one read loop each; `ListenUDPReusePort(ctx, lc, network,
+  address, n)` opens `n` sockets on one address with `SO_REUSEPORT`, among
+  which Linux and Android spread peers by source (elsewhere it returns
+  `netx.ErrReusePortUnsupported` for more than one). A connection replies
+  from the socket its peer came through.
+- `WithPacketReadBatch(n)` reads up to `n` datagrams per system call with
+  `recvmmsg` on Linux and Android, holding `n` buffers of the
+  `WithPacketMaxDatagram` size per read loop; elsewhere datagrams are read
+  one at a time.
+- `WithPacketRejectCache(size, ttl)` with `l.RejectPeer(peer)` drops a peer's
+  new-connection datagrams before the filter runs, for `ttl`. Rejections by
+  the filter alone are never remembered, since a source can be spoofed; call
+  `RejectPeer` only for a source the datagram proves, such as one that echoed
+  a token.
 - The listener owns the socket and closes it, and all connections, on `Close`.
   The zero `PacketListener` has no socket: `Accept` waits for `Close`.
 - `ListenEphemeralUDP(ctx, lc)` opens a UDP socket on a free port for IPv4 and IPv6, as

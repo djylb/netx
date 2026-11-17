@@ -165,7 +165,23 @@ func TestLocalAddrCachePerEntryExpiry(t *testing.T) {
 	if n := c.n.Load(); n > localAddrsMax {
 		t.Fatalf("cache holds %d, want at most %d", n, localAddrsMax)
 	}
-	if !c.has(fresh) {
-		t.Fatal("the bound dropped an unexpired answer")
+	// Full of live answers, it cleans up at most once per interval, and in
+	// between takes no new answer.
+	full := &localAddrCache{base: time.Now().Add(-time.Hour), ttl: time.Hour}
+	full.swept.Store(full.now()) // just cleaned up
+	for i := range localAddrsMax {
+		full.add(localAddrKey{ip: netip.AddrFrom4([4]byte{10, 2, byte(i >> 8), byte(i)})})
+	}
+	sweeps := full.swept.Load()
+	for i := range 100 {
+		full.add(localAddrKey{ip: netip.AddrFrom4([4]byte{10, 1, 0, byte(i)})})
+	}
+	if full.swept.Load() != sweeps || full.n.Load() != localAddrsMax {
+		t.Fatalf("a full cache was cleaned up within the interval (holds %d)", full.n.Load())
+	}
+	full.swept.Store(full.now() - int64(2*localAddrSweepEvery))
+	full.add(localAddrKey{ip: netip.MustParseAddr("10.3.0.1")})
+	if n := full.n.Load(); n != 1 {
+		t.Fatalf("a cache full of live answers holds %d after its cleanup, want 1", n)
 	}
 }

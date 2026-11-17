@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strconv"
-	"sync"
 	"syscall"
-	"time"
 	"unsafe"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // soOriginalDst is SO_ORIGINAL_DST for SOL_IP and IP6T_SO_ORIGINAL_DST for SOL_IPV6.
@@ -76,46 +75,8 @@ func addrPortFromSockaddrInet4(sa *syscall.RawSockaddrInet4) netip.AddrPort {
 
 func addrPortFromSockaddrInet6(sa *syscall.RawSockaddrInet6) netip.AddrPort {
 	ip := netip.AddrFrom16(sa.Addr)
-	ip = ip.WithZone(scopeZone(ip, sa.Scope_id)).Unmap()
+	ip = ip.WithZone(netutil.ScopeZone(ip, sa.Scope_id)).Unmap()
 	return netip.AddrPortFrom(ip, sockaddrPort(&sa.Port))
-}
-
-// scopeZone returns the zone of a link-local IPv6 address with scope ID
-// scope: the name of the interface with that index, or the index itself when
-// no interface has it. It returns "" for other addresses.
-func scopeZone(ip netip.Addr, scope uint32) string {
-	if scope == 0 || !ip.Is6() || ip.Is4In6() || !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() {
-		return ""
-	}
-	zones.Lock()
-	if now := time.Now(); zones.names == nil || now.After(zones.expires) {
-		zones.names, zones.expires = make(map[uint32]string), now.Add(time.Minute)
-	}
-	name, ok := zones.names[scope]
-	zones.Unlock()
-	if ok {
-		return name
-	}
-	// Looked up without the lock, as it lists every interface: other
-	// readers keep going meanwhile, and concurrent misses look up alike.
-	name = strconv.FormatUint(uint64(scope), 10)
-	if ifi, err := net.InterfaceByIndex(int(scope)); err == nil {
-		name = ifi.Name
-	}
-	zones.Lock()
-	if zones.names != nil {
-		zones.names[scope] = name
-	}
-	zones.Unlock()
-	return name
-}
-
-// zones caches interface names by index for a minute, since a lookup lists
-// every interface and UDP needs one per datagram.
-var zones struct {
-	sync.Mutex
-	names   map[uint32]string
-	expires time.Time
 }
 
 // sockaddrPort decodes sin_port/sin6_port, which hold the port in network byte

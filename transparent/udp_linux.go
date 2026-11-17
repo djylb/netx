@@ -169,7 +169,7 @@ func origDstFromControl(oob []byte) (netip.AddrPort, bool) {
 			// struct sockaddr_in6: family, port, flow info, address, scope.
 			ip := netip.AddrFrom16([16]byte(data[8:24]))
 			if len(data) >= 28 {
-				ip = ip.WithZone(scopeZone(ip, binary.NativeEndian.Uint32(data[24:28])))
+				ip = ip.WithZone(netutil.ScopeZone(ip, binary.NativeEndian.Uint32(data[24:28])))
 			}
 			return netip.AddrPortFrom(ip.Unmap(), binary.BigEndian.Uint16(data[2:4])), true
 		}
