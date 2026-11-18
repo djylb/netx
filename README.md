@@ -646,7 +646,8 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
   stream would block, and the next notification starts the next one. An idle
   relay between such a stream and a TCP connection keeps only the goroutine
   that called Relay, waiting for the TCP side. `Copy` waits on it before it
-  takes a buffer. See the interface's documentation for its full contract.
+  takes a buffer. See the interface's documentation for its full contract. `WrapConn` over
+  such a stream returns a connection that is a `ReadNotifier` too.
 - Sources that return one datagram per read (`*net.UDPConn`,
   `PacketListener` connections, `FramedConn` with `WithFramedDatagrams`, and
   connections of other packages whose local address is on a `udp`, `ip` or

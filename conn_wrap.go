@@ -35,6 +35,7 @@ func WithWrapParentClose() WrapOption {
 // A nil parent is rwc itself when it is a net.Conn, so that its own wrappers
 // keep their addresses and deadlines, and otherwise the connection beneath it.
 // Closing the returned connection closes rwc. Use WithWrapParentClose to also close parent.
+// When rwc is a ReadNotifier, so is the returned connection.
 func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.Conn {
 	var cfg wrapOptions
 	for _, opt := range opts {
@@ -55,7 +56,33 @@ func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.C
 	if netutil.IsNilPointer(parent) {
 		parent = nil
 	}
-	return &wrappedConn{rwc: rwc, parent: parent, closeParent: cfg.closeParent}
+	w := &wrappedConn{rwc: rwc, parent: parent, closeParent: cfg.closeParent}
+	if n, ok := rwc.(ReadNotifier); ok && !netutil.IsNilPointer(n) {
+		return &wrappedNotifyConn{wrappedConn: w, n: n}
+	}
+	return w
+}
+
+// wrappedNotifyConn is a WrapConn over an rwc that is a ReadNotifier: it is
+// one too, so that a Relay reads it without a goroutine per direction.
+// Reads go to rwc, as its TryRead and NotifyReadable do.
+type wrappedNotifyConn struct {
+	*wrappedConn
+	n ReadNotifier
+}
+
+// TryRead reads from rwc without blocking; see ReadNotifier.
+func (w *wrappedNotifyConn) TryRead(p []byte) (int, error) { return w.n.TryRead(p) }
+
+// NotifyReadable calls f once rwc is readable; see ReadNotifier.
+func (w *wrappedNotifyConn) NotifyReadable(f func()) (stop func() bool) {
+	return w.n.NotifyReadable(f)
+}
+
+func (w *wrappedNotifyConn) netxLayer() layerInfo {
+	info := w.wrappedConn.netxLayer()
+	info.self = w
+	return info
 }
 
 // rw returns what reads and writes go to, or noConn.

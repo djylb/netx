@@ -726,3 +726,38 @@ func TestRelayNotifierPrefixIdle(t *testing.T) {
 		})
 	}
 }
+
+// A WrapConn over a ReadNotifier is one: a Relay copies it without a
+// blocking Read and holds one goroutine while idle, and the layers beneath
+// stay reachable.
+func TestRelayNotifierWrapConn(t *testing.T) {
+	s := newFakeStream(false)
+	parent, _ := tcpPair(t)
+	w := WrapConn(s, parent)
+	if _, ok := w.(ReadNotifier); !ok {
+		t.Fatal("WrapConn over a ReadNotifier is not one")
+	}
+	if InnermostConn(w) != parent {
+		t.Fatal("InnermostConn does not reach the parent")
+	}
+	if _, ok := WrapConn(blockingStream{s}, parent).(ReadNotifier); ok {
+		t.Fatal("WrapConn over a blocking stream claims to notify")
+	}
+	c1, c2 := tcpPair(t)
+	before := runtime.NumGoroutine()
+	done := startRelay(w, c1)
+	waitFor(t, "registration", s.pending)
+	waitFor(t, "one goroutine", func() bool { return runtime.NumGoroutine()-before == 1 })
+	s.feed([]byte("world"))
+	_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got := readN(t, c2, 5); got != "world" {
+		t.Fatalf("got %q", got)
+	}
+	_ = c2.Close()
+	if err := waitRelay(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if _, reads, _ := s.counts(); reads != 0 {
+		t.Fatalf("%d blocking Reads, want none", reads)
+	}
+}
