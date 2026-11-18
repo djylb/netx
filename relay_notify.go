@@ -112,7 +112,7 @@ func (s *notifySocket) wait(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	ready := make(chan struct{})
-	stop := s.n.NotifyReadable(func() { close(ready) })
+	stop := s.notifyReadable(func() { close(ready) })
 	select {
 	case <-ready:
 		return false, nil
@@ -123,6 +123,19 @@ func (s *notifySocket) wait(ctx context.Context) (bool, error) {
 		<-ready // called meanwhile: readable after all
 		return false, nil
 	}
+}
+
+// notifyReadable is the NotifyReadable of the source as the copy reads it,
+// through the wrappers above the ReadNotifier: bytes that a PrefixConn
+// still holds, or a bound that has ended the source, make it readable at
+// once, so that a prefix does not wait for the stream beneath to become
+// readable.
+func (s *notifySocket) notifyReadable(f func()) (stop func() bool) {
+	if s.src.prefixPending() || s.src.exhausted() {
+		f()
+		return func() bool { return false }
+	}
+	return s.n.NotifyReadable(f)
 }
 
 // readNow reads what the source holds without waiting, reporting blocked
@@ -231,7 +244,7 @@ func (c *notifyCopy) start() {
 // caller goes on copying.
 func (c *notifyCopy) arm() bool {
 	c.state.Store(notifyArming)
-	c.sock.n.NotifyReadable(c.notify)
+	c.sock.notifyReadable(c.notify)
 	return c.state.CompareAndSwap(notifyArming, notifyArmed)
 }
 

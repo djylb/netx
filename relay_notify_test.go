@@ -686,3 +686,43 @@ func TestRelayNotifierOwnWouldBlock(t *testing.T) {
 		t.Fatalf("Relay() = %v, want the source's error", err)
 	}
 }
+
+// fakeStreamConn is a fakeStream as a net.Conn, for wrappers that take one.
+type fakeStreamConn struct{ *fakeStream }
+
+func (fakeStreamConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (fakeStreamConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (fakeStreamConn) SetDeadline(time.Time) error      { return nil }
+func (fakeStreamConn) SetReadDeadline(time.Time) error  { return nil }
+func (fakeStreamConn) SetWriteDeadline(time.Time) error { return nil }
+
+// The prefix of a PrefixConn over an idle ReadNotifier is copied at once,
+// not when the stream beneath becomes readable, and the stream is then
+// copied without a blocking Read.
+func TestRelayNotifierPrefixIdle(t *testing.T) {
+	for _, mode := range fireModes {
+		async := mode.async
+		t.Run(mode.name, func(t *testing.T) {
+			s := newFakeStream(async)
+			src := NewTimeoutConn(NewPrefixConn(fakeStreamConn{s}, []byte("hello")), time.Minute)
+			c1, c2 := tcpPair(t)
+			done := startRelay(src, c1)
+			_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if got := readN(t, c2, 5); got != "hello" {
+				t.Fatalf("got %q, want the prefix", got)
+			}
+			waitFor(t, "registration", s.pending)
+			s.feed([]byte("world"))
+			if got := readN(t, c2, 5); got != "world" {
+				t.Fatalf("got %q", got)
+			}
+			_ = c2.Close()
+			if err := waitRelay(t, done); err != nil {
+				t.Fatal(err)
+			}
+			if _, reads, _ := s.counts(); reads != 0 {
+				t.Fatalf("%d blocking Reads, want none", reads)
+			}
+		})
+	}
+}

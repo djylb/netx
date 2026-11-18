@@ -162,7 +162,9 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 // goroutine of its own: each notification starts a task that copies
 // through the pooled buffer until TryRead would block, so that an idle
 // relay between such a stream and a TCP connection keeps only the
-// goroutine that called Relay, waiting for the TCP side. A task blocked on
+// goroutine that called Relay, waiting for the TCP side. The rest of the
+// prefix of a PrefixConn above the stream is readable at once: it is
+// copied without waiting for the stream. A task blocked on
 // a write holds the stream back, as a blocked copy would.
 //
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
