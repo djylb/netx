@@ -28,11 +28,11 @@ const expiredRetry = time.Minute
 // files, a failed Load, or a Select that named a certificate that does not
 // serve. The fields that do not apply are empty.
 type CertError struct {
+	Err      error
 	ID       string // of the certificate in a CertStore
 	Name     string // the server name of a Load or Select
 	CertFile string
 	KeyFile  string
-	Err      error
 }
 
 func (e *CertError) Error() string {
@@ -67,6 +67,19 @@ func (e *CertError) Unwrap() error { return e.Err }
 // concurrent first loads of one certificate share a single read. The zero
 // value is ready to use; set the fields before first use.
 type CertFiles struct {
+	lastSweep time.Time // under mu
+	// Clock tells the time of CheckInterval, IdleTimeout and certificate
+	// validity; the system clock if nil.
+	Clock timeshim.Clock
+	// OnError, if set, is called with each failed read of changed files, as
+	// when a certificate was replaced before its key, after which the
+	// previous certificate serves on and the next check tries again. It
+	// runs in the call that read, which waits for it, and may call the
+	// cache's methods. A failed first load is not reported: LoadFiles
+	// returns its error.
+	OnError func(err *CertError)
+	entries map[string]*list.Element // under mu
+	lru     list.List                // of *certEntry, most recently used first; under mu
 	// MaxEntries bounds the number of cached certificates, the least
 	// recently used dropped first; 0 means no bound, unlike other limits,
 	// as the caller chooses the files and data, not the clients, and a
@@ -84,22 +97,8 @@ type CertFiles struct {
 	// files of an expired certificate are read again, changed or not, at
 	// most once a minute either way.
 	CheckInterval time.Duration
-	// OnError, if set, is called with each failed read of changed files, as
-	// when a certificate was replaced before its key, after which the
-	// previous certificate serves on and the next check tries again. It
-	// runs in the call that read, which waits for it, and may call the
-	// cache's methods. A failed first load is not reported: LoadFiles
-	// returns its error.
-	OnError func(err *CertError)
-	// Clock tells the time of CheckInterval, IdleTimeout and certificate
-	// validity; the system clock if nil.
-	Clock timeshim.Clock
-
-	mu        sync.Mutex
-	entries   map[string]*list.Element
-	lru       list.List // of *certEntry, most recently used first
-	loaded    int       // entries with a certificate, which MaxEntries bounds
-	lastSweep time.Time
+	loaded        int // entries with a certificate, which MaxEntries bounds; under mu
+	mu            sync.Mutex
 }
 
 type certEntry struct {
@@ -321,10 +320,10 @@ func (c *CertFiles) now() time.Time { return timeshim.Or(c.Clock).Now() }
 // fileSource is a certificate's pair of files and what they were when last
 // read successfully. Its owner lets one goroutine at a time use it.
 type fileSource struct {
-	certFile, keyFile string
-	cert, key         os.FileInfo // as of the last successful read
 	checkedAt         time.Time   // of the last check
 	forcedAt          time.Time   // of the last read of an expired certificate
+	cert, key         os.FileInfo // as of the last successful read
+	certFile, keyFile string
 }
 
 // validate reports a negative setting, which LoadFiles and LoadPEM

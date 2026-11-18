@@ -252,26 +252,26 @@ func TestParseErrors(t *testing.T) {
 		Bytes:   []byte{1, 2, 3},
 	})
 	tests := []struct {
+		want      error
 		name      string
 		cert, key []byte
-		want      error
 	}{
-		{"empty certificate", nil, goodKey, ErrNoCertificates},
-		{"white space certificate", []byte(" \n"), goodKey, ErrNoCertificates},
-		{"key only", goodKey, goodKey, ErrNoCertificates},
-		{"bad DER certificate", []byte{0x30, 0x03, 1, 2, 3}, goodKey, ErrInvalidCertificate},
-		{"bad PEM certificate", keyPEM(t, "CERTIFICATE", []byte("junk")), goodKey, ErrInvalidCertificate},
-		{"bad second certificate", append(certPEM(leaf), keyPEM(t, "CERTIFICATE", []byte("junk"))...), goodKey, ErrInvalidCertificate},
-		{"no key", certPEM(leaf), certPEM(leaf), ErrNoPrivateKey},
-		{"empty key", certPEM(leaf), nil, ErrNoPrivateKey},
-		{"two keys", certPEM(leaf), append(append([]byte(nil), goodKey...), goodKey...), ErrMultipleKeys},
-		{"PKCS8 encrypted", certPEM(leaf), keyPEM(t, "ENCRYPTED PRIVATE KEY", []byte{1}), ErrEncryptedKey},
-		{"legacy encrypted", certPEM(leaf), encrypted, ErrEncryptedKey},
-		{"X25519 key", certPEM(leaf), keyPEM(t, "PRIVATE KEY", pkcs8(t, x25519)), ErrUnsupportedKey},
-		{"bad PEM key", certPEM(leaf), keyPEM(t, "PRIVATE KEY", []byte("junk")), ErrInvalidKey},
-		{"bad DER key", certPEM(leaf), []byte{0x30, 0x01, 0}, ErrInvalidKey},
-		{"other key", certPEM(leaf), keyPEM(t, "PRIVATE KEY", pkcs8(t, other)), ErrKeyMismatch},
-		{"leaf not first", certPEM(p.inter, leaf), goodKey, ErrKeyMismatch},
+		{name: "empty certificate", cert: nil, key: goodKey, want: ErrNoCertificates},
+		{name: "white space certificate", cert: []byte(" \n"), key: goodKey, want: ErrNoCertificates},
+		{name: "key only", cert: goodKey, key: goodKey, want: ErrNoCertificates},
+		{name: "bad DER certificate", cert: []byte{0x30, 0x03, 1, 2, 3}, key: goodKey, want: ErrInvalidCertificate},
+		{name: "bad PEM certificate", cert: keyPEM(t, "CERTIFICATE", []byte("junk")), key: goodKey, want: ErrInvalidCertificate},
+		{name: "bad second certificate", cert: append(certPEM(leaf), keyPEM(t, "CERTIFICATE", []byte("junk"))...), key: goodKey, want: ErrInvalidCertificate},
+		{name: "no key", cert: certPEM(leaf), key: certPEM(leaf), want: ErrNoPrivateKey},
+		{name: "empty key", cert: certPEM(leaf), key: nil, want: ErrNoPrivateKey},
+		{name: "two keys", cert: certPEM(leaf), key: append(append([]byte(nil), goodKey...), goodKey...), want: ErrMultipleKeys},
+		{name: "PKCS8 encrypted", cert: certPEM(leaf), key: keyPEM(t, "ENCRYPTED PRIVATE KEY", []byte{1}), want: ErrEncryptedKey},
+		{name: "legacy encrypted", cert: certPEM(leaf), key: encrypted, want: ErrEncryptedKey},
+		{name: "X25519 key", cert: certPEM(leaf), key: keyPEM(t, "PRIVATE KEY", pkcs8(t, x25519)), want: ErrUnsupportedKey},
+		{name: "bad PEM key", cert: certPEM(leaf), key: keyPEM(t, "PRIVATE KEY", []byte("junk")), want: ErrInvalidKey},
+		{name: "bad DER key", cert: certPEM(leaf), key: []byte{0x30, 0x01, 0}, want: ErrInvalidKey},
+		{name: "other key", cert: certPEM(leaf), key: keyPEM(t, "PRIVATE KEY", pkcs8(t, other)), want: ErrKeyMismatch},
+		{name: "leaf not first", cert: certPEM(p.inter, leaf), key: goodKey, want: ErrKeyMismatch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

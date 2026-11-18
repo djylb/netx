@@ -384,11 +384,11 @@ func TestSwapStream(t *testing.T) {
 // methods take too, as a stream that guards its state with one mutex does:
 // its deadline methods wait for a blocked Read or Write to end.
 type lockedStream struct {
-	mu      sync.Mutex
 	pr      *io.PipeReader
 	pw      *io.PipeWriter
 	entered chan struct{}
 	setting chan struct{}
+	mu      sync.Mutex
 }
 
 func newLockedStream() *lockedStream {
@@ -442,7 +442,10 @@ func TestDeadlineCallNotUnderLock(t *testing.T) {
 		closed := make(chan error, 1)
 		go func() { closed <- closeAll() }()
 		select {
-		case <-closed:
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("Close = %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			_ = s.Close() // unblock everything before failing
 			t.Fatal("Close waited for the stream's deadline method")

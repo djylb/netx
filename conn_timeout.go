@@ -29,12 +29,12 @@ import (
 // lift the idle timeout of a Read or Write that is already blocked. A zero time
 // leaves only the idle timeout.
 type TimeoutConn struct {
+	userRead    time.Time // set by SetDeadline or SetReadDeadline, guarded by mu
+	userWrite   time.Time // set by SetDeadline or SetWriteDeadline, guarded by mu
 	conn        net.Conn
 	idleTimeout atomic.Int64 // nanoseconds; none if not positive
 	deadline    atomic.Int64 // idle deadline last set on Conn as a clock offset, 0 to force an update
 	mu          sync.Mutex   // serializes deadline updates
-	userRead    time.Time    // set by SetDeadline or SetReadDeadline, guarded by mu
-	userWrite   time.Time    // set by SetDeadline or SetWriteDeadline, guarded by mu
 }
 
 // NewTimeoutConn wraps c and refreshes its deadline before each read or

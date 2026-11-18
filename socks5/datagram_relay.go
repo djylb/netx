@@ -26,6 +26,8 @@ import (
 // while any runs; its functions are called from the relays' goroutines and
 // must then be safe for concurrent use.
 type DatagramRelay struct {
+	// Clock tells the time of IdleTimeout; the system clock if nil.
+	Clock timeshim.Clock
 	// Allow, if set, drops the datagrams to destinations it rejects. As with
 	// Server.AllowPacket, IP addresses come as IP and other names
 	// unresolved, so a policy on IP addresses must also check the addresses
@@ -50,8 +52,6 @@ type DatagramRelay struct {
 	// timeout, as the relay's caller usually bounds it. Datagrams dropped
 	// as invalid or by Allow do not count.
 	IdleTimeout time.Duration
-	// Clock tells the time of IdleTimeout; the system clock if nil.
-	Clock timeshim.Clock
 }
 
 // ErrDatagramTooLarge drops a datagram that fills the relay's whole buffer,
@@ -325,12 +325,12 @@ func (d *datagramRelay) touch() {
 
 // datagramIdle ends a relay that no datagram passed for d.
 type datagramIdle struct {
-	d        time.Duration
+	timer    timeshim.Timer // under mu
 	epoch    *dgram.Epoch
+	d        time.Duration
 	activity atomic.Int64 // epoch time of the last datagram
 	mu       sync.Mutex   // orders the timer with end
-	timer    timeshim.Timer
-	ended    bool
+	ended    bool         // under mu
 }
 
 func startDatagramIdle(d time.Duration, c timeshim.Clock, stop func()) *datagramIdle {

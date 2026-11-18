@@ -14,31 +14,31 @@ import (
 // copy sees it, found once when the direction starts by looking through the
 // connections of this package around it.
 type relaySource struct {
-	r io.Reader // the source as given, which the copy reads
+	// Room for the usual few timeouts and prefixes.
+	timeoutsBuf [2]*TimeoutConn
 	// base is the connection beneath the wrappers that pass reads on
 	// unchanged, which splice and a wait for data look at.
-	base any
-	// timeouts are the TimeoutConns among those wrappers, whose idle
-	// deadlines a read beneath them refreshes.
-	timeouts relayTimeouts
-	// prefixes are the PrefixConns among them, which are read through until
-	// their prefixes are gone.
-	prefixes []*PrefixConn
+	base        any
+	prefixesBuf [2]*PrefixConn
+	r           io.Reader // the source as given, which the copy reads
 	// datagrams hands base's datagrams over, or is nil.
 	datagrams datagramSource
+	// bottom is where the look through this package's connections ended,
+	// which datagram looks at further.
+	bottom any
+	sock   relaySocket // see socket
 	// limit is the *io.LimitedReader that the source is, whose bound a
 	// read beneath it keeps and counts down.
 	limit *io.LimitedReader
-	// bottom is where the look through this package's connections ended,
-	// which datagram looks at further.
-	bottom      any
-	sock        relaySocket // see socket
-	datagram    bool        // see readsDatagrams
+	// prefixes are the PrefixConns among them, which are read through until
+	// their prefixes are gone.
+	prefixes []*PrefixConn
+	// timeouts are the TimeoutConns among those wrappers, whose idle
+	// deadlines a read beneath them refreshes.
+	timeouts    relayTimeouts
 	datagramSet bool
 	sockSet     bool
-	// Room for the usual few timeouts and prefixes.
-	timeoutsBuf [2]*TimeoutConn
-	prefixesBuf [2]*PrefixConn
+	datagram    bool // see readsDatagrams
 }
 
 // datagramSource is a connection that hands its datagrams over in pooled
@@ -80,8 +80,8 @@ func (ts relayTimeouts) refresh() error {
 // relayEnds are the ends of one direction of a Relay or a Copy, which it
 // looks at once when it starts.
 type relayEnds struct {
-	src relaySource
 	dst relaySink
+	src relaySource
 }
 
 func newRelayEnds(dst io.Writer, src io.Reader) *relayEnds {
@@ -262,11 +262,11 @@ type relaySink struct {
 	// unchanged, which the copy writes.
 	w io.Writer
 	// base is beneath TimeoutConns too, which splice writes to.
-	base any
+	base        any
+	timeoutsBuf [2]*TimeoutConn
 	// timeouts are the TimeoutConns above base, whose idle deadlines a
 	// write to base refreshes.
-	timeouts    relayTimeouts
-	timeoutsBuf [2]*TimeoutConn
+	timeouts relayTimeouts
 }
 
 // init sets d up for w.

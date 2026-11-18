@@ -435,7 +435,10 @@ func TestPacketListenerFilterMayUseListener(t *testing.T) {
 		for i := 0; i < 5 && !ran; i++ {
 			_, _ = a.Write([]byte("x"))
 			select {
-			case <-closed:
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("Close = %v", err)
+				}
 				ran = true
 			case <-time.After(time.Second):
 			}
@@ -745,9 +748,9 @@ type feedPacketConn struct {
 }
 
 type feedDatagram struct {
+	done chan struct{} // set by feed
 	from netip.AddrPort
 	data []byte
-	done chan struct{} // set by feed
 }
 
 func newFeedPacketConn() *feedPacketConn {

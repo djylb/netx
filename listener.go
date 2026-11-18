@@ -202,12 +202,12 @@ func NewSingleConnListener(c net.Conn) *SingleConnListener {
 // SingleConnListener is the listener that NewSingleConnListener returns. The
 // zero value has no connection: its Accept blocks until Close.
 type SingleConnListener struct {
-	mu       sync.Mutex
-	conn     net.Conn // nil once accepted or closed
+	conn     net.Conn // nil once accepted or closed; under mu
 	addr     net.Addr
 	done     chan struct{}
 	initOnce sync.Once
 	doneOnce sync.Once
+	mu       sync.Mutex
 }
 
 // init makes the done channel, also of the zero SingleConnListener.

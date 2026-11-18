@@ -65,14 +65,14 @@ func lookup(name string, vars Vars) (segment, bool) {
 		return segment{app: varHTTPTime}, true
 	}
 	for _, fam := range [...]struct {
-		prefix string
 		str    func(*Context, string) string
+		prefix string
 		field  bool
 	}{
-		{"upstream_http_", varUpstreamField, true},
-		{"http_", varField, true},
-		{"cookie_", varCookie, false},
-		{"arg_", varArg, false},
+		{prefix: "upstream_http_", str: varUpstreamField, field: true},
+		{prefix: "http_", str: varField, field: true},
+		{prefix: "cookie_", str: varCookie, field: false},
+		{prefix: "arg_", str: varArg, field: false},
 	} {
 		if arg, ok := strings.CutPrefix(name, fam.prefix); ok && arg != "" {
 			if fam.field {

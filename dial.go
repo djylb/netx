@@ -69,7 +69,7 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 		running++
 		go func() {
 			c, err := attempt(ctx)
-			results <- dialResult{c, i, err}
+			results <- dialResult{conn: c, index: i, err: err}
 		}()
 		if stagger >= 0 {
 			timer.Reset(stagger)
@@ -187,8 +187,8 @@ func (d *RaceDialer) dial(ctx context.Context, network string, addresses []strin
 // dialResult is the end of one DialFirst attempt.
 type dialResult struct {
 	conn  net.Conn
-	index int
 	err   error
+	index int
 }
 
 // closeLate closes the connections that the n attempts still running make.

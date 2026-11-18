@@ -219,13 +219,6 @@ func (f TLVs) wellFormed() bool {
 // Header is a PROXY protocol header. Build one to send with NewHeader or
 // HeaderFromConn, or as a literal for a Local header.
 type Header struct {
-	// Version is V1 for the text format and V2 for the binary format.
-	Version Version
-	// Local marks a version 2 LOCAL command, which a proxy sends for its own
-	// connections such as health checks, and a version 1 UNKNOWN header.
-	// Unknown version 2 commands and version 1 protocols are decoded as
-	// Local. The connection's own addresses apply.
-	Local bool
 	// Source and Destination are the client and server addresses of the
 	// proxied connection: *net.TCPAddr, *net.UDPAddr or *net.UnixAddr. They
 	// are nil for a Local header and for unspecified or unknown families, in
@@ -234,6 +227,13 @@ type Header struct {
 	Destination net.Addr
 	// TLVs holds the version 2 type-length-value fields.
 	TLVs TLVs
+	// Version is V1 for the text format and V2 for the binary format.
+	Version Version
+	// Local marks a version 2 LOCAL command, which a proxy sends for its own
+	// connections such as health checks, and a version 1 UNKNOWN header.
+	// Unknown version 2 commands and version 1 protocols are decoded as
+	// Local. The connection's own addresses apply.
+	Local bool
 }
 
 // UDPAddrs returns Source and Destination with *net.TCPAddr converted to
@@ -319,8 +319,8 @@ const (
 
 // headerAddrs is the address block of an encoded header.
 type headerAddrs struct {
-	ip               ipPair
 	unixSrc, unixDst *net.UnixAddr
+	ip               ipPair
 	kind             uint8
 }
 

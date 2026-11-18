@@ -155,9 +155,9 @@ func (r Reply) String() string {
 // requests it refuses, with Err holding the cause, such as the error of Allow
 // or Dial, so that OnError sees both the reply and its reason.
 type ReplyError struct {
-	Reply Reply
 	// Err is the cause of the refusal, if known.
-	Err error
+	Err   error
+	Reply Reply
 }
 
 func (e *ReplyError) Error() string {

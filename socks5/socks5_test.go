@@ -15,17 +15,17 @@ import (
 func TestAddrEncoding(t *testing.T) {
 	tests := []struct {
 		name string
+		str  string
 		addr netx.Addr
 		wire []byte
-		str  string
 	}{
-		{"ipv4", netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
-		{"mapped ipv4", netx.Addr{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 80}, []byte{1, 192, 0, 2, 1, 0, 80}, "192.0.2.1:80"},
-		{"ipv6", netx.Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 443},
-			append(append([]byte{4}, netip.MustParseAddr("2001:db8::1").AsSlice()...), 1, 187), "[2001:db8::1]:443"},
-		{"domain", netx.Addr{Name: "example.com", Port: 8080}, append(append([]byte{3, 11}, "example.com"...), 0x1f, 0x90), "example.com:8080"},
-		{"zero", netx.Addr{}, []byte{1, 0, 0, 0, 0, 0, 0}, "0.0.0.0:0"},
-		{"ip wins over name", netx.Addr{IP: netip.MustParseAddr("10.0.0.1"), Name: "ignored", Port: 1}, []byte{1, 10, 0, 0, 1, 0, 1}, "10.0.0.1:1"},
+		{name: "ipv4", addr: netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: 80}, wire: []byte{1, 192, 0, 2, 1, 0, 80}, str: "192.0.2.1:80"},
+		{name: "mapped ipv4", addr: netx.Addr{IP: netip.MustParseAddr("::ffff:192.0.2.1"), Port: 80}, wire: []byte{1, 192, 0, 2, 1, 0, 80}, str: "192.0.2.1:80"},
+		{name: "ipv6", addr: netx.Addr{IP: netip.MustParseAddr("2001:db8::1"), Port: 443},
+			wire: append(append([]byte{4}, netip.MustParseAddr("2001:db8::1").AsSlice()...), 1, 187), str: "[2001:db8::1]:443"},
+		{name: "domain", addr: netx.Addr{Name: "example.com", Port: 8080}, wire: append(append([]byte{3, 11}, "example.com"...), 0x1f, 0x90), str: "example.com:8080"},
+		{name: "zero", addr: netx.Addr{}, wire: []byte{1, 0, 0, 0, 0, 0, 0}, str: "0.0.0.0:0"},
+		{name: "ip wins over name", addr: netx.Addr{IP: netip.MustParseAddr("10.0.0.1"), Name: "ignored", Port: 1}, wire: []byte{1, 10, 0, 0, 1, 0, 1}, str: "10.0.0.1:1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,16 +53,16 @@ func TestAddrEncoding(t *testing.T) {
 
 func TestReadAddrErrors(t *testing.T) {
 	tests := []struct {
+		want error
 		name string
 		wire []byte
-		want error
 	}{
-		{"unknown type", []byte{2, 0, 0, 0}, ErrAddrType},
-		{"empty domain", []byte{3, 0, 0, 80}, ErrMalformed},
-		{"truncated ipv4", []byte{1, 127, 0}, io.ErrUnexpectedEOF},
-		{"truncated domain", []byte{3, 5, 'a', 'b'}, io.ErrUnexpectedEOF},
-		{"one byte", []byte{1}, io.ErrUnexpectedEOF},
-		{"empty", nil, io.ErrUnexpectedEOF},
+		{name: "unknown type", wire: []byte{2, 0, 0, 0}, want: ErrAddrType},
+		{name: "empty domain", wire: []byte{3, 0, 0, 80}, want: ErrMalformed},
+		{name: "truncated ipv4", wire: []byte{1, 127, 0}, want: io.ErrUnexpectedEOF},
+		{name: "truncated domain", wire: []byte{3, 5, 'a', 'b'}, want: io.ErrUnexpectedEOF},
+		{name: "one byte", wire: []byte{1}, want: io.ErrUnexpectedEOF},
+		{name: "empty", wire: nil, want: io.ErrUnexpectedEOF},
 	}
 	for _, tt := range tests {
 		if _, err := ReadAddr(bytes.NewReader(tt.wire)); !errors.Is(err, tt.want) {
@@ -286,16 +286,16 @@ func TestDatagram(t *testing.T) {
 		t.Fatalf("DecodeDatagram(empty payload) = %d, %v", n, err)
 	}
 	for _, tt := range []struct {
-		b    []byte
 		want error
+		b    []byte
 	}{
-		{[]byte{0, 0, 1, 1, 0, 0, 0, 0, 0, 0}, ErrFragmented},
-		{nil, ErrMalformed},
-		{[]byte{0, 0}, ErrMalformed},
-		{[]byte{0, 0, 0}, ErrMalformed},
-		{[]byte{0, 0, 0, 1, 1, 2}, ErrMalformed},
-		{[]byte{0, 0, 0, 3, 4, 'a'}, ErrMalformed},
-		{[]byte{0, 0, 0, 7, 0}, ErrAddrType},
+		{b: []byte{0, 0, 1, 1, 0, 0, 0, 0, 0, 0}, want: ErrFragmented},
+		{b: nil, want: ErrMalformed},
+		{b: []byte{0, 0}, want: ErrMalformed},
+		{b: []byte{0, 0, 0}, want: ErrMalformed},
+		{b: []byte{0, 0, 0, 1, 1, 2}, want: ErrMalformed},
+		{b: []byte{0, 0, 0, 3, 4, 'a'}, want: ErrMalformed},
+		{b: []byte{0, 0, 0, 7, 0}, want: ErrAddrType},
 	} {
 		if addr, n, err := DecodeDatagram(tt.b); !errors.Is(err, tt.want) || n != 0 || addr != (netx.Addr{}) {
 			t.Fatalf("DecodeDatagram(%v) = %v, %d, %v, want %v", tt.b, addr, n, err, tt.want)

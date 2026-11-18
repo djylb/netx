@@ -146,15 +146,15 @@ func TestReuseKey(t *testing.T) {
 		}
 	})
 	for _, tt := range []struct {
-		name  string
 		s     *httpproxy.Server
+		name  string
 		conns int32
 	}{
-		{"default", &httpproxy.Server{}, 1},
-		{"no reuse", &httpproxy.Server{DisableKeepAlives: true}, 3},
-		{"own key", &httpproxy.Server{ReuseKey: func(req *httpproxy.Request) (string, bool) {
+		{name: "default", s: &httpproxy.Server{}, conns: 1},
+		{name: "no reuse", s: &httpproxy.Server{DisableKeepAlives: true}, conns: 3},
+		{name: "own key", s: &httpproxy.Server{ReuseKey: func(req *httpproxy.Request) (string, bool) {
 			return req.Header.Get("X-Route"), req.Header.Get("X-Route") != ""
-		}}, 3},
+		}}, conns: 3},
 	} {
 		conns.Store(0)
 		addr := serve(t, tt.s)

@@ -147,14 +147,14 @@ func TestServerReplies(t *testing.T) {
 
 func TestServerHooks(t *testing.T) {
 	type call struct {
-		dst  netx.Addr
 		user string
+		dst  netx.Addr
 	}
 	calls := make(chan call, 1)
 	addr := serve(t, &socks5.Server{
 		// The reply carries the bound address that the target reports.
 		Dial: func(_ context.Context, req *socks5.Request) (net.Conn, error) {
-			calls <- call{req.Dst, req.User}
+			calls <- call{dst: req.Dst, user: req.User}
 			client, server := net.Pipe()
 			go func() {
 				defer func() { _ = server.Close() }()
@@ -617,7 +617,9 @@ func TestServerCloseDoesNotHoldLockWhileClosing(t *testing.T) {
 	if err := <-closed; err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	<-served
+	if err := <-served; !connEnded(err) {
+		t.Errorf("ServeConn() = %v, want the end of the context or connection", err)
+	}
 }
 
 // Clients that do not follow the method negotiation are still served when the

@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net"
 	"net/netip"
@@ -56,7 +57,9 @@ func TestServerOverTLS(t *testing.T) {
 	go func() { done <- s.Serve(tlsLn) }()
 	t.Cleanup(func() {
 		_ = s.Close()
-		<-done
+		if err := <-done; !errors.Is(err, socks5.ErrServerClosed) {
+			t.Errorf("Serve() = %v, want ErrServerClosed", err)
+		}
 	})
 	addr := ln.Addr().String()
 	tlsDialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
@@ -152,7 +155,9 @@ func TestServerOverTLSHandshakeTimeout(t *testing.T) {
 	go func() { done <- s.Serve(tlsLn) }()
 	t.Cleanup(func() {
 		_ = s.Close()
-		<-done
+		if err := <-done; !errors.Is(err, socks5.ErrServerClosed) {
+			t.Errorf("Serve() = %v, want ErrServerClosed", err)
+		}
 	})
 	d := &socks5.Dialer{
 		ProxyAddr: ln.Addr().String(),

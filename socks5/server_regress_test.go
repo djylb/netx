@@ -21,8 +21,8 @@ import (
 // checkNoAuth is a NoAuth authenticator that decides by the connection
 // itself, as an IP allowlist or a TLS client certificate check does.
 type checkNoAuth struct {
-	user string
 	err  error
+	user string
 }
 
 func (checkNoAuth) Method() socks5.Method { return socks5.MethodNoAuth }
@@ -175,7 +175,9 @@ func TestServerCloseEndsOutlivingAssociation(t *testing.T) {
 	}
 	_ = ctl.Close()
 	_ = s.Close()
-	<-done
+	if err := <-done; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Errorf("Serve() = %v, want ErrServerClosed", err)
+	}
 	eventuallyNoReply(t, client, relay, echo, "after")
 }
 
@@ -279,8 +281,8 @@ func (temporaryError) Temporary() bool { return true }
 // failingListener returns its errors from Accept before accepting.
 type failingListener struct {
 	net.Listener
-	mu   sync.Mutex
 	errs []error
+	mu   sync.Mutex
 }
 
 func (l *failingListener) Accept() (net.Conn, error) {
@@ -492,7 +494,10 @@ func TestServerServesUncomparableConnsAndListeners(t *testing.T) {
 	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
 		t.Fatalf("Serve() = %v, want ErrServerClosed", err)
 	}
-	<-done // Close closed the connection
+	// Close closed the connection.
+	if err := <-done; !connEnded(err) {
+		t.Errorf("ServeConn() = %v, want the end of the context or connection", err)
+	}
 }
 
 // A client that does not know its address announces its port with 0.0.0.0
@@ -501,13 +506,13 @@ func TestServerServesUncomparableConnsAndListeners(t *testing.T) {
 func TestServerUDPAnnouncedPortWithoutAddress(t *testing.T) {
 	echo := udpEcho(t)
 	for _, tt := range []struct {
-		name     string
 		announce func(port uint16) netx.Addr
+		name     string
 	}{
-		{"exact address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
-		{"unspecified address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
-		{"name", func(p uint16) netx.Addr { return netx.Addr{Name: "0", Port: p} }},
-		{"private address", func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("192.168.1.5"), Port: p} }},
+		{name: "exact address", announce: func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: p} }},
+		{name: "unspecified address", announce: func(p uint16) netx.Addr { return netx.Addr{IP: netip.IPv4Unspecified(), Port: p} }},
+		{name: "name", announce: func(p uint16) netx.Addr { return netx.Addr{Name: "0", Port: p} }},
+		{name: "private address", announce: func(p uint16) netx.Addr { return netx.Addr{IP: netip.MustParseAddr("192.168.1.5"), Port: p} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -825,7 +830,10 @@ func TestServerCloseEndsRelayWaitingOnTarget(t *testing.T) {
 	}
 	_ = s.Close()
 	select {
-	case <-served:
+	case err := <-served:
+		if !connEnded(err) {
+			t.Errorf("ServeConn() = %v, want the end of the context or connection", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeConn kept relaying after Close")
 	}

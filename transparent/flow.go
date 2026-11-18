@@ -30,13 +30,13 @@ import (
 // closed, so a listener facing untrusted or spoofed sources should set
 // WithFlowIdleTimeout or read deadlines.
 type FlowListener struct {
-	c     *net.UDPConn
-	flows dgram.Table[flowKey, *FlowConn]
 	// closeErr is the error of closing c, set once.
 	closeErr  error
-	wg        sync.WaitGroup
-	opts      flowOptions
+	c         *net.UDPConn
 	epoch     *dgram.Epoch // of the idle timeout
+	opts      flowOptions
+	flows     dgram.Table[flowKey, *FlowConn]
+	wg        sync.WaitGroup
 	closeOnce sync.Once
 	// mu orders the reply loops that wg counts before Close's wait: once
 	// closed is set, none starts.
@@ -49,11 +49,11 @@ type flowKey struct {
 }
 
 type flowOptions struct {
+	clock    timeshim.Clock
 	queue    int
 	backlog  int
 	maxConns int
 	idle     time.Duration
-	clock    timeshim.Clock
 	direct   bool
 }
 
@@ -278,18 +278,18 @@ func (l *FlowListener) newFlow(key flowKey, redirected bool) *FlowConn {
 // socket directly, accepted with WithFlowDirect, is answered from the
 // listening socket, from the address the source sent to.
 type FlowConn struct {
-	l      *FlowListener
-	local  net.Addr
-	remote net.Addr
-	q      dgram.Queue
 	datagramSource
-	// reply is the socket that answers the flow, once a Write opened it.
-	reply         *net.UDPConn
 	writeDeadline time.Time
-	key           flowKey
-	mu            sync.Mutex // reply, writeDeadline
-	closeOnce     sync.Once
-	redirected    bool
+	local         net.Addr
+	remote        net.Addr
+	l             *FlowListener
+	// reply is the socket that answers the flow, once a Write opened it.
+	reply      *net.UDPConn
+	key        flowKey
+	q          dgram.Queue
+	closeOnce  sync.Once
+	mu         sync.Mutex // reply, writeDeadline
+	redirected bool
 }
 
 func (f *FlowConn) queue() *dgram.Queue { return &f.q }

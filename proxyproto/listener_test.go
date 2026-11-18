@@ -673,18 +673,18 @@ func TestConnWriteToTCPPoolsBuffer(t *testing.T) {
 func TestListenerConfigPolicy(t *testing.T) {
 	header := wireOf(V1, tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
 	for _, tt := range []struct {
+		policyFor func(net.Addr) Policy
 		name      string
 		data      string
 		payload   string
-		policyFor func(net.Addr) Policy
 		policy    Policy
 		wrapped   bool
 	}{
-		{"default required", string(header) + "hi", "hi", nil, Required, true},
-		{"optional for everyone", "hi", "hi", nil, Optional, true},
-		{"ignore for everyone", string(header), string(header), nil, Ignore, false},
-		{"policy for overrides", string(header) + "hi", "hi", func(net.Addr) Policy { return Required }, Ignore, true},
-		{"policy for ignores", "hi", "hi", func(net.Addr) Policy { return Ignore }, Required, false},
+		{name: "default required", data: string(header) + "hi", payload: "hi", policyFor: nil, policy: Required, wrapped: true},
+		{name: "optional for everyone", data: "hi", payload: "hi", policyFor: nil, policy: Optional, wrapped: true},
+		{name: "ignore for everyone", data: string(header), payload: string(header), policyFor: nil, policy: Ignore, wrapped: false},
+		{name: "policy for overrides", data: string(header) + "hi", payload: "hi", policyFor: func(net.Addr) Policy { return Required }, policy: Ignore, wrapped: true},
+		{name: "policy for ignores", data: "hi", payload: "hi", policyFor: func(net.Addr) Policy { return Ignore }, policy: Required, wrapped: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			l := newTestListener(t)

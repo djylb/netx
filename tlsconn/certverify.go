@@ -193,6 +193,7 @@ func IsSelfSigned(c *x509.Certificate) bool {
 
 // CertSummary describes a certificate for display, as Summarize returns it.
 type CertSummary struct {
+	NotBefore, NotAfter time.Time
 	// Subject and Issuer are the distinguished names, in RFC 2253 form.
 	Subject, Issuer string
 	// SerialNumber is the serial number in hex.
@@ -201,13 +202,12 @@ type CertSummary struct {
 	// x509 algorithm name of another key.
 	KeyType string
 	// Names are the names it covers, as CertNames returns them.
-	Names               Names
-	NotBefore, NotAfter time.Time
-	// Fingerprint is the SHA-256 of the DER certificate, as Fingerprint.
-	Fingerprint [sha256.Size]byte
+	Names Names
 	// KeyBits is the size of the key: the RSA modulus, the curve, or 256
 	// for Ed25519; 0 for another key.
 	KeyBits int
+	// Fingerprint is the SHA-256 of the DER certificate, as Fingerprint.
+	Fingerprint [sha256.Size]byte
 	// SelfSigned reports IsSelfSigned.
 	SelfSigned bool
 	// IsCA reports whether it is a CA certificate, by basic constraints.

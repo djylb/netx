@@ -74,14 +74,14 @@ func (h Header) key() string {
 type Resolver struct {
 	// Trusted holds the proxies whose header fields are believed.
 	Trusted *PrefixSet
-	// Header is the field that the trusted proxies set. Fields of the other
-	// kinds are ignored, as a client may have sent them.
-	Header Header
 	// Name, if set, is the field read in place of the one Header names,
 	// with the syntax Header gives, such as "Cf-Connecting-Ip" with
 	// HeaderXRealIP. It must be in canonical form, as http.Header keys
 	// are, since the header map is indexed with it.
 	Name string
+	// Header is the field that the trusted proxies set. Fields of the other
+	// kinds are ignored, as a client may have sent them.
+	Header Header
 }
 
 // Client is the client of a request as a Resolver finds it.
@@ -91,9 +91,6 @@ type Client struct {
 	// as X-Forwarded-For entries usually do. It is the TCP peer when that
 	// is not trusted, or when it is and recorded no client.
 	Addr netip.AddrPort
-	// Hops is the number of trusted proxies between the client and the
-	// server, counting the TCP peer: 0 when Addr is the TCP peer.
-	Hops int
 	// Proto and Host are the scheme and the Host that the request had when
 	// a trusted proxy received it, or "" when no trusted proxy recorded
 	// them or what it recorded is not a valid scheme or host. For
@@ -109,6 +106,9 @@ type Client struct {
 	// a Forwarded element without for. Addr is then the trusted proxy that
 	// recorded it, the nearest knowledge of the client.
 	Opaque string
+	// Hops is the number of trusted proxies between the client and the
+	// server, counting the TCP peer: 0 when Addr is the TCP peer.
+	Hops int
 }
 
 // Resolve returns the client of a request that the TCP peer sent with

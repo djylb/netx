@@ -14,24 +14,24 @@ import (
 )
 
 type netErrorClassifier struct {
-	name string
 	fn   func(error) bool
+	name string
 }
 
 var netErrorClassifiers = []netErrorClassifier{
-	{"IsConnReset", IsConnReset},
-	{"IsConnAborted", IsConnAborted},
-	{"IsBrokenPipe", IsBrokenPipe},
-	{"IsConnRefused", IsConnRefused},
-	{"IsHostUnreachable", IsHostUnreachable},
-	{"IsNetworkUnreachable", IsNetworkUnreachable},
-	{"IsPermissionDenied", IsPermissionDenied},
-	{"IsAddrInUse", IsAddrInUse},
-	{"IsAddrNotAvailable", IsAddrNotAvailable},
-	{"IsMessageTooLarge", IsMessageTooLarge},
-	{"IsDNSError", IsDNSError},
-	{"IsCanceled", IsCanceled},
-	{"IsTimeout", IsTimeout},
+	{name: "IsConnReset", fn: IsConnReset},
+	{name: "IsConnAborted", fn: IsConnAborted},
+	{name: "IsBrokenPipe", fn: IsBrokenPipe},
+	{name: "IsConnRefused", fn: IsConnRefused},
+	{name: "IsHostUnreachable", fn: IsHostUnreachable},
+	{name: "IsNetworkUnreachable", fn: IsNetworkUnreachable},
+	{name: "IsPermissionDenied", fn: IsPermissionDenied},
+	{name: "IsAddrInUse", fn: IsAddrInUse},
+	{name: "IsAddrNotAvailable", fn: IsAddrNotAvailable},
+	{name: "IsMessageTooLarge", fn: IsMessageTooLarge},
+	{name: "IsDNSError", fn: IsDNSError},
+	{name: "IsCanceled", fn: IsCanceled},
+	{name: "IsTimeout", fn: IsTimeout},
 }
 
 // classifierForKind maps a NetErrorKind result to the classifier that produces it.

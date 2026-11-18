@@ -19,6 +19,8 @@ type ContextDialer = netutil.ContextDialer
 // dialer, so TLS can be layered on a proxied connection, or a proxy dialer
 // can use a Dialer as its Forward to reach the proxy over TLS.
 type Dialer struct {
+	// Forward dials the underlying connection; nil means a zero net.Dialer.
+	Forward ContextDialer
 	// Config is the TLS configuration; nil means the zero configuration.
 	// Without a ServerName, the host of the dialed address is used, as
 	// tls.Dialer does, or the whole address when it has no port.
@@ -29,8 +31,6 @@ type Dialer struct {
 	// the context alone to bound it, as for a dialer whose callers bound a
 	// whole dial through a proxy with the context.
 	HandshakeTimeout time.Duration
-	// Forward dials the underlying connection; nil means a zero net.Dialer.
-	Forward ContextDialer
 }
 
 // Dial is DialContext with a background context.

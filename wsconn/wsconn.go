@@ -131,8 +131,8 @@ func (code StatusCode) Sendable() bool {
 // CloseError is the close frame of the peer, which reads return once it
 // arrived, or a close frame without a code as StatusNoStatusReceived.
 type CloseError struct {
-	Code   StatusCode
 	Reason string
+	Code   StatusCode
 }
 
 func (e *CloseError) Error() string {
@@ -187,6 +187,15 @@ const minReadBufferSize = 256
 
 // Options are the settings of a connection that both sides share.
 type Options struct {
+	// OnPing and OnPong, if set, are called by the reader with the payload
+	// of each ping and pong, which is valid only during the call; a ping
+	// is answered with a pong all the same. They run on the reader's
+	// goroutine, as when extending a read deadline, and must not read;
+	// a Close from them waits the whole close timeout.
+	OnPing func(c *Conn, data []byte)
+	OnPong func(c *Conn, data []byte)
+	// Compression, if set, offers or accepts permessage-deflate.
+	Compression *Compression
 	// ReadLimit bounds the size of a message that NextReader, ReadMessage
 	// and AppendMessage read, after decompression: a larger message fails
 	// the connection with ErrMessageTooLarge and status 1009. 0 means
@@ -215,15 +224,6 @@ type Options struct {
 	// CloseTimeout then still bounds the pongs that the reader writes, as
 	// described there.
 	DisableCloseHandshake bool
-	// OnPing and OnPong, if set, are called by the reader with the payload
-	// of each ping and pong, which is valid only during the call; a ping
-	// is answered with a pong all the same. They run on the reader's
-	// goroutine, as when extending a read deadline, and must not read;
-	// a Close from them waits the whole close timeout.
-	OnPing func(c *Conn, data []byte)
-	OnPong func(c *Conn, data []byte)
-	// Compression, if set, offers or accepts permessage-deflate.
-	Compression *Compression
 }
 
 // Validate reports a setting out of range, which fails the handshakes

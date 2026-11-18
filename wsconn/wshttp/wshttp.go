@@ -233,20 +233,19 @@ func (a strAddr) String() string  { return string(a) }
 // server: it reads the request body and writes the response.
 type streamConn struct {
 	w      http.ResponseWriter
-	rc     *http.ResponseController
 	body   io.ReadCloser
 	local  net.Addr
 	remote net.Addr
+	rc     *http.ResponseController
 	stop   func() bool // set under life
-
+	done   chan struct{}
 	// life is held for reading while the ResponseWriter is used, and for
 	// writing by Close, after which it is not used.
 	life    sync.RWMutex
-	closed  bool
+	once    sync.Once
 	closing atomic.Bool
 	writing atomic.Bool
-	once    sync.Once
-	done    chan struct{}
+	closed  bool // under life
 }
 
 func (c *streamConn) Read(p []byte) (int, error) { return c.body.Read(p) }

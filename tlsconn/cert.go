@@ -22,24 +22,24 @@ import (
 // SelfSignedOptions configures NewSelfSigned, NewCA and Issue. The zero value
 // gives a certificate for localhost, or a CA named Private CA.
 type SelfSignedOptions struct {
+	// Key is the certificate's private key; nil generates an ECDSA P-256
+	// key. Use an *rsa.PrivateKey for clients that need RSA.
+	Key crypto.Signer
+	// Organization is the subject's organization, if any.
+	Organization string
 	// Hosts are the DNS names and IP addresses the certificate is for. The
 	// first is also its common name. Empty means localhost. For NewCA, only
 	// the first is used, as the common name, which defaults to Private CA.
 	Hosts []string
-	// Organization is the subject's organization, if any.
-	Organization string
-	// ValidFor is how long the certificate is valid; one year if not
-	// positive. Validity starts an hour in the past to allow for clock skew.
-	ValidFor time.Duration
-	// Key is the certificate's private key; nil generates an ECDSA P-256
-	// key. Use an *rsa.PrivateKey for clients that need RSA.
-	Key crypto.Signer
 	// ExtKeyUsage is what the certificate may be used for; empty means
 	// x509.ExtKeyUsageServerAuth. Use x509.ExtKeyUsageClientAuth for a
 	// client certificate, or both for peers that take either side. For
 	// NewCA, empty leaves the CA unrestricted, and a set one restricts what
 	// the certificates it issues may be used for.
 	ExtKeyUsage []x509.ExtKeyUsage
+	// ValidFor is how long the certificate is valid; one year if not
+	// positive. Validity starts an hour in the past to allow for clock skew.
+	ValidFor time.Duration
 }
 
 // NewSelfSigned returns a self-signed certificate with its Leaf set, a

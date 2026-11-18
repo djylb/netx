@@ -9,11 +9,11 @@ import (
 
 // Rule changes one header field.
 type Rule struct {
+	// Value is the template of the value. Nil deletes the field.
+	Value *Template
 	// Name is the field name, matched without regard to case. For request
 	// rules, "Host" is the request's Host.
 	Name string
-	// Value is the template of the value. Nil deletes the field.
-	Value *Template
 	// Add adds a field line after those the field has instead of
 	// replacing them. A rule that adds to Host sets it.
 	Add bool
@@ -142,6 +142,9 @@ func validFieldName(s string) bool {
 // of a Refresh field such as "0; url=http://backend:8080/login", that begin
 // with From have From replaced with the expansion of To.
 type Redirect struct {
+	// To is the template of the replacement, such as
+	// "${scheme}://${http_host}/".
+	To *Template
 	// From is the beginning of the URLs to rewrite, such as
 	// "http://backend:8080/app/". Its scheme and host are matched without
 	// regard to case, the rest exactly. A From that does not end with "/"
@@ -156,9 +159,6 @@ type Redirect struct {
 	// "http://backend:8080", followed by the end of the URL or by "/", "?"
 	// or "#": the backend's own address, as a reverse proxy dialed it.
 	From string
-	// To is the template of the replacement, such as
-	// "${scheme}://${http_host}/".
-	To *Template
 }
 
 // ApplyRedirects rewrites the Location and Refresh fields of h with the

@@ -186,18 +186,18 @@ func TestComposition(t *testing.T) {
 	other := addrT("10.0.0.5", 443)
 	other.Name = "evil.example"
 	for _, tt := range []struct {
-		target Target
 		want   error
+		target Target
 	}{
-		{nameT("intranet.example", 443), nil},
-		{intranet, nil},
-		{other, ErrScope},
-		{addrT("10.0.0.5", 443), ErrScope},
-		{addrT("100.64.1.1", 443), nil},
-		{addrT("8.8.8.8", 443), nil},
-		{addrT("8.8.8.8", 25), ErrPort},
-		{nameT("blocked.example", 443), ErrName},
-		{nameT("evil.example", 443), nil}, // decided by its addresses
+		{target: nameT("intranet.example", 443), want: nil},
+		{target: intranet, want: nil},
+		{target: other, want: ErrScope},
+		{target: addrT("10.0.0.5", 443), want: ErrScope},
+		{target: addrT("100.64.1.1", 443), want: nil},
+		{target: addrT("8.8.8.8", 443), want: nil},
+		{target: addrT("8.8.8.8", 25), want: ErrPort},
+		{target: nameT("blocked.example", 443), want: ErrName},
+		{target: nameT("evil.example", 443), want: nil}, // decided by its addresses
 	} {
 		err := p.Check(tt.target)
 		if tt.want == nil && err != nil || tt.want != nil && !errors.Is(err, tt.want) {

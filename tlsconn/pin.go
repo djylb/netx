@@ -15,8 +15,8 @@ var ErrNotPinned = errors.New("tlsconn: peer certificate is not pinned")
 // self-signed certificates. Its methods are safe for concurrent use, so pins
 // can change while connections are made. The zero value is an empty set.
 type PinSet struct {
+	pins map[[sha256.Size]byte]struct{} // under mu
 	mu   sync.RWMutex
-	pins map[[sha256.Size]byte]struct{}
 }
 
 // NewPinSet returns a set holding pins.

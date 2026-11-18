@@ -29,16 +29,16 @@ import (
 // Read may be called concurrently with Append, End, SetReadDeadline and
 // Close, and does not allocate.
 type Reader struct {
-	mu       sync.Mutex
-	parts    []*part // parts[0] is read
-	ended    bool
-	closed   bool
-	deadline time.Time
+	deadline time.Time // under mu
+	changed  waiter    // under mu
+	parts    []*part   // parts[0] is read; under mu
 	// gen counts the changes of deadline and of the current stream, so
 	// that applyDeadline, which runs unlocked, sets the latest deadline on
-	// the latest stream.
-	gen     uint64
-	changed waiter
+	// the latest stream. Under mu.
+	gen    uint64
+	mu     sync.Mutex
+	ended  bool // under mu
+	closed bool // under mu
 }
 
 type part struct {

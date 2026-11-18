@@ -234,8 +234,8 @@ func waitRelay(t *testing.T, done <-chan error) error {
 
 // errorLog collects the errors of OnError.
 type errorLog struct {
-	mu   sync.Mutex
 	errs []error
+	mu   sync.Mutex
 }
 
 func (l *errorLog) add(err error) {
@@ -520,14 +520,14 @@ func TestDatagramRelayHooks(t *testing.T) {
 func TestDatagramRelayStops(t *testing.T) {
 	cause := errors.New("quota used up")
 	tests := []struct {
-		name string
-		stop func(ctxCancel context.CancelCauseFunc, s *fakeStream, out PacketConn)
 		want error
+		stop func(ctxCancel context.CancelCauseFunc, s *fakeStream, out PacketConn)
+		name string
 	}{
-		{"context", func(cancel context.CancelCauseFunc, _ *fakeStream, _ PacketConn) { cancel(cause) }, cause},
-		{"stream EOF", func(_ context.CancelCauseFunc, s *fakeStream, _ PacketConn) { close(s.eof) }, nil},
-		{"stream closed", func(_ context.CancelCauseFunc, s *fakeStream, _ PacketConn) { _ = s.Close() }, nil},
-		{"egress closed", func(_ context.CancelCauseFunc, _ *fakeStream, out PacketConn) { _ = out.Close() }, nil},
+		{name: "context", stop: func(cancel context.CancelCauseFunc, _ *fakeStream, _ PacketConn) { cancel(cause) }, want: cause},
+		{name: "stream EOF", stop: func(_ context.CancelCauseFunc, s *fakeStream, _ PacketConn) { close(s.eof) }, want: nil},
+		{name: "stream closed", stop: func(_ context.CancelCauseFunc, s *fakeStream, _ PacketConn) { _ = s.Close() }, want: nil},
+		{name: "egress closed", stop: func(_ context.CancelCauseFunc, _ *fakeStream, out PacketConn) { _ = out.Close() }, want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -730,7 +730,9 @@ func benchmarkDatagramRelay(b *testing.B, size int, name bool) {
 	go func() { done <- new(DatagramRelay).Relay(context.Background(), stream, out) }()
 	defer func() {
 		_ = client.Close()
-		<-done
+		if err := <-done; err != nil {
+			b.Errorf("Relay() = %v", err)
+		}
 	}()
 	msg, _ := AppendDatagram(nil, dst, make([]byte, size))
 	buf := make([]byte, 65535)

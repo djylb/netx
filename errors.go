@@ -81,8 +81,8 @@ func IsDNSNotFound(err error) bool {
 // of its POSIX names anywhere in the chain, then by the error's text with
 // spaces, hyphens and underscores removed.
 type errorClass struct {
-	errnos errnoSet
 	texts  []string
+	errnos errnoSet
 }
 
 func (c *errorClass) match(t *errText) bool {
@@ -95,41 +95,41 @@ func (c *errorClass) is(err error) bool {
 }
 
 var (
-	connReset = errorClass{errnoSet(1) << eConnReset, []string{
+	connReset = errorClass{errnos: errnoSet(1) << eConnReset, texts: []string{
 		"connectionresetbypeer",
 		"forciblyclosedbytheremotehost",
 		"networknameisnolongeravailable"}}
-	connAborted = errorClass{errnoSet(1) << eConnAborted, []string{
+	connAborted = errorClass{errnos: errnoSet(1) << eConnAborted, texts: []string{
 		"connectionaborted",
 		"connectionwasaborted",
 		"softwarecausedconnectionabort"}}
-	brokenPipe = errorClass{errnoSet(1) << ePipe, []string{
+	brokenPipe = errorClass{errnos: errnoSet(1) << ePipe, texts: []string{
 		"brokenpipe",
 		"sockethadalreadybeenshutdown"}}
-	connRefused = errorClass{errnoSet(1) << eConnRefused, []string{
+	connRefused = errorClass{errnos: errnoSet(1) << eConnRefused, texts: []string{
 		"connectionrefused",
 		"activelyrefusedit"}}
-	hostUnreachable = errorClass{errnoSet(1) << eHostUnreach, []string{
+	hostUnreachable = errorClass{errnos: errnoSet(1) << eHostUnreach, texts: []string{
 		"noroutetohost",
 		"hostunreachable",
 		"hostisunreachable",
 		"unreachablehost"}}
-	networkUnreachable = errorClass{errnoSet(1) << eNetUnreach, []string{
+	networkUnreachable = errorClass{errnos: errnoSet(1) << eNetUnreach, texts: []string{
 		"networkunreachable",
 		"networkisunreachable",
 		"unreachablenetwork"}}
-	permissionDenied = errorClass{errnoSet(1)<<eAccess | errnoSet(1)<<ePerm, []string{
+	permissionDenied = errorClass{errnos: errnoSet(1)<<eAccess | errnoSet(1)<<ePerm, texts: []string{
 		"permissiondenied",
 		"operationnotpermitted",
 		"accessisdenied",
 		"forbiddenbyitsaccesspermissions"}}
-	addrInUse = errorClass{errnoSet(1) << eAddrInUse, []string{
+	addrInUse = errorClass{errnos: errnoSet(1) << eAddrInUse, texts: []string{
 		"addressalreadyinuse",
 		"onlyoneusageofeachsocketaddress"}}
-	addrNotAvailable = errorClass{errnoSet(1) << eAddrNotAvail, []string{
+	addrNotAvailable = errorClass{errnos: errnoSet(1) << eAddrNotAvail, texts: []string{
 		"cannotassignrequestedaddress",
 		"requestedaddressisnotvalidinitscontext"}}
-	messageTooLarge = errorClass{errnoSet(1) << eMsgSize, []string{
+	messageTooLarge = errorClass{errnos: errnoSet(1) << eMsgSize, texts: []string{
 		"messagetoolong",
 		"messagesentonadatagramsocketwaslarger"}}
 )
@@ -254,22 +254,22 @@ func netErrorKind(t *errText) ErrorKind {
 // NetErrorInfo describes a network error for diagnostics; see
 // NetErrorDetails. Empty fields are not known.
 type NetErrorInfo struct {
-	Kind    ErrorKind
-	Err     string // err.Error()
-	Timeout bool
-	Local   string // the connection's local address
-	Remote  string // the connection's remote address
-	Op      string // of the *net.OpError in the chain
-	Net     string
-	Source  string
-	Addr    string
-	Syscall string // of the *os.SyscallError in the chain
+	Kind      ErrorKind
+	Err       string // err.Error()
+	Local     string // the connection's local address
+	Remote    string // the connection's remote address
+	Op        string // of the *net.OpError in the chain
+	Net       string
+	Source    string
+	Addr      string
+	Syscall   string // of the *os.SyscallError in the chain
+	ErrnoName string
 	// Errno is the platform errno in the chain, 0 for none, and ErrnoName
 	// its POSIX name for the errnos that the classifiers know (ECONNRESET
 	// also for WSAECONNRESET, for example), which depends on neither the
 	// platform nor the system language.
-	Errno     int
-	ErrnoName string
+	Errno   int
+	Timeout bool
 }
 
 // NetErrorDetails describes err, and the addresses of c if it is not nil, as

@@ -16,11 +16,11 @@ import (
 // a relay idle in a read holds none of the allowance. It is safe for
 // concurrent use by many relays.
 type byteLimiter struct {
-	mu     sync.Mutex
-	rate   float64 // bytes per second
+	last   time.Time // under mu
+	rate   float64   // bytes per second
 	burst  float64
 	tokens float64
-	last   time.Time
+	mu     sync.Mutex
 }
 
 func newByteLimiter(bytesPerSecond, burst int64) *byteLimiter {

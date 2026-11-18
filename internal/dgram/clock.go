@@ -57,10 +57,10 @@ var Past = time.Unix(1, 0)
 // Deadline is a resettable deadline whose expiry closes a channel, as in
 // net.Pipe. Its zero value is not usable; see MakeDeadline.
 type Deadline struct {
+	timer   *time.Timer   // under mu
+	cancel  chan struct{} // closed when the deadline expires; never nil; under mu
 	mu      sync.Mutex
-	timer   *time.Timer
-	cancel  chan struct{} // closed when the deadline expires; never nil
-	stopped bool          // set by Stop: no more timers
+	stopped bool // set by Stop: no more timers; under mu
 }
 
 // MakeDeadline returns a deadline that is not set.

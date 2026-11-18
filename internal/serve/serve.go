@@ -15,19 +15,19 @@ import (
 // Tracker tracks the listeners and connections of a server. The zero value
 // is ready to use; it must not be copied after first use.
 type Tracker struct {
-	draining  bool // Shutdown was called
-	closed    bool // Close was called
-	mu        sync.Mutex
 	ctx       context.Context //nolint:containedctx // owned by the Tracker, canceled by Close
-	cancel    context.CancelFunc
 	drain     context.Context //nolint:containedctx // owned by the Tracker, canceled by Shutdown and Close
+	cancel    context.CancelFunc
 	stopDrain context.CancelFunc
 	// Tracked by pointer, as in net/http, since the dynamic types of a
 	// net.Listener or a net.Conn need not be comparable.
-	listeners map[*net.Listener]struct{}
-	conns     map[*net.Conn]struct{}
-	drained   chan struct{} // closed when conns empties during Shutdown
-	closeDone chan struct{} // closed when the first Close has returned
+	listeners map[*net.Listener]struct{} // under mu
+	conns     map[*net.Conn]struct{}     // under mu
+	drained   chan struct{}              // closed when conns empties during Shutdown; under mu
+	closeDone chan struct{}              // closed when the first Close has returned; under mu
+	mu        sync.Mutex
+	draining  bool // Shutdown was called; under mu
+	closed    bool // Close was called; under mu
 }
 
 // Serve accepts connections on l with accept and serves each with serve, in

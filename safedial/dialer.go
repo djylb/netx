@@ -24,13 +24,13 @@ var ErrRemoteMismatch = errors.New("safedial: connected to another address than 
 // that reached another address than the one dialed. It matches ErrDenied
 // and Reason with errors.Is.
 type DeniedError struct {
+	// Reason is the error that the policy returned, such as ErrScope or
+	// ErrPort, or ErrRemoteMismatch.
+	Reason error
 	// Target is the target refused: a host name before it is resolved, an
 	// address that it resolved to, the first one refused when all of them
 	// are, or an IP address dialed as such.
 	Target Target
-	// Reason is the error that the policy returned, such as ErrScope or
-	// ErrPort, or ErrRemoteMismatch.
-	Reason error
 }
 
 func (e *DeniedError) Error() string {

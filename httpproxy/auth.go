@@ -48,8 +48,6 @@ func (NoAuth) Challenge() string { return "" }
 
 // BasicAuth checks Basic credentials (RFC 7617).
 type BasicAuth struct {
-	// Realm is the realm of the challenge; "proxy" if empty.
-	Realm string
 	// Check reports whether the credentials that the client sent on c, the
 	// connection being served, are valid, as socks5.UserPassAuth.Check
 	// does, so that one function can check the clients of both servers; ctx
@@ -58,6 +56,8 @@ type BasicAuth struct {
 	// too and is returned by Authenticate instead of ErrAuthFailed. Nil
 	// rejects all credentials. See Credentials for a fixed account list.
 	Check func(ctx context.Context, c net.Conn, user, password string) (bool, error)
+	// Realm is the realm of the challenge; "proxy" if empty.
+	Realm string
 }
 
 // Scheme returns "Basic".

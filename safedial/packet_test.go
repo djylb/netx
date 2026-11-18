@@ -13,8 +13,8 @@ import (
 )
 
 type sentDatagram struct {
-	dst  netx.Addr
 	data string
+	dst  netx.Addr
 }
 
 // fakeAddrConn records the datagrams sent through it.
@@ -29,7 +29,7 @@ func newFakeAddrConn() *fakeAddrConn {
 }
 
 func (c *fakeAddrConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
-	c.sentCh <- sentDatagram{dst, string(p)}
+	c.sentCh <- sentDatagram{dst: dst, data: string(p)}
 	return len(p), nil
 }
 

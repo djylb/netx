@@ -21,19 +21,13 @@ var ErrGroupClosed = errors.New("netx: connection group closed")
 // Its methods are safe for concurrent use. The zero value is an empty, open
 // group.
 type ConnGroup struct {
+	conns  map[*groupMember]struct{} // under mu
 	mu     sync.Mutex
-	conns  map[*groupMember]struct{}
 	closed bool
 }
 
 type groupMember struct {
 	c io.Closer
-}
-
-// memberCloser is a member that closes with a cause: a relay, which returns
-// it, or a group, which passes it on.
-type memberCloser interface {
-	closeMember(cause error, final bool) error
 }
 
 // Add adds c and returns a function that removes it again, which the owner
@@ -146,10 +140,6 @@ func (g *ConnGroup) Close() error {
 	return g.closeAll(nil, true)
 }
 
-func (g *ConnGroup) closeMember(cause error, final bool) error {
-	return g.closeAll(cause, final)
-}
-
 func (g *ConnGroup) closeAll(cause error, final bool) error {
 	g.mu.Lock()
 	if final {
@@ -160,10 +150,15 @@ func (g *ConnGroup) closeAll(cause error, final bool) error {
 	g.mu.Unlock()
 	var errs []error
 	for m := range members {
+		// Members that close with a cause: a group passes it on, and a
+		// relay returns it.
 		var err error
-		if mc, ok := m.c.(memberCloser); ok {
-			err = mc.closeMember(cause, final)
-		} else {
+		switch c := m.c.(type) {
+		case *ConnGroup:
+			err = c.closeAll(cause, final)
+		case relayCloser:
+			c.stopFor(cause)
+		default:
 			err = m.c.Close()
 		}
 		if err != nil {

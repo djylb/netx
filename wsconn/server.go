@@ -19,13 +19,13 @@ import (
 // HandshakeError is an opening handshake that failed for a reason of HTTP
 // or of the protocol. It matches ErrHandshake.
 type HandshakeError struct {
+	// Response is the response a client got, if any.
+	Response *httphead.Response
+	// Msg describes the failure.
+	Msg string
 	// Status is the HTTP status: on a server the one it answers with, on a
 	// client the one it got, or 0 for a response that was malformed.
 	Status int
-	// Msg describes the failure.
-	Msg string
-	// Response is the response a client got, if any.
-	Response *httphead.Response
 }
 
 func (e *HandshakeError) Error() string {
@@ -43,11 +43,6 @@ func handshakeError(status int, msg string) *HandshakeError {
 
 // ServerOptions configure the server side of a connection.
 type ServerOptions struct {
-	Options
-	// Subprotocols are the subprotocols the server speaks, by preference:
-	// the first of them that the client offers is chosen. Without a match
-	// the connection has no subprotocol.
-	Subprotocols []string
 	// CheckOrigin decides on the request, typically on its Origin field; an
 	// error refuses it, with the status of a *HandshakeError from 400 to 599,
 	// or else 403 Forbidden. Nil accepts requests without an Origin field and
@@ -55,8 +50,13 @@ type ServerOptions struct {
 	// pages of the same site. Clients other than browsers seldom send an
 	// Origin; AnyOrigin accepts every request.
 	CheckOrigin func(req *httphead.Request) error
+	// Subprotocols are the subprotocols the server speaks, by preference:
+	// the first of them that the client offers is chosen. Without a match
+	// the connection has no subprotocol.
+	Subprotocols []string
 	// Header holds fields added to the 101 response, such as Set-Cookie.
 	Header httphead.Header
+	Options
 	// HandshakeTimeout bounds Accept and AcceptRequest when their context has
 	// no deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value
 	// means no timeout, as for http.Server.IdleTimeout.
@@ -82,17 +82,16 @@ func AnyOrigin(_ *httphead.Request) error { return nil }
 type Handshake struct {
 	// Request is the request.
 	Request *httphead.Request
+	opts    *ServerOptions
 	// Subprotocol is the chosen subprotocol, or "".
 	Subprotocol string
+	accept      string
+	extensions  string // the Sec-WebSocket-Extensions value
 	// Compressed tells whether permessage-deflate was accepted.
 	Compressed bool
 	// ExtendedConnect tells whether the request is an HTTP/2 extended
 	// CONNECT (RFC 8441), to be answered with 200 and ResponseHeader.
 	ExtendedConnect bool
-
-	opts       *ServerOptions
-	accept     string
-	extensions string // the Sec-WebSocket-Extensions value
 }
 
 // CheckRequest checks an opening handshake request (RFC 6455, section

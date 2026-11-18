@@ -16,9 +16,9 @@ import (
 // written.
 type memConn struct {
 	r      io.Reader
-	mu     sync.Mutex
 	out    bytes.Buffer
 	closed int
+	mu     sync.Mutex
 }
 
 func (c *memConn) Read(p []byte) (int, error) { return c.r.Read(p) }
@@ -59,8 +59,8 @@ func frame(first byte, masked bool, payload []byte) []byte {
 }
 
 type testFrame struct {
-	first   byte
 	payload []byte
+	first   byte
 }
 
 // parseFrames parses the frames that a connection wrote.
@@ -87,7 +87,7 @@ func parseFrames(t *testing.T, b []byte) []testFrame {
 		if masked {
 			mask(p, key, 0)
 		}
-		fs = append(fs, testFrame{first, p})
+		fs = append(fs, testFrame{first: first, payload: p})
 		b = b[n:]
 	}
 	return fs
@@ -182,33 +182,33 @@ func TestReadEmptyClose(t *testing.T) {
 func TestProtocolViolations(t *testing.T) {
 	long := bytes.Repeat([]byte("x"), 126)
 	tests := []struct {
+		err  error
 		name string
 		in   []byte
 		code StatusCode
-		err  error
 	}{
-		{"unmasked", frame(finBit|opText, false, []byte("a")), StatusProtocolError, ErrProtocol},
-		{"rsv2", frame(finBit|rsv2Bit|opText, true, nil), StatusProtocolError, ErrProtocol},
-		{"rsv3", frame(finBit|rsv3Bit|opBinary, true, nil), StatusProtocolError, ErrProtocol},
-		{"rsv1 without deflate", frame(finBit|rsv1Bit|opText, true, nil), StatusProtocolError, ErrProtocol},
-		{"opcode 3", frame(finBit|0x3, true, nil), StatusProtocolError, ErrProtocol},
-		{"opcode 0xb", frame(finBit|0xb, true, nil), StatusProtocolError, ErrProtocol},
-		{"long ping", frame(finBit|opPing, true, long), StatusProtocolError, ErrProtocol},
-		{"fragmented ping", frame(opPing, true, nil), StatusProtocolError, ErrProtocol},
-		{"ping rsv1", frame(finBit|rsv1Bit|opPing, true, nil), StatusProtocolError, ErrProtocol},
-		{"lone continuation", frame(finBit|opContinuation, true, nil), StatusProtocolError, ErrProtocol},
-		{"text inside fragments", cat(frame(opText, true, []byte("a")), frame(finBit|opText, true, nil)), StatusProtocolError, ErrProtocol},
-		{"invalid utf8", frame(finBit|opText, true, []byte("a\xff")), StatusInvalidPayload, ErrInvalidUTF8},
-		{"split invalid utf8", cat(frame(opText, true, []byte("\xe2\x82")), frame(finBit|opContinuation, true, []byte("x"))), StatusInvalidPayload, ErrInvalidUTF8},
-		{"truncated utf8", frame(finBit|opText, true, []byte("\xe2\x82")), StatusInvalidPayload, ErrInvalidUTF8},
-		{"close 1 byte", frame(finBit|opClose, true, []byte{3}), StatusProtocolError, ErrProtocol},
-		{"close 1005", frame(finBit|opClose, true, []byte{0x03, 0xed}), StatusProtocolError, ErrProtocol},
-		{"close 999", frame(finBit|opClose, true, []byte{0x03, 0xe7}), StatusProtocolError, ErrProtocol},
-		{"close 5000", frame(finBit|opClose, true, []byte{0x13, 0x88}), StatusProtocolError, ErrProtocol},
-		{"close reason", frame(finBit|opClose, true, []byte{0x03, 0xe8, 0xff}), StatusInvalidPayload, ErrInvalidUTF8},
-		{"length msb", []byte{finBit | opBinary, maskBit | 127, 0x80, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, StatusProtocolError, ErrProtocol},
-		{"too large", frame(finBit|opBinary, true, make([]byte, 101)), StatusMessageTooBig, ErrMessageTooLarge},
-		{"too large in fragments", cat(frame(opBinary, true, make([]byte, 60)), frame(finBit|opContinuation, true, make([]byte, 60))), StatusMessageTooBig, ErrMessageTooLarge},
+		{name: "unmasked", in: frame(finBit|opText, false, []byte("a")), code: StatusProtocolError, err: ErrProtocol},
+		{name: "rsv2", in: frame(finBit|rsv2Bit|opText, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "rsv3", in: frame(finBit|rsv3Bit|opBinary, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "rsv1 without deflate", in: frame(finBit|rsv1Bit|opText, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "opcode 3", in: frame(finBit|0x3, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "opcode 0xb", in: frame(finBit|0xb, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "long ping", in: frame(finBit|opPing, true, long), code: StatusProtocolError, err: ErrProtocol},
+		{name: "fragmented ping", in: frame(opPing, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "ping rsv1", in: frame(finBit|rsv1Bit|opPing, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "lone continuation", in: frame(finBit|opContinuation, true, nil), code: StatusProtocolError, err: ErrProtocol},
+		{name: "text inside fragments", in: cat(frame(opText, true, []byte("a")), frame(finBit|opText, true, nil)), code: StatusProtocolError, err: ErrProtocol},
+		{name: "invalid utf8", in: frame(finBit|opText, true, []byte("a\xff")), code: StatusInvalidPayload, err: ErrInvalidUTF8},
+		{name: "split invalid utf8", in: cat(frame(opText, true, []byte("\xe2\x82")), frame(finBit|opContinuation, true, []byte("x"))), code: StatusInvalidPayload, err: ErrInvalidUTF8},
+		{name: "truncated utf8", in: frame(finBit|opText, true, []byte("\xe2\x82")), code: StatusInvalidPayload, err: ErrInvalidUTF8},
+		{name: "close 1 byte", in: frame(finBit|opClose, true, []byte{3}), code: StatusProtocolError, err: ErrProtocol},
+		{name: "close 1005", in: frame(finBit|opClose, true, []byte{0x03, 0xed}), code: StatusProtocolError, err: ErrProtocol},
+		{name: "close 999", in: frame(finBit|opClose, true, []byte{0x03, 0xe7}), code: StatusProtocolError, err: ErrProtocol},
+		{name: "close 5000", in: frame(finBit|opClose, true, []byte{0x13, 0x88}), code: StatusProtocolError, err: ErrProtocol},
+		{name: "close reason", in: frame(finBit|opClose, true, []byte{0x03, 0xe8, 0xff}), code: StatusInvalidPayload, err: ErrInvalidUTF8},
+		{name: "length msb", in: []byte{finBit | opBinary, maskBit | 127, 0x80, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, code: StatusProtocolError, err: ErrProtocol},
+		{name: "too large", in: frame(finBit|opBinary, true, make([]byte, 101)), code: StatusMessageTooBig, err: ErrMessageTooLarge},
+		{name: "too large in fragments", in: cat(frame(opBinary, true, make([]byte, 60)), frame(finBit|opContinuation, true, make([]byte, 60))), code: StatusMessageTooBig, err: ErrMessageTooLarge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -425,19 +425,19 @@ func TestCloseAwaitsPeer(t *testing.T) {
 func TestReadMessageLimit(t *testing.T) {
 	comp := &Options{ReadLimit: 1000, Compression: &Compression{}}
 	tests := []struct {
+		opts  *Options
 		name  string
 		in    []byte
-		opts  *Options
 		limit int64
 		ok    bool
 	}{
-		{"equal", frame(finBit|opBinary, true, make([]byte, 100)), nil, 100, true},
-		{"over", frame(finBit|opBinary, true, make([]byte, 101)), nil, 100, false},
-		{"over in fragments", cat(frame(opBinary, true, make([]byte, 60)), frame(finBit|opContinuation, true, make([]byte, 60))), nil, 100, false},
-		{"compressed equal", frame(finBit|rsv1Bit|opBinary, true, deflateBomb(100)), comp, 100, true},
-		{"compressed over", frame(finBit|rsv1Bit|opBinary, true, deflateBomb(101)), comp, 100, false},
-		{"connection limit lower", frame(finBit|opBinary, true, make([]byte, 101)), &Options{ReadLimit: 100}, 200, false},
-		{"negative", frame(finBit|opBinary, true, make([]byte, 101)), &Options{ReadLimit: 101}, -1, true},
+		{name: "equal", in: frame(finBit|opBinary, true, make([]byte, 100)), opts: nil, limit: 100, ok: true},
+		{name: "over", in: frame(finBit|opBinary, true, make([]byte, 101)), opts: nil, limit: 100, ok: false},
+		{name: "over in fragments", in: cat(frame(opBinary, true, make([]byte, 60)), frame(finBit|opContinuation, true, make([]byte, 60))), opts: nil, limit: 100, ok: false},
+		{name: "compressed equal", in: frame(finBit|rsv1Bit|opBinary, true, deflateBomb(100)), opts: comp, limit: 100, ok: true},
+		{name: "compressed over", in: frame(finBit|rsv1Bit|opBinary, true, deflateBomb(101)), opts: comp, limit: 100, ok: false},
+		{name: "connection limit lower", in: frame(finBit|opBinary, true, make([]byte, 101)), opts: &Options{ReadLimit: 100}, limit: 200, ok: false},
+		{name: "negative", in: frame(finBit|opBinary, true, make([]byte, 101)), opts: &Options{ReadLimit: 101}, limit: -1, ok: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

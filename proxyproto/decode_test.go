@@ -18,8 +18,8 @@ func udp(ip string, port int) *net.UDPAddr { return &net.UDPAddr{IP: net.ParseIP
 
 // field is one decoded TLV, for comparisons.
 type field struct {
-	t TLVType
 	v string
+	t TLVType
 }
 
 func mkTLVs(t *testing.T, fs ...field) TLVs {
@@ -37,26 +37,26 @@ func mkTLVs(t *testing.T, fs ...field) TLVs {
 func fieldsOf(f TLVs) []field {
 	var fs []field
 	for t, v := range f.All() {
-		fs = append(fs, field{t, string(v)})
+		fs = append(fs, field{t: t, v: string(v)})
 	}
 	return fs
 }
 
 func TestHeaderRoundTrip(t *testing.T) {
-	tlvs := mkTLVs(t, field{TLVAuthority, "example.com"}, field{TLVUniqueID, "\x01\x02\x03"}, field{TLVNoop, ""})
+	tlvs := mkTLVs(t, field{t: TLVAuthority, v: "example.com"}, field{t: TLVUniqueID, v: "\x01\x02\x03"}, field{t: TLVNoop, v: ""})
 	tests := []struct {
 		name     string
-		h        Header
 		src, dst string
+		h        Header
 	}{
-		{"v1 tcp4", Header{Version: V1, Source: tcp("192.0.2.1", 5000), Destination: tcp("198.51.100.1", 443)}, "192.0.2.1:5000", "198.51.100.1:443"},
-		{"v1 tcp6", Header{Version: V1, Source: tcp("2001:db8::1", 5000), Destination: tcp("2001:db8::2", 443)}, "[2001:db8::1]:5000", "[2001:db8::2]:443"},
-		{"v1 unknown", Header{Version: V1, Local: true}, "", ""},
-		{"v2 tcp4 tlvs", Header{Version: V2, Source: tcp("192.0.2.1", 5000), Destination: tcp("198.51.100.1", 443), TLVs: tlvs}, "192.0.2.1:5000", "198.51.100.1:443"},
-		{"v2 tcp6", Header{Version: V2, Source: tcp("2001:db8::1", 1), Destination: tcp("2001:db8::2", 2)}, "[2001:db8::1]:1", "[2001:db8::2]:2"},
-		{"v2 udp", Header{Version: V2, Source: udp("192.0.2.1", 53), Destination: udp("198.51.100.1", 5353)}, "192.0.2.1:53", "198.51.100.1:5353"},
-		{"v2 unix", Header{Version: V2, Source: &net.UnixAddr{Name: "/run/client.sock", Net: "unix"}, Destination: &net.UnixAddr{Name: "/run/server.sock", Net: "unix"}}, "/run/client.sock", "/run/server.sock"},
-		{"v2 local", Header{Version: V2, Local: true, TLVs: mkTLVs(t, field{TLVAuthority, "example.com"})}, "", ""},
+		{name: "v1 tcp4", h: Header{Version: V1, Source: tcp("192.0.2.1", 5000), Destination: tcp("198.51.100.1", 443)}, src: "192.0.2.1:5000", dst: "198.51.100.1:443"},
+		{name: "v1 tcp6", h: Header{Version: V1, Source: tcp("2001:db8::1", 5000), Destination: tcp("2001:db8::2", 443)}, src: "[2001:db8::1]:5000", dst: "[2001:db8::2]:443"},
+		{name: "v1 unknown", h: Header{Version: V1, Local: true}, src: "", dst: ""},
+		{name: "v2 tcp4 tlvs", h: Header{Version: V2, Source: tcp("192.0.2.1", 5000), Destination: tcp("198.51.100.1", 443), TLVs: tlvs}, src: "192.0.2.1:5000", dst: "198.51.100.1:443"},
+		{name: "v2 tcp6", h: Header{Version: V2, Source: tcp("2001:db8::1", 1), Destination: tcp("2001:db8::2", 2)}, src: "[2001:db8::1]:1", dst: "[2001:db8::2]:2"},
+		{name: "v2 udp", h: Header{Version: V2, Source: udp("192.0.2.1", 53), Destination: udp("198.51.100.1", 5353)}, src: "192.0.2.1:53", dst: "198.51.100.1:5353"},
+		{name: "v2 unix", h: Header{Version: V2, Source: &net.UnixAddr{Name: "/run/client.sock", Net: "unix"}, Destination: &net.UnixAddr{Name: "/run/server.sock", Net: "unix"}}, src: "/run/client.sock", dst: "/run/server.sock"},
+		{name: "v2 local", h: Header{Version: V2, Local: true, TLVs: mkTLVs(t, field{t: TLVAuthority, v: "example.com"})}, src: "", dst: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,7 +99,7 @@ func addrString(a net.Addr) string {
 }
 
 func TestHeaderTLVAndErrors(t *testing.T) {
-	h := &Header{TLVs: mkTLVs(t, field{TLVALPN, "h2"}, field{TLVALPN, "http/1.1"})}
+	h := &Header{TLVs: mkTLVs(t, field{t: TLVALPN, v: "h2"}, field{t: TLVALPN, v: "http/1.1"})}
 	if v, ok := h.TLVs.Get(TLVALPN); !ok || string(v) != "h2" {
 		t.Fatalf("TLV(ALPN) = %q, %v", v, ok)
 	}
@@ -115,7 +115,7 @@ func TestHeaderTLVAndErrors(t *testing.T) {
 	if _, err := (&Header{Version: V2, TLVs: TLVs{byte(TLVALPN), 0, 5, 'h'}}).AppendBinary(nil); err == nil {
 		t.Fatal("TLVs cut short encoded")
 	}
-	big := mkTLVs(t, field{TLVUniqueID, string(make([]byte, 0xfff0))}, field{TLVUniqueID, string(make([]byte, 0xfff0))})
+	big := mkTLVs(t, field{t: TLVUniqueID, v: string(make([]byte, 0xfff0))}, field{t: TLVUniqueID, v: string(make([]byte, 0xfff0))})
 	if got, err := (&Header{Version: V2, TLVs: big}).AppendBinary([]byte("x")); err == nil || string(got) != "x" {
 		t.Fatalf("oversized header = %d bytes, %v; want an error and b unchanged", len(got), err)
 	}
@@ -135,18 +135,18 @@ func v2Wire(verCmd, fam byte, body ...byte) []byte {
 
 func TestDecodeErrors(t *testing.T) {
 	tests := []struct {
+		want error
 		name string
 		in   []byte
-		want error
 	}{
-		{"http", []byte("GET / HTTP/1.1\r\n"), ErrNoHeader},
-		{"almost v1", []byte("PROXX TCP4"), ErrNoHeader},
-		{"almost v2", []byte("\r\n\r\n\x00\r\nQUIX"), ErrNoHeader},
-		{"v1 fields", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1\r\n"), ErrMalformed},
-		{"v1 address", []byte("PROXY TCP4 1.1.1 2.2.2.2 1 2\r\n"), ErrMalformed},
-		{"v1 port sign", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 +1 2\r\n"), ErrMalformed},
-		{"v1 port range", []byte("PROXY UDP4 1.1.1.1 2.2.2.2 65536 2\r\n"), ErrMalformed},
-		{"v1 too long", []byte("PROXY TCP4 " + strings.Repeat("1", 300)), ErrMalformed},
+		{name: "http", in: []byte("GET / HTTP/1.1\r\n"), want: ErrNoHeader},
+		{name: "almost v1", in: []byte("PROXX TCP4"), want: ErrNoHeader},
+		{name: "almost v2", in: []byte("\r\n\r\n\x00\r\nQUIX"), want: ErrNoHeader},
+		{name: "v1 fields", in: []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1\r\n"), want: ErrMalformed},
+		{name: "v1 address", in: []byte("PROXY TCP4 1.1.1 2.2.2.2 1 2\r\n"), want: ErrMalformed},
+		{name: "v1 port sign", in: []byte("PROXY TCP4 1.1.1.1 2.2.2.2 +1 2\r\n"), want: ErrMalformed},
+		{name: "v1 port range", in: []byte("PROXY UDP4 1.1.1.1 2.2.2.2 65536 2\r\n"), want: ErrMalformed},
+		{name: "v1 too long", in: []byte("PROXY TCP4 " + strings.Repeat("1", 300)), want: ErrMalformed},
 	}
 	for _, tt := range tests {
 		if h, n, err := Decode(tt.in); !errors.Is(err, tt.want) || h != nil || n != 0 {
@@ -175,30 +175,30 @@ func TestDecodeLenient(t *testing.T) {
 	tlv := []byte{byte(TLVAuthority), 0, 1, 'a'}
 	tests := []struct {
 		name     string
-		in       []byte
 		src, dst string
+		in       []byte
 		local    bool
 		udp      bool
 		tlvs     int
 	}{
-		{"v1 lf only", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
-		{"v1 spacing case padding", []byte("PROXY  tcp4   1.1.1.1  2.2.2.2  01  00002 \r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
-		{"v1 family", []byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"), "[::1]:1", "2.2.2.2:2", false, false, 0},
-		{"v1 zone", []byte("PROXY TCP6 fe80::1%eth0 ::1 1 2\r\n"), "[fe80::1]:1", "[::1]:2", false, false, 0},
-		{"v1 udp4", []byte("PROXY UDP4 1.1.1.1 2.2.2.2 1 2\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, true, 0},
-		{"v1 udp6", []byte("PROXY UDP6 ::1 ::2 1 2\r\n"), "[::1]:1", "[::2]:2", false, true, 0},
-		{"v1 extra fields", []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2 x y\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
-		{"v1 padded line", []byte("PROXY TCP6 1.1.1.1 2.2.2.2 1 2" + strings.Repeat(" ", 150) + "\r\n"), "1.1.1.1:1", "2.2.2.2:2", false, false, 0},
-		{"v1 unknown protocol", []byte("PROXY SCTP4 1.1.1.1 2.2.2.2 1 2\r\n"), "", "", true, false, 0},
-		{"v1 no protocol", []byte("PROXY \r\n"), "", "", true, false, 0},
-		{"v2 version", v2Wire(0x11, 0x11, addrs...), "192.0.2.1:5000", "198.51.100.1:443", false, false, 0},
-		{"v2 command", v2Wire(0x22, 0x11, append(addrs, tlv...)...), "", "", true, false, 1},
-		{"v2 family", v2Wire(0x21, 0x41, addrs...), "", "", false, false, 0},
-		{"v2 transport", v2Wire(0x21, 0x13, append(addrs, tlv...)...), "", "", false, false, 1},
-		{"v2 unspec transport", v2Wire(0x21, 0x10, addrs...), "", "", false, false, 0},
-		{"v2 short addresses", v2Wire(0x21, 0x21, addrs...), "", "", false, false, 0},
-		{"v2 truncated tlv", v2Wire(0x21, 0x12, append(append(addrs, tlv...), 1, 0, 5, 'x')...), "192.0.2.1:5000", "198.51.100.1:443", false, true, 1},
-		{"v2 tlv header", v2Wire(0x21, 0x11, append(addrs, 1, 0)...), "192.0.2.1:5000", "198.51.100.1:443", false, false, 0},
+		{name: "v1 lf only", in: []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 spacing case padding", in: []byte("PROXY  tcp4   1.1.1.1  2.2.2.2  01  00002 \r\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 family", in: []byte("PROXY TCP4 ::1 2.2.2.2 1 2\r\n"), src: "[::1]:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 zone", in: []byte("PROXY TCP6 fe80::1%eth0 ::1 1 2\r\n"), src: "[fe80::1]:1", dst: "[::1]:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 udp4", in: []byte("PROXY UDP4 1.1.1.1 2.2.2.2 1 2\r\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: true, tlvs: 0},
+		{name: "v1 udp6", in: []byte("PROXY UDP6 ::1 ::2 1 2\r\n"), src: "[::1]:1", dst: "[::2]:2", local: false, udp: true, tlvs: 0},
+		{name: "v1 extra fields", in: []byte("PROXY TCP4 1.1.1.1 2.2.2.2 1 2 x y\r\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 padded line", in: []byte("PROXY TCP6 1.1.1.1 2.2.2.2 1 2" + strings.Repeat(" ", 150) + "\r\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
+		{name: "v1 unknown protocol", in: []byte("PROXY SCTP4 1.1.1.1 2.2.2.2 1 2\r\n"), src: "", dst: "", local: true, udp: false, tlvs: 0},
+		{name: "v1 no protocol", in: []byte("PROXY \r\n"), src: "", dst: "", local: true, udp: false, tlvs: 0},
+		{name: "v2 version", in: v2Wire(0x11, 0x11, addrs...), src: "192.0.2.1:5000", dst: "198.51.100.1:443", local: false, udp: false, tlvs: 0},
+		{name: "v2 command", in: v2Wire(0x22, 0x11, append(addrs, tlv...)...), src: "", dst: "", local: true, udp: false, tlvs: 1},
+		{name: "v2 family", in: v2Wire(0x21, 0x41, addrs...), src: "", dst: "", local: false, udp: false, tlvs: 0},
+		{name: "v2 transport", in: v2Wire(0x21, 0x13, append(addrs, tlv...)...), src: "", dst: "", local: false, udp: false, tlvs: 1},
+		{name: "v2 unspec transport", in: v2Wire(0x21, 0x10, addrs...), src: "", dst: "", local: false, udp: false, tlvs: 0},
+		{name: "v2 short addresses", in: v2Wire(0x21, 0x21, addrs...), src: "", dst: "", local: false, udp: false, tlvs: 0},
+		{name: "v2 truncated tlv", in: v2Wire(0x21, 0x12, append(append(addrs, tlv...), 1, 0, 5, 'x')...), src: "192.0.2.1:5000", dst: "198.51.100.1:443", local: false, udp: true, tlvs: 1},
+		{name: "v2 tlv header", in: v2Wire(0x21, 0x11, append(addrs, 1, 0)...), src: "192.0.2.1:5000", dst: "198.51.100.1:443", local: false, udp: false, tlvs: 0},
 	}
 	for _, tt := range tests {
 		h, n, err := Decode(append(tt.in, "rest"...))
@@ -259,19 +259,19 @@ func TestDecodeTLVsWithoutAmplification(t *testing.T) {
 	tests := []struct {
 		name  string
 		b     []byte
-		tlvs  int
 		value []byte
+		tlvs  int
 	}{
-		{"noop padding", tlvHeader(size, emptyTLVs(TLVNoop)), 0, nil},
-		{"empty tlvs", tlvHeader(size, emptyTLVs(TLVUniqueID)), size / 3, []byte{}},
-		{"padding then tlv", tlvHeader(size, func(p []byte) {
+		{name: "noop padding", b: tlvHeader(size, emptyTLVs(TLVNoop)), tlvs: 0, value: nil},
+		{name: "empty tlvs", b: tlvHeader(size, emptyTLVs(TLVUniqueID)), tlvs: size / 3, value: []byte{}},
+		{name: "padding then tlv", b: tlvHeader(size, func(p []byte) {
 			emptyTLVs(TLVNoop)(p)
 			copy(p[len(p)-6:], []byte{byte(TLVALPN), 0, 3, 'h', '2', 'c'})
-		}), 1, []byte("h2c")},
-		{"large tlv", tlvHeader(size, func(p []byte) {
+		}), tlvs: 1, value: []byte("h2c")},
+		{name: "large tlv", b: tlvHeader(size, func(p []byte) {
 			p[0] = byte(TLVSSL)
 			binary.BigEndian.PutUint16(p[1:], size-3)
-		}), 1, make([]byte, size-3)},
+		}), tlvs: 1, value: make([]byte, size-3)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

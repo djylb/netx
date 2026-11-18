@@ -28,8 +28,8 @@ func (c *byteBufferConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *byteBufferConn) SetWriteDeadline(time.Time) error { return nil }
 
 type writeFailConn struct {
-	byteBufferConn
 	err error
+	byteBufferConn
 }
 
 func (c *writeFailConn) Write([]byte) (int, error) { return 0, c.err }
@@ -47,9 +47,9 @@ func (c *countingWriteConn) Write(p []byte) (int, error) {
 
 // partialWriteConn accepts limit bytes in total and then fails with err.
 type partialWriteConn struct {
+	err error
 	byteBufferConn
 	limit int
-	err   error
 }
 
 func (c *partialWriteConn) Write(p []byte) (int, error) {
@@ -65,8 +65,8 @@ func (c *partialWriteConn) Write(p []byte) (int, error) {
 // fullWriteErrConn writes everything and still reports err, like an observer
 // that rejects bytes after they were sent.
 type fullWriteErrConn struct {
-	byteBufferConn
 	err error
+	byteBufferConn
 }
 
 func (c *fullWriteErrConn) Write(p []byte) (int, error) {
@@ -75,15 +75,15 @@ func (c *fullWriteErrConn) Write(p []byte) (int, error) {
 }
 
 type framedReadStep struct {
-	data []byte
 	err  error
+	data []byte
 }
 
 // framedScriptConn returns its steps in order: data chunks may be split by
 // small reads, and an error step is returned once with no data.
 type framedScriptConn struct {
-	byteBufferConn
 	steps []framedReadStep
+	byteBufferConn
 }
 
 func (c *framedScriptConn) Read(p []byte) (int, error) {
@@ -768,14 +768,14 @@ func TestFramedConnReadErrorsKeepFramePosition(t *testing.T) {
 	frame := frameBytes("hello")
 	for _, tt := range []struct {
 		name   string
-		split  int // the timeout comes after this many bytes of the frame
 		modes  []framedReadMode
+		split  int // the timeout comes after this many bytes of the frame
 		bufLen int
 	}{
-		{"inside header", 1, []framedReadMode{streamReads, frameReads, datagramReads}, 64},
-		{"after header", 2, []framedReadMode{streamReads, frameReads, datagramReads}, 64},
-		{"inside payload", 4, []framedReadMode{streamReads}, 64},
-		{"inside payload, small buffer", 4, []framedReadMode{streamReads}, 2},
+		{name: "inside header", split: 1, modes: []framedReadMode{streamReads, frameReads, datagramReads}, bufLen: 64},
+		{name: "after header", split: 2, modes: []framedReadMode{streamReads, frameReads, datagramReads}, bufLen: 64},
+		{name: "inside payload", split: 4, modes: []framedReadMode{streamReads}, bufLen: 64},
+		{name: "inside payload, small buffer", split: 4, modes: []framedReadMode{streamReads}, bufLen: 2},
 	} {
 		for _, mode := range tt.modes {
 			t.Run(tt.name+"/"+mode.String(), func(t *testing.T) {
@@ -817,10 +817,10 @@ func TestFramedConnReadErrorsKeepFramePosition(t *testing.T) {
 func TestFramedConnLostFrameBytesDesync(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
+		first   string // what a stream Read returns before the failure
+		steps   []framedReadStep
 		mode    framedReadMode
 		bufLen  int
-		steps   []framedReadStep
-		first   string // what a stream Read returns before the failure
 		wantEOF bool
 	}{
 		{name: "timeout inside payload", mode: frameReads,
@@ -900,12 +900,12 @@ func TestFramedConnPipeDeadlineMidFrame(t *testing.T) {
 	interrupted := func(write []byte, read func() (int, error)) (int, error) {
 		t.Helper()
 		type result struct {
-			n   int
 			err error
+			n   int
 		}
 		wrote, done := make(chan struct{}), make(chan result, 1)
 		go func() { _, _ = server.Write(write); close(wrote) }()
-		go func() { n, err := read(); done <- result{n, err} }()
+		go func() { n, err := read(); done <- result{n: n, err: err} }()
 		<-wrote
 		_ = fc.SetReadDeadline(time.Now())
 		r := <-done

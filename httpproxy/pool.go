@@ -11,19 +11,18 @@ import (
 
 // upConn is a connection to a target, with the reader of its responses.
 type upConn struct {
-	c   net.Conn
-	br  *bufio.Reader
-	key string
+	idleSince time.Time
+	c         net.Conn
+	peekErr   error
+	br        *bufio.Reader
+	watchDone chan struct{}
+	key       string
 	// reused tells that it served a request before, so that a request
 	// that fails on it before any response may be retried on a new one.
 	reused bool
-
 	// While idle in a pool, a goroutine waits on it for data, an end or its
 	// idle timeout; taken and peekErr are guarded by the pool's lock.
-	taken     bool
-	peekErr   error
-	watchDone chan struct{}
-	idleSince time.Time
+	taken bool
 }
 
 // close closes the connection and gives its reader back.
@@ -42,13 +41,13 @@ func (u *upConn) close() {
 // timeout, so that a connection taken from the pool is not one that the
 // target already closed, as far as it can be known.
 type pool struct {
-	mu      sync.Mutex
-	idle    map[string][]*upConn
-	n       int
-	closed  bool
-	perKey  int // most idle connections of a key; no reuse when 0
-	total   int // most idle connections; no bound when negative
+	idle    map[string][]*upConn // under mu
+	n       int                  // under mu
+	perKey  int                  // most idle connections of a key; no reuse when 0
+	total   int                  // most idle connections; no bound when negative
 	timeout time.Duration
+	mu      sync.Mutex
+	closed  bool // under mu
 }
 
 // get returns an idle connection for key, or nil.

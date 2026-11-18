@@ -36,8 +36,8 @@ import (
 // StatusError is an error with the HTTP status code that reports it to the
 // client, such as 403 Forbidden from Allow. Err, if not nil, is the cause.
 type StatusError struct {
-	Code int
 	Err  error
+	Code int
 }
 
 func (e *StatusError) Error() string {

@@ -101,13 +101,13 @@ func TestParseTarget(t *testing.T) {
 
 func TestTargetString(t *testing.T) {
 	for _, tt := range []struct {
-		target Target
 		want   string
+		target Target
 	}{
-		{Target{Name: "example.com", Port: 80}, "example.com:80"},
-		{Target{Addr: netip.MustParseAddr("1.2.3.4"), Port: 80}, "1.2.3.4:80"},
-		{Target{Addr: netip.MustParseAddr("fe80::1"), Zone: "eth0", Port: 80}, "[fe80::1%eth0]:80"},
-		{Target{Addr: netip.MustParseAddr("::1"), Name: "localhost", Port: 80}, "localhost:80 (::1)"},
+		{target: Target{Name: "example.com", Port: 80}, want: "example.com:80"},
+		{target: Target{Addr: netip.MustParseAddr("1.2.3.4"), Port: 80}, want: "1.2.3.4:80"},
+		{target: Target{Addr: netip.MustParseAddr("fe80::1"), Zone: "eth0", Port: 80}, want: "[fe80::1%eth0]:80"},
+		{target: Target{Addr: netip.MustParseAddr("::1"), Name: "localhost", Port: 80}, want: "localhost:80 (::1)"},
 	} {
 		if got := tt.target.String(); got != tt.want {
 			t.Errorf("%+v.String() = %q; want %q", tt.target, got, tt.want)

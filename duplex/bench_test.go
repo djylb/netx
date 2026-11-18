@@ -40,16 +40,16 @@ func tcpPair(b *testing.B) (client, server net.Conn) {
 func BenchmarkCopyTCP(b *testing.B) {
 	const chunk = 64 << 10
 	cases := []struct {
-		name string
 		ends func(in, out net.Conn) (io.Writer, io.Reader)
+		name string
 	}{
-		{"direct", func(in, out net.Conn) (io.Writer, io.Reader) { return out, in }},
-		{"read-half/forwarded", func(in, out net.Conn) (io.Writer, io.Reader) { return out, duplex.Join(in, nil) }},
-		{"read-half/hidden", func(in, out net.Conn) (io.Writer, io.Reader) {
+		{name: "direct", ends: func(in, out net.Conn) (io.Writer, io.Reader) { return out, in }},
+		{name: "read-half/forwarded", ends: func(in, out net.Conn) (io.Writer, io.Reader) { return out, duplex.Join(in, nil) }},
+		{name: "read-half/hidden", ends: func(in, out net.Conn) (io.Writer, io.Reader) {
 			return out, struct{ io.Reader }{duplex.Join(in, nil)}
 		}},
-		{"write-half/forwarded", func(in, out net.Conn) (io.Writer, io.Reader) { return duplex.Join(nil, out), in }},
-		{"write-half/hidden", func(in, out net.Conn) (io.Writer, io.Reader) {
+		{name: "write-half/forwarded", ends: func(in, out net.Conn) (io.Writer, io.Reader) { return duplex.Join(nil, out), in }},
+		{name: "write-half/hidden", ends: func(in, out net.Conn) (io.Writer, io.Reader) {
 			return struct{ io.Writer }{duplex.Join(nil, out)}, in
 		}},
 	}

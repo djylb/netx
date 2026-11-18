@@ -18,14 +18,14 @@ import (
 // storeEntry is what Load brought for a name: a certificate, or an error or
 // none until retryAt, or a first load still running until ready is closed.
 type storeEntry struct {
-	name       string
-	ready      chan struct{} // closed when the first load ends
-	cert       *tls.Certificate
 	notAfter   time.Time
 	refreshAt  time.Time // of a certificate
-	err        error
 	retryAt    time.Time // of a failed load or of none
 	lastUsed   time.Time
+	err        error
+	ready      chan struct{} // closed when the first load ends
+	cert       *tls.Certificate
+	name       string
 	refreshing bool
 	// reloadNext asks the running load to leave its certificate due, as
 	// Refresh during a load does.

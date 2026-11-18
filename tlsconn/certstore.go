@@ -88,26 +88,16 @@ const (
 // Its methods are safe for concurrent use. The zero value is ready to use;
 // set the fields before first use.
 type CertStore struct {
-	// Select, if set, names the certificate for a handshake by its ID, such
-	// as the one the requested host's configuration names, or returns ""
-	// to leave the choice to the order above. It is served even if it is
-	// not for the requested name. An ID the store does not hold, or of a
-	// certificate not valid now, is reported to OnError and the choice is
-	// left to the order above. An error fails the handshake.
-	Select func(hello *tls.ClientHelloInfo) (id string, err error)
+	lastSweep time.Time // under mu
+	// Clock tells the time of the checks, refreshes and certificate
+	// validity; the system clock if nil.
+	Clock timeshim.Clock
+	byID  map[string]*storeCert // under addMu
 	// Roots are the authorities that issued certificates are verified
 	// against when added or read again, with their chain as intermediates;
 	// nil means the system roots. Add a private authority here for its
 	// certificates to rank as issued.
 	Roots *x509.CertPool
-	// CheckInterval is how often the files of AddFiles certificates are
-	// checked for changes, as in CertFiles: 0 means DefaultCheckInterval
-	// (10s), and a negative value never checks. The files of an expired
-	// certificate are read again, changed or not, at most once a minute
-	// either way. The checks run in the background, started by handshakes;
-	// CheckFiles runs one at once.
-	CheckInterval time.Duration
-
 	// Load, if set, returns the certificate for a name that no added one is
 	// for, such as from a central store or by issuing one, or nil and no
 	// error when there is none; a refresh that finds none stops the name's
@@ -118,28 +108,16 @@ type CertStore struct {
 	// fails, while its call goes on until it returns. A panic in Load fails
 	// it too. Calls for one name may overlap, as after RetryAfter, Forget or
 	// an eviction while an earlier call has not returned.
-	Load func(ctx context.Context, name string) (*tls.Certificate, error)
-	// LoadTimeout bounds a Load; 0 means DefaultLoadTimeout (30s), and
-	// a negative value means no timeout, as for http.Server.IdleTimeout.
-	LoadTimeout time.Duration
-	// RetryAfter is how long a failed Load, or one that found no
-	// certificate, is remembered before Load runs again for the name, and
-	// the least time between the loads of a certificate due for refresh;
-	// 0 means DefaultRetryAfter (10s), and a negative value is an error.
-	RetryAfter time.Duration
-	// RefreshBefore is how long before a loaded certificate expires that it
-	// is loaded again, at most a third of its lifetime; 0 means
-	// DefaultRefreshBefore (24h), and a negative value is an error.
-	RefreshBefore time.Duration
-	// MaxEntries bounds the loaded names, failed ones included, the least
-	// recently used dropped first; 0 means DefaultMaxEntries (1024), as the
-	// names come from the clients' SNI, and a negative value means no
-	// bound.
-	MaxEntries int
-	// IdleTimeout drops loaded names that no handshake used for this long;
-	// 0 means DefaultIdleTimeout (24h), and a negative value keeps them.
-	IdleTimeout time.Duration
-
+	Load    func(ctx context.Context, name string) (*tls.Certificate, error)
+	entries map[string]*list.Element // under mu
+	// Select, if set, names the certificate for a handshake by its ID, such
+	// as the one the requested host's configuration names, or returns ""
+	// to leave the choice to the order above. It is served even if it is
+	// not for the requested name. An ID the store does not hold, or of a
+	// certificate not valid now, is reported to OnError and the choice is
+	// left to the order above. An error fails the handshake.
+	Select func(hello *tls.ClientHelloInfo) (id string, err error)
+	wild   map[string]*certList // by the suffix of a wildcard, such as .example.com; under addMu
 	// OnError, if set, is called with each failure that no handshake may
 	// see: a failed read of changed files, which leaves the previous
 	// certificate serving; a failed Load, first or refresh; a Select that
@@ -147,25 +125,43 @@ type CertStore struct {
 	// is not valid now (ErrNotValidNow). It runs without locks held, in a
 	// handshake or a background goroutine, and may call the store's
 	// methods.
-	OnError func(err *CertError)
-	// Clock tells the time of the checks, refreshes and certificate
-	// validity; the system clock if nil.
-	Clock timeshim.Clock
-
-	addMu     sync.RWMutex
-	byID      map[string]*storeCert
-	exact     map[string]*certList // by name
-	wild      map[string]*certList // by the suffix of a wildcard, such as .example.com
-	defaultID string
-	seq       uint64
-	nFiles    atomic.Int64 // added certificates with files
-	nextCheck atomic.Int64 // when the files are next checked, in Unix nanoseconds
-	checkMu   sync.Mutex   // held by a check of the files
-
-	mu        sync.Mutex // of what Load brought
-	entries   map[string]*list.Element
-	lru       list.List // of *storeEntry, most recently used first
-	lastSweep time.Time
+	OnError   func(err *CertError)
+	exact     map[string]*certList // by name; under addMu
+	lru       list.List            // of *storeEntry, most recently used first; under mu
+	defaultID string               // under addMu
+	// RefreshBefore is how long before a loaded certificate expires that it
+	// is loaded again, at most a third of its lifetime; 0 means
+	// DefaultRefreshBefore (24h), and a negative value is an error.
+	RefreshBefore time.Duration
+	// IdleTimeout drops loaded names that no handshake used for this long;
+	// 0 means DefaultIdleTimeout (24h), and a negative value keeps them.
+	IdleTimeout time.Duration
+	// MaxEntries bounds the loaded names, failed ones included, the least
+	// recently used dropped first; 0 means DefaultMaxEntries (1024), as the
+	// names come from the clients' SNI, and a negative value means no
+	// bound.
+	MaxEntries int
+	seq        uint64       // under addMu
+	nFiles     atomic.Int64 // added certificates with files
+	nextCheck  atomic.Int64 // when the files are next checked, in Unix nanoseconds
+	// RetryAfter is how long a failed Load, or one that found no
+	// certificate, is remembered before Load runs again for the name, and
+	// the least time between the loads of a certificate due for refresh;
+	// 0 means DefaultRetryAfter (10s), and a negative value is an error.
+	RetryAfter time.Duration
+	// LoadTimeout bounds a Load; 0 means DefaultLoadTimeout (30s), and
+	// a negative value means no timeout, as for http.Server.IdleTimeout.
+	LoadTimeout time.Duration
+	// CheckInterval is how often the files of AddFiles certificates are
+	// checked for changes, as in CertFiles: 0 means DefaultCheckInterval
+	// (10s), and a negative value never checks. The files of an expired
+	// certificate are read again, changed or not, at most once a minute
+	// either way. The checks run in the background, started by handshakes;
+	// CheckFiles runs one at once.
+	CheckInterval time.Duration
+	addMu         sync.RWMutex
+	checkMu       sync.Mutex // held by a check of the files
+	mu            sync.Mutex // of what Load brought
 }
 
 // CertSource is how a certificate came into a CertStore.
@@ -223,14 +219,14 @@ func (r CertRole) String() string {
 
 // CertInfo describes a certificate of a CertStore, as Match and List return.
 type CertInfo struct {
-	ID string // empty for one that Load brought
-	// Names are the names it serves.
-	Names               []string
 	NotBefore, NotAfter time.Time
+	Leaf                *x509.Certificate
 	// CertFile and KeyFile are the files of one added with AddFiles.
 	CertFile, KeyFile string
-	Leaf              *x509.Certificate
-	Source            CertSource
+	ID                string // empty for one that Load brought
+	// Names are the names it serves.
+	Names  []string
+	Source CertSource
 	// Role is why Match lists it.
 	Role CertRole
 	// Authority reports whether it verifies against the store's Roots.
@@ -248,13 +244,13 @@ type CertInfo struct {
 // storeCert is an added certificate. It does not change: a read of changed
 // files replaces it.
 type storeCert struct {
-	id                  string
+	notBefore, notAfter time.Time
 	cert                *tls.Certificate // with Leaf set
+	files               *fileSource      // for SourceFiles; used under checkMu
+	id                  string
 	names               []string
 	given               []string // the names given when added, if any
-	notBefore, notAfter time.Time
-	seq                 uint64      // of when it was added
-	files               *fileSource // for SourceFiles; used under checkMu
+	seq                 uint64   // of when it was added
 	authority           bool
 	source              CertSource
 }

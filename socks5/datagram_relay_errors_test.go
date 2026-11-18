@@ -19,15 +19,15 @@ import (
 // errors of reads in turn, then repeats the last one forever.
 type scriptedPacketConn struct {
 	reads  chan scriptedRead
-	last   scriptedRead
 	done   chan struct{}
+	last   scriptedRead
 	sent   atomic.Int32
 	closed atomic.Bool
 }
 
 type scriptedRead struct {
-	payload string
 	err     error
+	payload string
 }
 
 func newScriptedPacketConn() *scriptedPacketConn {

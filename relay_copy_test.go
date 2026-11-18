@@ -16,9 +16,9 @@ import (
 
 // endRecord records the calls of RelayFlow.End.
 type endRecord struct {
-	calls atomic.Int32
-	n     atomic.Int64
 	err   atomic.Value // errBox
+	n     atomic.Int64
+	calls atomic.Int32
 }
 
 type errBox struct{ err error }

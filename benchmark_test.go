@@ -106,13 +106,13 @@ func (c *loopReadConn) SetWriteDeadline(time.Time) error { return nil }
 
 func BenchmarkNetErrorKind(b *testing.B) {
 	for _, tc := range []struct {
-		name string
 		err  error
+		name string
 	}{
-		{"closed", &net.OpError{Op: "read", Net: "tcp", Err: net.ErrClosed}},
-		{"closed_text", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("use of closed network connection")}},
-		{"reset_text", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errors.New("connection reset by peer"))}},
-		{"eof", io.EOF},
+		{name: "closed", err: &net.OpError{Op: "read", Net: "tcp", Err: net.ErrClosed}},
+		{name: "closed_text", err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("use of closed network connection")}},
+		{name: "reset_text", err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errors.New("connection reset by peer"))}},
+		{name: "eof", err: io.EOF},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()

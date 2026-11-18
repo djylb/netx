@@ -31,10 +31,10 @@ func TestServerHandshakeCustomCommand(t *testing.T) {
 			client, server := net.Pipe()
 			defer func() { _ = client.Close() }()
 			type result struct {
-				req      *socks5.Request
-				early    string
 				err      error
 				replyErr error
+				req      *socks5.Request
+				early    string
 			}
 			done := make(chan result, 1)
 			go func() {
@@ -426,11 +426,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestDialerHandshakeBoundAddr(t *testing.T) {
 	bound := netx.Addr{IP: netip.MustParseAddr("192.0.2.9"), Port: 5000}
 	for _, tt := range []struct {
-		name  string
 		d     *socks5.Dialer
 		serve func(c net.Conn, rep socks5.Reply)
+		name  string
 	}{
-		{"SOCKS5", &socks5.Dialer{}, func(c net.Conn, rep socks5.Reply) {
+		{name: "SOCKS5", d: &socks5.Dialer{}, serve: func(c net.Conn, rep socks5.Reply) {
 			if _, err := socks5.ReadMethods(c); err != nil {
 				return
 			}
@@ -439,7 +439,7 @@ func TestDialerHandshakeBoundAddr(t *testing.T) {
 				_ = socks5.WriteReply(c, rep, bound)
 			}
 		}},
-		{"SOCKS4", &socks5.Dialer{SOCKS4: true}, func(c net.Conn, rep socks5.Reply) {
+		{name: "SOCKS4", d: &socks5.Dialer{SOCKS4: true}, serve: func(c net.Conn, rep socks5.Reply) {
 			if _, _, _, err := socks5.ReadRequest4(c); err == nil {
 				_ = socks5.WriteReply4(c, rep, bound)
 			}
@@ -605,6 +605,12 @@ func TestServerShutdownWaitsForClose(t *testing.T) {
 	}
 }
 
+// connEnded reports whether err is how ServeConn ends when its context or
+// connection ends: which of the two it sees first is not fixed.
+func connEnded(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
+}
+
 // ServeConn's context ending ends the connection, also once it is relaying.
 func TestServerServeConnContext(t *testing.T) {
 	s := &socks5.Server{}
@@ -623,7 +629,10 @@ func TestServerServeConnContext(t *testing.T) {
 	assertEcho(t, client, "relayed")
 	cancel()
 	select {
-	case <-served:
+	case err := <-served:
+		if !connEnded(err) {
+			t.Errorf("ServeConn() = %v, want the end of the context or connection", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ServeConn outlived its context")
 	}
@@ -675,7 +684,9 @@ func TestServerHandleCustomCommand(t *testing.T) {
 	}
 	shut := make(chan error, 1)
 	go func() { shut <- s.Shutdown(context.Background()) }()
-	<-served
+	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Errorf("Serve() = %v, want ErrServerClosed", err)
+	}
 	select {
 	case err := <-shut:
 		t.Fatalf("Shutdown() = %v while Handle was serving", err)
@@ -730,13 +741,13 @@ func TestServerRefusalKeepsCause(t *testing.T) {
 		OnError: func(_ net.Conn, err error) { reported <- err },
 	})
 	for _, tt := range []struct {
+		want string
+		port uint16
 		cmd  socks5.Command
 		code socks5.Reply
-		port uint16
-		want string
 	}{
-		{socks5.CmdConnect, socks5.ReplyNotAllowed, 25, "socks5: connection not allowed by ruleset: blocked by policy"},
-		{socks5.CmdBind, socks5.ReplyCommandNotSupported, 80, "socks5: command not supported: bind"},
+		{cmd: socks5.CmdConnect, code: socks5.ReplyNotAllowed, port: 25, want: "socks5: connection not allowed by ruleset: blocked by policy"},
+		{cmd: socks5.CmdBind, code: socks5.ReplyCommandNotSupported, port: 80, want: "socks5: command not supported: bind"},
 	} {
 		c := handshake(t, addr)
 		if err := socks5.WriteRequest(c, tt.cmd, netx.Addr{IP: netip.MustParseAddr("192.0.2.1"), Port: tt.port}); err != nil {
@@ -794,14 +805,14 @@ func TestServerRelayOptions(t *testing.T) {
 func TestUserPassAuthCheck(t *testing.T) {
 	backendDown := errors.New("account backend unreachable")
 	for _, tt := range []struct {
-		name    string
-		ok      bool
 		err     error
 		wantErr error
+		name    string
+		ok      bool
 	}{
-		{"accepted", true, nil, nil},
-		{"rejected", false, nil, socks5.ErrAuthFailed},
-		{"backend failure", true, backendDown, backendDown},
+		{name: "accepted", ok: true, err: nil, wantErr: nil},
+		{name: "rejected", ok: false, err: nil, wantErr: socks5.ErrAuthFailed},
+		{name: "backend failure", ok: true, err: backendDown, wantErr: backendDown},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client, server := net.Pipe()
@@ -879,13 +890,13 @@ func TestUDPConnAsNetPacketConn(t *testing.T) {
 // A request gets one reply, BIND two, and a failure reply is the last.
 func TestRequestReplyLimit(t *testing.T) {
 	for _, tt := range []struct {
-		cmd   socks5.Command
 		codes []socks5.Reply
 		want  int // replies written
+		cmd   socks5.Command
 	}{
-		{socks5.CmdConnect, []socks5.Reply{socks5.ReplySucceeded, socks5.ReplySucceeded}, 1},
-		{socks5.CmdBind, []socks5.Reply{socks5.ReplySucceeded, socks5.ReplySucceeded, socks5.ReplySucceeded}, 2},
-		{socks5.CmdBind, []socks5.Reply{socks5.ReplyGeneralFailure, socks5.ReplySucceeded}, 1},
+		{cmd: socks5.CmdConnect, codes: []socks5.Reply{socks5.ReplySucceeded, socks5.ReplySucceeded}, want: 1},
+		{cmd: socks5.CmdBind, codes: []socks5.Reply{socks5.ReplySucceeded, socks5.ReplySucceeded, socks5.ReplySucceeded}, want: 2},
+		{cmd: socks5.CmdBind, codes: []socks5.Reply{socks5.ReplyGeneralFailure, socks5.ReplySucceeded}, want: 1},
 	} {
 		var wire bytes.Buffer
 		req := &socks5.Request{Version: socks5.Version5, Command: tt.cmd, Conn: bufConn{&wire}}
@@ -996,7 +1007,9 @@ func TestServeTracksAcceptedBeforeServing(t *testing.T) {
 	}
 	shut := make(chan error, 1)
 	go func() { shut <- s.Shutdown(context.Background()) }()
-	<-served
+	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Errorf("Serve() = %v, want ErrServerClosed", err)
+	}
 	select {
 	case err := <-shut:
 		t.Fatalf("Shutdown() = %v with a connection being served", err)

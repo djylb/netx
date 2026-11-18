@@ -15,8 +15,8 @@ import (
 // go to the wrapped connection.
 type PrefixConn struct {
 	conn    net.Conn
+	prefix  []byte // under mu
 	mu      sync.Mutex
-	prefix  []byte
 	drained atomic.Bool // prefix fully consumed; reads skip the lock
 }
 

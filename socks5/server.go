@@ -35,13 +35,11 @@ const DefaultUDPQueue = 128
 
 // Request is a client request read by Server.Handshake.
 type Request struct {
-	// Version is Version5, or Version4 for a SOCKS4 or SOCKS4a request.
-	Version byte
-	Command Command
-	replies uint8 // replies sent; next to the bytes above, sharing one word
-	// Dst is the requested destination. For CmdUDPAssociate it is the address
-	// the client expects to send datagrams from, often the zero netx.Addr.
-	Dst netx.Addr
+	// Conn is the client's connection, positioned after the request: it
+	// first returns the bytes a SOCKS4 client sent right after its request,
+	// which reading the request buffered, and writes go to the served
+	// connection. It is the connection to reply on and to relay.
+	Conn net.Conn
 	// User is the identity returned by the authenticator, empty without
 	// authentication. For SOCKS4 it is what the NoAuth authenticator
 	// returned.
@@ -49,11 +47,13 @@ type Request struct {
 	// UserID4 is the user ID of a SOCKS4 or SOCKS4a request, which the client
 	// sends without authentication; empty for SOCKS5.
 	UserID4 string
-	// Conn is the client's connection, positioned after the request: it
-	// first returns the bytes a SOCKS4 client sent right after its request,
-	// which reading the request buffered, and writes go to the served
-	// connection. It is the connection to reply on and to relay.
-	Conn net.Conn
+	// Dst is the requested destination. For CmdUDPAssociate it is the address
+	// the client expects to send datagrams from, often the zero netx.Addr.
+	Dst netx.Addr
+	// Version is Version5, or Version4 for a SOCKS4 or SOCKS4a request.
+	Version byte
+	Command Command
+	replies uint8 // replies sent; next to the bytes above, sharing one word
 }
 
 // Reply sends a reply to r in its protocol version: for SOCKS4 code and bound
@@ -168,74 +168,7 @@ func Credentials(accounts map[string]string) UserPassAuth {
 // client, each of which holds a few sockets and buffers; bound them in the
 // listener passed to Serve or in Allow.
 type Server struct {
-	// Auth lists the accepted authentication methods in order of
-	// preference. Nil means NoAuth. An authenticator for MethodNoAuth, which
-	// may check the connection itself (its address or TLS state), also
-	// decides on SOCKS4 clients and on SOCKS5 clients whose method lists
-	// match no authenticator.
-	Auth []Authenticator
-
-	// Allow is called by ServeRequest for each request. A non-nil error
-	// refuses it with the error's ReplyFor code, or ReplyNotAllowed when that
-	// is ReplyGeneralFailure.
-	//
-	// The request's Dst holds every IP address the client sends as IP,
-	// including IPv4-mapped IPv6 addresses and domain names that are IP
-	// literals, also with one trailing dot such as "127.0.0.1." (see
-	// DecodeAddr). Other names are not resolved: a policy on IP
-	// addresses must also check the addresses that names resolve to, in a
-	// Dial hook, for example with a net.Dialer Control function, since some
-	// resolvers turn legacy forms such as "127.1" or "0x7f.0.0.1" into
-	// addresses. The unspecified addresses 0.0.0.0 and :: reach the server's
-	// own host on many systems.
-	Allow func(ctx context.Context, req *Request) error
-	// AllowPacket, if set, drops the client datagrams to destinations it
-	// rejects. Like Allow, it sees IP addresses as IP and other names
-	// unresolved, so a policy on IP addresses must also check the addresses
-	// that names resolve to, in a DialPacket whose PacketConn resolves them.
-	AllowPacket func(req *Request, dst netx.Addr) bool
-	// OnError, if set, receives the errors that end connections accepted by
-	// Serve, with the client connection, and those that drop UDP datagrams,
-	// with the association's control connection. It is called from serving
-	// goroutines and must be safe for concurrent use. Errors that come once
-	// Close is called, which ends the connections and associations, are not
-	// reported, whatever they are. The package does not log; route errors
-	// to a logger such as log/slog here.
-	OnError func(c net.Conn, err error)
-
-	// Handle, if set, is called by ServeRequest for each request after Allow
-	// and before the built-in commands, so that a server can serve commands
-	// such as BIND itself, or take over CONNECT or UDP ASSOCIATE for some
-	// requests, while Serve, Shutdown and ActiveConns still cover their
-	// connections. When it returns handled true, or has replied with
-	// req.Reply whatever it returns, it has served the request: it replied,
-	// for BIND twice, and used req.Conn, which is closed when it returns,
-	// and its error ends the exchange as the built-in commands' errors do.
-	// Otherwise a non-nil error refuses the request with the error's
-	// ReplyFor code, and nil leaves it to the built-in commands. ctx ends,
-	// and req.Conn is closed, when Close is called.
-	Handle func(ctx context.Context, req *Request) (handled bool, err error)
-
-	// Dial connects to the destination of a CONNECT request; nil dials it
-	// directly. ctx is bounded by DialTimeout. The error's ReplyFor code is
-	// sent to the client, so return a *ReplyError to choose it. The bound
-	// address of the reply is the connection's LocalAddr; to report another,
-	// such as for a target that is not a socket, return the connection
-	// wrapped by netx.NewAddrOverrideConn, which the relay sees through.
-	Dial func(ctx context.Context, req *Request) (net.Conn, error)
-	// RelayOptions, if set, returns options for the netx.Relay between
-	// req.Conn and the target of a CONNECT request, such as
-	// netx.WithRelayFlows for the allowance or byte count of req.User,
-	// netx.WithRelayGroup or netx.WithRelayIdleTimeout. They follow
-	// netx.WithRelayHalfClose, which the relay always has, so that a client
-	// that shuts down its writing side still gets the reply. As with TCP
-	// itself, a half-closed connection then lasts until the other side
-	// finishes or closes too; an idle timeout bounds how long an idle one may
-	// last. The relay ends, and both connections are closed, when Close is
-	// called. To relay in another way, wrap the target in Dial, or serve
-	// CONNECT in Handle.
-	RelayOptions func(req *Request) []netx.RelayOption
-
+	life serve.Tracker
 	// UDPSocket is the client-facing UDP socket shared by all associations,
 	// which the clients are told to send to. Datagrams are routed to an
 	// association by their source, which must have the IP address of its
@@ -256,6 +189,40 @@ type Server struct {
 	// untrusted clients of that kind with ListenUDP, whose sockets are their
 	// own. Close closes UDPSocket.
 	UDPSocket net.PacketConn
+	// Clock tells the time of UDPIdleTimeout; the system clock if nil.
+	Clock timeshim.Clock
+	// Dial connects to the destination of a CONNECT request; nil dials it
+	// directly. ctx is bounded by DialTimeout. The error's ReplyFor code is
+	// sent to the client, so return a *ReplyError to choose it. The bound
+	// address of the reply is the connection's LocalAddr; to report another,
+	// such as for a target that is not a socket, return the connection
+	// wrapped by netx.NewAddrOverrideConn, which the relay sees through.
+	Dial func(ctx context.Context, req *Request) (net.Conn, error)
+	// AllowPacket, if set, drops the client datagrams to destinations it
+	// rejects. Like Allow, it sees IP addresses as IP and other names
+	// unresolved, so a policy on IP addresses must also check the addresses
+	// that names resolve to, in a DialPacket whose PacketConn resolves them.
+	AllowPacket func(req *Request, dst netx.Addr) bool
+	// RelayOptions, if set, returns options for the netx.Relay between
+	// req.Conn and the target of a CONNECT request, such as
+	// netx.WithRelayFlows for the allowance or byte count of req.User,
+	// netx.WithRelayGroup or netx.WithRelayIdleTimeout. They follow
+	// netx.WithRelayHalfClose, which the relay always has, so that a client
+	// that shuts down its writing side still gets the reply. As with TCP
+	// itself, a half-closed connection then lasts until the other side
+	// finishes or closes too; an idle timeout bounds how long an idle one may
+	// last. The relay ends, and both connections are closed, when Close is
+	// called. To relay in another way, wrap the target in Dial, or serve
+	// CONNECT in Handle.
+	RelayOptions func(req *Request) []netx.RelayOption
+	// OnError, if set, receives the errors that end connections accepted by
+	// Serve, with the client connection, and those that drop UDP datagrams,
+	// with the association's control connection. It is called from serving
+	// goroutines and must be safe for concurrent use. Errors that come once
+	// Close is called, which ends the connections and associations, are not
+	// reported, whatever they are. The package does not log; route errors
+	// to a logger such as log/slog here.
+	OnError func(c net.Conn, err error)
 	// ListenUDP, used when UDPSocket is nil, opens a UDP socket for one
 	// association, which the association owns; ListenAssociationUDP is one.
 	// Datagrams are taken as on UDPSocket, except that when neither the control
@@ -273,29 +240,56 @@ type Server struct {
 	// DialTimeout and bounds the setup only. To relay through another SOCKS5
 	// proxy, return a Dialer's ListenPacket.
 	DialPacket func(ctx context.Context, req *Request) (PacketConn, error)
-	// UDPQueue is how many client datagrams an association buffers; 0
-	// means DefaultUDPQueue (128). It has no unlimited setting: a negative
-	// queue is an error.
-	UDPQueue int
-
+	shared     *udpRelay // guarded by life's lock
+	// Handle, if set, is called by ServeRequest for each request after Allow
+	// and before the built-in commands, so that a server can serve commands
+	// such as BIND itself, or take over CONNECT or UDP ASSOCIATE for some
+	// requests, while Serve, Shutdown and ActiveConns still cover their
+	// connections. When it returns handled true, or has replied with
+	// req.Reply whatever it returns, it has served the request: it replied,
+	// for BIND twice, and used req.Conn, which is closed when it returns,
+	// and its error ends the exchange as the built-in commands' errors do.
+	// Otherwise a non-nil error refuses the request with the error's
+	// ReplyFor code, and nil leaves it to the built-in commands. ctx ends,
+	// and req.Conn is closed, when Close is called.
+	Handle func(ctx context.Context, req *Request) (handled bool, err error)
+	// Allow is called by ServeRequest for each request. A non-nil error
+	// refuses it with the error's ReplyFor code, or ReplyNotAllowed when that
+	// is ReplyGeneralFailure.
+	//
+	// The request's Dst holds every IP address the client sends as IP,
+	// including IPv4-mapped IPv6 addresses and domain names that are IP
+	// literals, also with one trailing dot such as "127.0.0.1." (see
+	// DecodeAddr). Other names are not resolved: a policy on IP
+	// addresses must also check the addresses that names resolve to, in a
+	// Dial hook, for example with a net.Dialer Control function, since some
+	// resolvers turn legacy forms such as "127.1" or "0x7f.0.0.1" into
+	// addresses. The unspecified addresses 0.0.0.0 and :: reach the server's
+	// own host on many systems.
+	Allow func(ctx context.Context, req *Request) error
+	// Auth lists the accepted authentication methods in order of
+	// preference. Nil means NoAuth. An authenticator for MethodNoAuth, which
+	// may check the connection itself (its address or TLS state), also
+	// decides on SOCKS4 clients and on SOCKS5 clients whose method lists
+	// match no authenticator.
+	Auth []Authenticator
 	// HandshakeTimeout bounds the negotiation and request; 0 means
 	// DefaultHandshakeTimeout (10s), and a negative value means no timeout, as
 	// for http.Server.IdleTimeout.
 	HandshakeTimeout time.Duration
-	// DialTimeout bounds Dial and DialPacket; 0 means DefaultDialTimeout (10s),
-	// and a negative value means no timeout, as for http.Server.IdleTimeout.
-	// This differs from net.Dialer.Timeout, where 0 means no timeout.
-	DialTimeout time.Duration
 	// UDPIdleTimeout ends a UDP association without datagrams in either
 	// direction, or without a first datagram, for this long, and closes its
 	// control connection; 0 means DefaultUDPIdleTimeout (3 minutes), and
 	// a negative value means no timeout, as for http.Server.IdleTimeout.
 	UDPIdleTimeout time.Duration
-	// Clock tells the time of UDPIdleTimeout; the system clock if nil.
-	Clock timeshim.Clock
-
-	// Switches.
-
+	// DialTimeout bounds Dial and DialPacket; 0 means DefaultDialTimeout (10s),
+	// and a negative value means no timeout, as for http.Server.IdleTimeout.
+	// This differs from net.Dialer.Timeout, where 0 means no timeout.
+	DialTimeout time.Duration
+	// UDPQueue is how many client datagrams an association buffers; 0
+	// means DefaultUDPQueue (128). It has no unlimited setting: a negative
+	// queue is an error.
+	UDPQueue int
 	// SOCKS4 also serves SOCKS4 and SOCKS4a requests. They carry no
 	// credentials, so they are refused unless Auth has a MethodNoAuth
 	// authenticator, which then runs for them.
@@ -305,9 +299,6 @@ type Server struct {
 	// half-close it right after the reply. By default the association ends
 	// with the control connection, as RFC 1928 specifies.
 	UDPOutlivesControl bool
-
-	life   serve.Tracker
-	shared *udpRelay // guarded by life's lock
 }
 
 // ListenAndServe listens on the TCP address addr, ":1080" when empty, and

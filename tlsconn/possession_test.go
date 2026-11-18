@@ -31,14 +31,14 @@ func newTestChallenger(t testing.TB, opts ChallengerOptions) *Challenger {
 
 func TestPossessionKeys(t *testing.T) {
 	keys := []struct {
-		name string
 		key  crypto.Signer
+		name string
 	}{
-		{"RSA", testRSAKey(t)},
-		{"P-256", testECKey(t, elliptic.P256())},
-		{"P-384", testECKey(t, elliptic.P384())},
-		{"P-521", testECKey(t, elliptic.P521())},
-		{"Ed25519", testEd25519Key(t)},
+		{name: "RSA", key: testRSAKey(t)},
+		{name: "P-256", key: testECKey(t, elliptic.P256())},
+		{name: "P-384", key: testECKey(t, elliptic.P384())},
+		{name: "P-521", key: testECKey(t, elliptic.P521())},
+		{name: "Ed25519", key: testEd25519Key(t)},
 	}
 	c := newTestChallenger(t, ChallengerOptions{})
 	for _, k := range keys {

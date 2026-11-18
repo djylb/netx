@@ -11,10 +11,10 @@ import (
 // NoProxy matches the targets that should bypass a proxy, as listed in a
 // NO_PROXY environment variable. The zero NoProxy matches nothing.
 type NoProxy struct {
-	all      bool
 	prefixes []netip.Prefix
 	ips      []noProxyIP
 	domains  []noProxyDomain
+	all      bool
 }
 
 type noProxyIP struct {
@@ -24,8 +24,8 @@ type noProxyIP struct {
 
 type noProxyDomain struct {
 	name    string // lower case, without leading or trailing dots
-	subOnly bool   // match subdomains only
 	port    string
+	subOnly bool // match subdomains only
 }
 
 // ParseNoProxy parses a comma-separated NO_PROXY list. "*" matches every

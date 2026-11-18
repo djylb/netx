@@ -24,28 +24,28 @@ import (
 //		ModifyResponse: rw.ModifyResponse,
 //	}
 type Rewriter struct {
-	// Request holds the rules for the outbound request.
-	Request []Rule
-	// Response holds the rules for the response, applied after Redirects.
-	Response []Rule
-	// Redirects rewrite the Location and Refresh fields of responses.
-	Redirects []Redirect
 	// Resolver, if set, finds the client of each request for the client
 	// variables; without it the client is the TCP peer.
 	Resolver *forwarded.Resolver
 	// Data, if set, returns Context.Data for an inbound request, for the
 	// caller's variables.
 	Data func(in *http.Request) any
+	// Request holds the rules for the outbound request.
+	Request []Rule
+	// Response holds the rules for the response, applied after Redirects.
+	Response []Rule
+	// Redirects rewrite the Location and Refresh fields of responses.
+	Redirects []Redirect
 }
 
 type rewriterKey struct{}
 
 // rewriteState is what Rewrite keeps for ModifyResponse.
 type rewriteState struct {
+	time   time.Time
+	data   any
 	in     *http.Request
 	client forwarded.Client
-	data   any
-	time   time.Time
 }
 
 // Rewrite applies the request rules to pr.Out, expanding them for pr.In,

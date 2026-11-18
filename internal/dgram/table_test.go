@@ -8,9 +8,9 @@ import (
 )
 
 type wheelConn struct {
+	tab  *Table[int, *wheelConn]
 	q    Queue
 	key  int
-	tab  *Table[int, *wheelConn]
 	free bool // the wheel's lock was free while it was shut down
 }
 

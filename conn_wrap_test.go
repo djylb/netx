@@ -264,8 +264,8 @@ func TestWrapConnWithParentCloseIgnoresParentClosedThroughRWC(t *testing.T) {
 
 // cyclicRawConn exposes a RawConn chain that loops back on itself.
 type cyclicRawConn struct {
-	countedCloseConn
 	next net.Conn
+	countedCloseConn
 }
 
 func (c *cyclicRawConn) NetConn() net.Conn { return c.next }

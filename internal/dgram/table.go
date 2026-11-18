@@ -26,7 +26,6 @@ import (
 // re-enters only when its slot comes up, so that traffic costs an atomic
 // store and a check costs only the connections due in it.
 type Table[K comparable, S comparable] struct {
-	conns  sync.Map // K → S
 	accept chan S
 	done   chan struct{}
 	// queue returns a connection's Queue; shutdown closes a connection with
@@ -34,6 +33,7 @@ type Table[K comparable, S comparable] struct {
 	queue    func(S) *Queue
 	shutdown func(S, error)
 	wheel    *idleWheel[S] // nil without an idle timeout
+	conns    sync.Map      // K → S
 	n        atomic.Int64  // connections held
 	max      int64
 	once     sync.Once // makes done for the zero Table

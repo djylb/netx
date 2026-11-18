@@ -33,35 +33,34 @@ import (
 // its Accept waits until Close, its Addr is nil, and its Dial and WriteTo
 // fail.
 type PacketListener struct {
-	pc     net.PacketConn
-	udp    *net.UDPConn // pc, when it is one: alloc-free reads and writes
-	more   []packetSocket
-	reject *rejectCache // nil without WithPacketRejectCache
-	opts   packetListenerOptions
-
-	conns     dgram.Table[peerKey, *packetConn]
-	closeOnce sync.Once
+	pc        net.PacketConn
 	closeErr  error
-	wg        sync.WaitGroup
+	udp       *net.UDPConn // pc, when it is one: alloc-free reads and writes
+	reject    *rejectCache // nil without WithPacketRejectCache
 	epoch     *dgram.Epoch // of the idle timeout
-	filtering atomic.Bool  // the read loop is in the accept filter
-	closing   atomic.Bool  // Close has begun; with filtering, orders the two
+	more      []packetSocket
+	conns     dgram.Table[peerKey, *packetConn]
+	opts      packetListenerOptions
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	filtering atomic.Bool // the read loop is in the accept filter
+	closing   atomic.Bool // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {
-	filter      func(peer net.Addr, first []byte) bool
-	clock       timeshim.Clock
-	more        []net.PacketConn
-	queue       int
-	backlog     int
-	maxConns    int
-	idle        time.Duration
-	maxDatagram int
-	batch       int
-	rejectSize  int
-	rejectTTL   time.Duration
+	clock  timeshim.Clock
+	filter func(peer net.Addr, first []byte) bool
 	// beforeFilter, set by tests, runs before the accept filter.
 	beforeFilter func(*PacketListener)
+	more         []net.PacketConn
+	queue        int
+	backlog      int
+	maxConns     int
+	idle         time.Duration
+	maxDatagram  int
+	batch        int
+	rejectSize   int
+	rejectTTL    time.Duration
 }
 
 // Defaults of NewPacketListener.

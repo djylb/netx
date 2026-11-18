@@ -359,10 +359,10 @@ func testSelfSignedCert(t *testing.T) tls.Certificate {
 
 // deadlineRecordingConn records the first deadline set on it.
 type deadlineRecordingConn struct {
-	net.Conn
-	mu    sync.Mutex
 	first time.Time
-	set   bool
+	net.Conn
+	mu  sync.Mutex
+	set bool
 }
 
 func (c *deadlineRecordingConn) SetDeadline(t time.Time) error {

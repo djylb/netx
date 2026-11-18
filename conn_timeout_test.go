@@ -12,10 +12,10 @@ import (
 )
 
 type deadlineSpyConn struct {
+	lastDeadline time.Time // under mu
 	net.Conn
+	deadlineCalls int // under mu
 	mu            sync.Mutex
-	lastDeadline  time.Time
-	deadlineCalls int
 }
 
 func (d *deadlineSpyConn) SetDeadline(t time.Time) error {
@@ -33,9 +33,9 @@ func (d *deadlineSpyConn) snapshot() (time.Time, int) {
 }
 
 type deadlineRecordConn struct {
+	deadline []time.Time // under mu
 	countedCloseConn
-	mu       sync.Mutex
-	deadline []time.Time
+	mu sync.Mutex
 }
 
 func (d *deadlineRecordConn) SetDeadline(t time.Time) error {
@@ -224,9 +224,9 @@ func TestTimeoutConnSkipsRedundantDeadlineUpdates(t *testing.T) {
 
 // dirDeadlineConn tracks the read and write deadlines set on it.
 type dirDeadlineConn struct {
+	rd, wd time.Time // under mu
 	countedCloseConn
-	mu     sync.Mutex
-	rd, wd time.Time
+	mu sync.Mutex
 }
 
 func (d *dirDeadlineConn) SetDeadline(t time.Time) error {
@@ -372,12 +372,12 @@ func TestTimeoutConnIdleClockIsMonotonic(t *testing.T) {
 // that is already blocked, as the HTTP/2 server does with SetReadDeadline.
 func TestTimeoutConnBlockedReadKeepsIdleTimeout(t *testing.T) {
 	for _, tt := range []struct {
-		name string
 		set  func(c *TimeoutConn) error
+		name string
 	}{
-		{"clear read deadline", func(c *TimeoutConn) error { return c.SetReadDeadline(time.Time{}) }},
-		{"clear deadline", func(c *TimeoutConn) error { return c.SetDeadline(time.Time{}) }},
-		{"far deadline", func(c *TimeoutConn) error { return c.SetDeadline(time.Now().Add(time.Hour)) }},
+		{name: "clear read deadline", set: func(c *TimeoutConn) error { return c.SetReadDeadline(time.Time{}) }},
+		{name: "clear deadline", set: func(c *TimeoutConn) error { return c.SetDeadline(time.Time{}) }},
+		{name: "far deadline", set: func(c *TimeoutConn) error { return c.SetDeadline(time.Now().Add(time.Hour)) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client, server := tcpPair(t)

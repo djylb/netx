@@ -21,15 +21,15 @@ const (
 // with TLVs.AppendSSL. Like the addresses, it is to be believed only from
 // trusted proxies.
 type SSL struct {
-	// Client holds the client flags.
-	Client SSLClient
+	// TLVs holds the sub-fields, such as TLVSSLVersion and TLVSSLCN. Those
+	// of a decoded field share the header's memory.
+	TLVs TLVs
 	// Verify is zero when the client sent a certificate that the proxy
 	// verified, and otherwise not zero, such as an X.509 verification
 	// result code.
 	Verify uint32
-	// TLVs holds the sub-fields, such as TLVSSLVersion and TLVSSLCN. Those
-	// of a decoded field share the header's memory.
-	TLVs TLVs
+	// Client holds the client flags.
+	Client SSLClient
 }
 
 // SSL returns the value of the first SSL field of f. It reports false when

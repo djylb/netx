@@ -41,7 +41,7 @@ func ScopeZone(ip netip.Addr, scope uint32) string {
 // zones caches interface names by index for a minute, since a lookup lists
 // every interface and UDP needs one per datagram.
 var zones struct {
+	expires time.Time         // under the mutex
+	names   map[uint32]string // under the mutex
 	sync.Mutex
-	names   map[uint32]string
-	expires time.Time
 }

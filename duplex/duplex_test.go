@@ -42,9 +42,9 @@ func goroutines() int {
 
 // calls counts the close and deadline calls of a test half.
 type calls struct {
-	mu                                     sync.Mutex
-	close, closeRead, closeWrite           int
 	readDeadlines, writeDeadlines, anyDead []time.Time
+	close, closeRead, closeWrite           int
+	mu                                     sync.Mutex
 }
 
 func (c *calls) count(n *int) error {
@@ -89,8 +89,8 @@ func (h *tlsHalf) CloseWrite() error { return h.count(&h.closeWrite) }
 
 // valueHalf is a half of a type that is not comparable.
 type valueHalf struct {
-	_ []byte
 	n *int
+	_ []byte
 }
 
 func (v valueHalf) Read([]byte) (int, error)    { return 0, io.EOF }
@@ -379,8 +379,8 @@ func TestAddrs(t *testing.T) {
 type writerToHalf struct{ io.Reader }
 
 type readerFromSink struct {
-	bytes.Buffer
 	src io.Reader
+	bytes.Buffer
 }
 
 func (s *readerFromSink) ReadFrom(r io.Reader) (int64, error) {

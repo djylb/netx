@@ -56,22 +56,22 @@ type Request struct {
 	// Target is the request-target as sent; see ParseTarget.
 	Target string
 	// Proto is the version as sent, such as "HTTP/1.1".
-	Proto string
+	Proto  string
+	Header Header
 	// Minor is the minor version: 0 for HTTP/1.0, 1 for HTTP/1.1 and later
 	// minor versions, which are compatible with it (RFC 9110, section 2.5).
-	Minor  int
-	Header Header
+	Minor int
 }
 
 // Response is a parsed response head.
 type Response struct {
 	Proto string
-	Minor int
-	// Code is the status code, from 100 to 999.
-	Code int
 	// Reason is the reason phrase as sent, which may be empty.
 	Reason string
 	Header Header
+	Minor  int
+	// Code is the status code, from 100 to 999.
+	Code int
 }
 
 // ParseRequest parses a request head as Read returns it, converted to a

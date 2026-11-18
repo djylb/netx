@@ -44,18 +44,18 @@ func TestIsRedirected(t *testing.T) {
 	}
 	lookupErr := errors.New("lookup failed")
 	for _, tt := range []struct {
+		lookup     error
 		name       string
 		dst        string
-		lookup     error
 		redirected bool
 		wantErr    bool
 	}{
-		{"direct", "10.0.0.1:8080", nil, false, false},
-		{"TPROXY to another host", "198.51.100.1:8080", nil, true, false},
-		{"NAT from another port", "198.51.100.1:443", nil, true, false},
-		{"NAT from another port of this host", "10.0.0.2:443", nil, true, false},
-		{"NAT from this host on the same port", "10.0.0.2:8080", nil, false, false},
-		{"lookup failure", "198.51.100.1:8080", lookupErr, false, true},
+		{name: "direct", dst: "10.0.0.1:8080", lookup: nil, redirected: false, wantErr: false},
+		{name: "TPROXY to another host", dst: "198.51.100.1:8080", lookup: nil, redirected: true, wantErr: false},
+		{name: "NAT from another port", dst: "198.51.100.1:443", lookup: nil, redirected: true, wantErr: false},
+		{name: "NAT from another port of this host", dst: "10.0.0.2:443", lookup: nil, redirected: true, wantErr: false},
+		{name: "NAT from this host on the same port", dst: "10.0.0.2:8080", lookup: nil, redirected: false, wantErr: false},
+		{name: "lookup failure", dst: "198.51.100.1:8080", lookup: lookupErr, redirected: false, wantErr: true},
 	} {
 		lookups := 0
 		got, err := isRedirected(netip.MustParseAddrPort(tt.dst), local, func(ip netip.Addr) (bool, error) {

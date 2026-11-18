@@ -34,19 +34,19 @@ var crlf = []byte("\r\n")
 // for more once it has some. Bodies of a known length, which need neither,
 // are not read through a stream but spliced.
 type stream struct {
-	r *bufio.Reader
+	err error
+	r   *bufio.Reader
 	// pending is sent before anything else: a chunk header, the CRLF after
 	// a chunk, or the last chunk with the trailer section.
 	pending []byte
+	trailer []byte
 	// n is what is left of a chunk.
 	n int64
 	// outN is what is left of the chunk being sent of a body read until
 	// close and sent on chunked.
 	outN int64
-	err  error
 	// maxTrailer bounds the trailer section.
 	maxTrailer int
-	trailer    []byte
 	scratch    [20]byte
 	in         httphead.Framing
 	state      chunkState
@@ -279,8 +279,8 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 // after it, the start of a body that the next part reads beneath the buffer.
 // It reads nothing that is not buffered already.
 type headPart struct {
-	head    []byte
 	br      *bufio.Reader
+	head    []byte
 	n       int64
 	drained int64
 }

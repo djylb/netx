@@ -20,6 +20,12 @@ const maxConnectReplyBytes = 64 << 10
 
 // HTTPDialer dials through an HTTP proxy with the CONNECT method.
 type HTTPDialer struct {
+	// Forward dials the proxy; nil means a zero net.Dialer. For an https
+	// proxy, set it to a *tlsconn.Dialer, as FromURL does.
+	Forward netx.ContextDialer
+	// Header holds extra fields for the CONNECT request, such as
+	// User-Agent or Proxy-Authorization.
+	Header textproto.MIMEHeader
 	// ProxyAddr is the proxy's host:port.
 	ProxyAddr string
 	// Username and Password are sent as Basic Proxy-Authorization (RFC
@@ -28,12 +34,6 @@ type HTTPDialer struct {
 	// another authentication scheme. Username cannot contain a colon.
 	Username string
 	Password string
-	// Header holds extra fields for the CONNECT request, such as
-	// User-Agent or Proxy-Authorization.
-	Header textproto.MIMEHeader
-	// Forward dials the proxy; nil means a zero net.Dialer. For an https
-	// proxy, set it to a *tlsconn.Dialer, as FromURL does.
-	Forward netx.ContextDialer
 }
 
 // Dial is DialContext with a background context, for code that expects a
@@ -134,13 +134,13 @@ func (d *HTTPDialer) request(address string) ([]byte, error) {
 // as 407 Proxy Authentication Required with its Proxy-Authenticate fields,
 // 403 Forbidden or 502 Bad Gateway.
 type ConnectError struct {
-	// StatusCode is the reply's status code, such as 407.
-	StatusCode int
+	// Header holds the reply's header fields.
+	Header textproto.MIMEHeader
 	// Status is the status code and reason phrase, such as
 	// "407 Proxy Authentication Required", as the proxy sent them.
 	Status string
-	// Header holds the reply's header fields.
-	Header textproto.MIMEHeader
+	// StatusCode is the reply's status code, such as 407.
+	StatusCode int
 }
 
 // Error quotes the status, whose text the proxy chooses and which may hold

@@ -37,9 +37,16 @@ const (
 
 // Request is a request read by a Server.
 type Request struct {
-	// Method is the method as sent, such as "GET", or "CONNECT", which is
-	// also taken in other cases.
-	Method string
+	// Conn is the client's connection, positioned after the request head:
+	// its reads return the bytes that the server buffered after the head,
+	// and then the connection's own, and writes go to the client. Only
+	// Handle may read or write it, to serve the request itself, and only
+	// until it returns. Its NetConn method returns the connection being
+	// served, which netx.ConnAs also finds, for its type, such as a
+	// *tls.Conn and its connection state.
+	Conn net.Conn
+	conn reqConn
+	head string
 	// Target is the request-target as sent: the authority of a CONNECT
 	// request, such as "example.com:443", an absolute URI, such as
 	// "http://example.com/path", for a request to forward, or a path, or
@@ -47,8 +54,13 @@ type Request struct {
 	Target string
 	// Proto is the protocol version as sent, such as "HTTP/1.1".
 	Proto string
-	// Header holds the fields of the request as sent.
-	Header httphead.Header
+	// Method is the method as sent, such as "GET", or "CONNECT", which is
+	// also taken in other cases.
+	Method string
+	// User is the identity returned by the authenticator, empty without
+	// authentication.
+	User string
+	tgt  httphead.Target
 	// Dst is the destination: the authority of a CONNECT request, with port
 	// 443 when it names none, the host of an absolute http URI, with port 80
 	// when it names none, or what Intercept returned for a request for a
@@ -59,28 +71,15 @@ type Request struct {
 	// addresses must also check the addresses that names resolve to, in
 	// Dial. IPv6 zones are dropped.
 	Dst netx.Addr
-	// User is the identity returned by the authenticator, empty without
-	// authentication.
-	User string
-	// Conn is the client's connection, positioned after the request head:
-	// its reads return the bytes that the server buffered after the head,
-	// and then the connection's own, and writes go to the client. Only
-	// Handle may read or write it, to serve the request itself, and only
-	// until it returns. Its NetConn method returns the connection being
-	// served, which netx.ConnAs also finds, for its type, such as a
-	// *tls.Conn and its connection state.
-	Conn net.Conn
-
-	conn      reqConn
-	head      string
-	tgt       httphead.Target
+	// Header holds the fields of the request as sent.
+	Header    httphead.Header
+	result    Result
 	minor     int // the minor version, 0 or 1
 	length    int64
 	body      httphead.Framing
 	keepAlive bool // the client keeps the connection after this request
 	upgrade   bool // a protocol upgrade passed on, such as to WebSocket
 	intercept bool // a request for a path forwarded to what Intercept said
-	result    Result
 }
 
 // RawHead returns the request head as the client sent it, for handing the
@@ -90,6 +89,10 @@ func (r *Request) RawHead() string { return r.head }
 
 // Result is how a request ended, for Server.OnDone.
 type Result struct {
+	// Start is when the request head was read.
+	Start time.Time
+	// Err is the error that ended the request, if any, as OnError gets it.
+	Err error
 	// Status is the status code of the final response sent to the client:
 	// 200 for an established tunnel, the target's code for a forwarded
 	// request, or the code of a refusal; 0 when none was sent.
@@ -101,10 +104,6 @@ type Result struct {
 	// Reused tells that a forwarded request went over a kept connection to
 	// its target.
 	Reused bool
-	// Start is when the request head was read.
-	Start time.Time
-	// Err is the error that ended the request, if any, as OnError gets it.
-	Err error
 }
 
 // reqConn is the connection of a request, which reads through the server's
@@ -153,22 +152,15 @@ func (c *reqConn) NetConn() net.Conn { return c.Conn }
 // and an idle timeout from RelayOptions, such as netx.WithRelayIdleTimeout,
 // which servers open to untrusted clients should set.
 type Server struct {
-	// Auth lists the accepted authentication schemes, in the order of the
-	// challenges of a 407 reply. Nil means NoAuth. A request whose
-	// Proxy-Authorization field names a scheme of the list is decided by its
-	// authenticator; one without credentials, or with another scheme, by the
-	// NoAuth authenticator ("" scheme) when the list has one, which may
-	// check the connection itself, and otherwise answered with 407. Proxy
-	// requests are authenticated, those with a CONNECT or absolute URI
-	// target, and those that Intercept forwards; others reach Handle
-	// without a User. Credentials that passed are not checked again for the
-	// later requests of the connection that carry the same field, as a
-	// SOCKS client is authenticated once per connection. Only Basic is
-	// built in; schemes such as Digest can be added as Authenticators,
-	// while those that authenticate a connection rather than requests,
-	// such as NTLM, are not supported.
-	Auth []Authenticator
-
+	life serve.Tracker
+	// ForwardHeader, if set, is called with the header of each request
+	// forwarded to req.Dst, after the fields for this connection only
+	// (RFC 9110, section 7.6.1), Proxy-Authorization among them, are
+	// removed, to add fields such as X-Forwarded-For or Forwarded, or
+	// remove others. The server then adds Host, the fields that delimit the
+	// body and Connection itself, so the hook cannot change how the body is
+	// read; fields that are not valid are refused with 500.
+	ForwardHeader func(req *Request, h *httphead.Header)
 	// Allow is called for each request after authentication. A non-nil
 	// error refuses it with the error's StatusFor code, or 403 Forbidden
 	// when that is 502. See Request.Dst for what it sees of the
@@ -188,7 +180,6 @@ type Server struct {
 	// and failed requests included. It is called from serving goroutines
 	// and must be safe for concurrent use.
 	OnDone func(req *Request, res Result)
-
 	// Handle, if set, is called for each request after Allow and before the
 	// built-in handling, so that a server can serve requests itself, such
 	// as origin requests for a path on the same port, or take over CONNECT
@@ -208,7 +199,6 @@ type Server struct {
 	// HostDst returns the destination that the Host field names, and for a
 	// redirected connection the original destination can be read from it.
 	Intercept func(req *Request) (netx.Addr, bool)
-
 	// Dial connects to req.Dst for a CONNECT request or a request to
 	// forward; nil dials it directly; an IP policy on resolved addresses
 	// belongs here (see Request.Dst). ctx is bounded by DialTimeout. The
@@ -227,7 +217,6 @@ type Server struct {
 	// those, and its idle timeout also bounds the wait for a response. The
 	// relays end when Close is called.
 	RelayOptions func(req *Request) []netx.RelayOption
-
 	// ReuseKey, if set, returns the key under which the connection of a
 	// forwarded request is kept for later requests, which share kept
 	// connections only with requests of the same key, or false to use a
@@ -236,38 +225,39 @@ type Server struct {
 	// other parts of the request, such as a field, must have a ReuseKey
 	// that holds them.
 	ReuseKey func(req *Request) (key string, ok bool)
-	// MaxIdleConnsPerKey bounds the kept connections of one key; 0 means
-	// DefaultMaxIdleConnsPerKey (16), as for
-	// http.Transport.MaxIdleConnsPerHost. A negative bound is an error;
-	// DisableKeepAlives keeps none.
-	MaxIdleConnsPerKey int
-	// MaxIdleConns bounds the kept connections of all keys; 0 means
-	// DefaultMaxIdleConns (1024), and a negative value means no limit.
-	// This differs from http.Transport.MaxIdleConns, where 0 means no limit.
-	MaxIdleConns int
+	// ResponseHeader, if set, is called likewise with the status code and
+	// header of each response sent back to the client, interim 1xx
+	// responses among them.
+	ResponseHeader func(req *Request, status int, h *httphead.Header)
+	// Via, if not empty, is the pseudonym that the server adds to the Via
+	// field of forwarded requests and responses, as "1.1 " + Via (RFC
+	// 9110, section 7.6.3).
+	Via string
+	// Auth lists the accepted authentication schemes, in the order of the
+	// challenges of a 407 reply. Nil means NoAuth. A request whose
+	// Proxy-Authorization field names a scheme of the list is decided by its
+	// authenticator; one without credentials, or with another scheme, by the
+	// NoAuth authenticator ("" scheme) when the list has one, which may
+	// check the connection itself, and otherwise answered with 407. Proxy
+	// requests are authenticated, those with a CONNECT or absolute URI
+	// target, and those that Intercept forwards; others reach Handle
+	// without a User. Credentials that passed are not checked again for the
+	// later requests of the connection that carry the same field, as a
+	// SOCKS client is authenticated once per connection. Only Basic is
+	// built in; schemes such as Digest can be added as Authenticators,
+	// while those that authenticate a connection rather than requests,
+	// such as NTLM, are not supported.
+	Auth []Authenticator
+	pool pool
 	// IdleConnTimeout closes a kept connection that served no request for this
 	// long; 0 means DefaultIdleConnTimeout (90s), and a negative value means no
 	// timeout, as for http.Server.IdleTimeout. This differs from
 	// http.Transport.IdleConnTimeout, where 0 means no limit.
 	IdleConnTimeout time.Duration
-
-	// Via, if not empty, is the pseudonym that the server adds to the Via
-	// field of forwarded requests and responses, as "1.1 " + Via (RFC
-	// 9110, section 7.6.3).
-	Via string
-	// ForwardHeader, if set, is called with the header of each request
-	// forwarded to req.Dst, after the fields for this connection only
-	// (RFC 9110, section 7.6.1), Proxy-Authorization among them, are
-	// removed, to add fields such as X-Forwarded-For or Forwarded, or
-	// remove others. The server then adds Host, the fields that delimit the
-	// body and Connection itself, so the hook cannot change how the body is
-	// read; fields that are not valid are refused with 500.
-	ForwardHeader func(req *Request, h *httphead.Header)
-	// ResponseHeader, if set, is called likewise with the status code and
-	// header of each response sent back to the client, interim 1xx
-	// responses among them.
-	ResponseHeader func(req *Request, status int, h *httphead.Header)
-
+	// MaxIdleConns bounds the kept connections of all keys; 0 means
+	// DefaultMaxIdleConns (1024), and a negative value means no limit.
+	// This differs from http.Transport.MaxIdleConns, where 0 means no limit.
+	MaxIdleConns int
 	// HandshakeTimeout bounds reading each request head and authenticating it;
 	// 0 means DefaultHandshakeTimeout (10s), and a negative value means no
 	// timeout, as for http.Server.IdleTimeout.
@@ -292,14 +282,16 @@ type Server struct {
 	// larger request head is answered with 431 Request Header Fields Too
 	// Large, a larger response head with 502 Bad Gateway.
 	MaxHeaderBytes int
-
-	life     serve.Tracker
-	poolOnce sync.Once
+	// MaxIdleConnsPerKey bounds the kept connections of one key; 0 means
+	// DefaultMaxIdleConnsPerKey (16), as for
+	// http.Transport.MaxIdleConnsPerHost. A negative bound is an error;
+	// DisableKeepAlives keeps none.
+	MaxIdleConnsPerKey int
+	poolOnce           sync.Once
 	// DisableKeepAlives keeps no connection to a target: each serves one
 	// request, as with http.Transport.DisableKeepAlives. It is declared
 	// here, in the padding after poolOnce, to keep the Server smaller.
 	DisableKeepAlives bool
-	pool              pool
 }
 
 // ListenAndServe listens on the TCP address addr, ":8080" when empty, and
@@ -442,20 +434,20 @@ func putReader(br *bufio.Reader) {
 
 // serverConn is the state of one client connection.
 type serverConn struct {
-	s  *Server
 	c  net.Conn
+	s  *Server
 	br *bufio.Reader
+	// The Proxy-Authorization value that passed, and its identity.
+	authValue, authUser string
 	// Buffers reused across requests: the request head read, the head
 	// written to the target or a reply, the response head read and the
 	// response head written to the client.
 	headBuf, outBuf, respBuf, respOut []byte
-	// The Proxy-Authorization value that passed, and its identity.
-	authValue, authUser string
+	x                                 exchange
 	// linger is set when the connection is closed after a reply with
 	// request bytes perhaps unread, which closing at once could turn into a
 	// reset that destroys the reply.
 	linger bool
-	x      exchange
 }
 
 // maxKeptBuf bounds the buffers kept between requests.

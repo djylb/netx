@@ -24,7 +24,6 @@ import (
 // extended CONNECT stream, and connections to one server share the HTTP/2
 // connections of the transport.
 type Dialer struct {
-	wsconn.ClientOptions
 	// Transport sends the extended CONNECT requests over HTTP/2: a
 	// RoundTripper that takes the pseudo-field ":protocol" in the request
 	// header, such as the Transport of golang.org/x/net/http2 used on its
@@ -37,6 +36,7 @@ type Dialer struct {
 	// fails, such as on a server without HTTP/2 or extended CONNECT, or
 	// when Transport is nil. Without it no HTTP/1.1 is tried.
 	HTTP1 *wsconn.Dialer
+	wsconn.ClientOptions
 }
 
 // ErrNoTransport is returned by Dialer.Dial without a Transport or HTTP1.
@@ -176,15 +176,15 @@ func response(r *http.Response) *httphead.Response {
 // deadlines reset the stream when they expire, as net/http's server does
 // on HTTP/2.
 type clientConn struct {
-	pw            *io.PipeWriter
 	body          io.ReadCloser
-	cancel        context.CancelFunc
 	local, remote net.Addr
+	pw            *io.PipeWriter
+	cancel        context.CancelFunc
 
-	mu      sync.Mutex
-	rd, wd  *time.Timer
-	expired bool
+	rd, wd  *time.Timer // under mu
 	once    sync.Once
+	mu      sync.Mutex
+	expired bool // under mu
 }
 
 func (c *clientConn) Read(p []byte) (int, error) {

@@ -73,7 +73,10 @@ func TestCloseZeroTimeout(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- c.Close() }()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close() = %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked")
 	}

@@ -18,10 +18,10 @@ import (
 // readSizesConn reads from data, recording the size of each Read buffer, and
 // collects what is written to it.
 type readSizesConn struct {
+	data  []byte       // under mu
+	reads []int        // under mu
+	out   bytes.Buffer // under mu
 	mu    sync.Mutex
-	data  []byte
-	reads []int
-	out   bytes.Buffer
 }
 
 func (c *readSizesConn) Read(b []byte) (int, error) {
@@ -48,8 +48,8 @@ func (c *readSizesConn) Close() error { return nil }
 // is closed.
 type blockingSink struct {
 	blockingRWC
+	out bytes.Buffer // under mu
 	mu  sync.Mutex
-	out bytes.Buffer
 }
 
 func (s *blockingSink) Write(b []byte) (int, error) {

@@ -18,16 +18,16 @@ import (
 // connection holds at most minRing slots, none before its first datagram,
 // whatever its bound.
 type Queue struct {
-	ring   []*[]byte // datagrams, in Small buffers when they fit
+	err    error // returned by reads once closed; set before closed is
 	ready  chan struct{}
 	closed chan struct{}
-	err    error // returned by reads once closed; set before closed is
 	epoch  *Epoch
 	// readDeadline fails reads once it has expired.
 	readDeadline Deadline
-	head         int          // index of the oldest datagram in ring
-	n            int          // datagrams in ring
+	ring         []*[]byte    // datagrams, in Small buffers when they fit
 	limit        int          // the most datagrams queued
+	n            int          // datagrams in ring
+	head         int          // index of the oldest datagram in ring
 	queued       int64        // Cost of the datagrams queued
 	budget       int64        // the most Cost queued; one datagram always fits
 	active       atomic.Int64 // Epoch time of the last datagram or of Accept

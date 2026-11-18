@@ -71,29 +71,29 @@ func TestNewHeaderNormalizesDestination(t *testing.T) {
 func TestUnsupportedAddressPairs(t *testing.T) {
 	unix := &net.UnixAddr{Name: "/a", Net: "unix"}
 	for _, tt := range []struct {
+		src, dst net.Addr
 		name     string
 		v        Version
-		src, dst net.Addr
 	}{
-		{"nil source", V2, nil, tcp("192.0.2.1", 1)},
-		{"nil source and destination", V2, nil, nil},
-		{"typed nil source", V1, (*net.TCPAddr)(nil), tcp("192.0.2.1", 1)},
-		{"typed nil udp source", V2, (*net.UDPAddr)(nil), nil},
-		{"typed nil unix source", V2, (*net.UnixAddr)(nil), nil},
-		{"source without ip", V1, &net.TCPAddr{Port: 1234}, tcp("192.0.2.1", 1)},
-		{"custom source", V2, dummyAddr("client"), tcp("192.0.2.1", 1)},
-		{"custom destination", V2, tcp("192.0.2.1", 1), dummyAddr("server")},
-		{"tcp and udp", V1, tcp("192.0.2.1", 1), udp("192.0.2.2", 2)},
-		{"udp and tcp", V2, udp("192.0.2.1", 1), tcp("192.0.2.2", 2)},
-		{"tcp and unix", V2, tcp("192.0.2.1", 1), unix},
-		{"unix and tcp", V2, unix, tcp("192.0.2.1", 1)},
-		{"unix stream and datagram", V2, unix, &net.UnixAddr{Name: "/b", Net: "unixgram"}},
-		{"unix in version 1", V1, unix, unix},
-		{"unix name too long", V2, &net.UnixAddr{Name: strings.Repeat("a", unixPathLen+1), Net: "unix"}, unix},
-		{"port out of range", V2, tcp("192.0.2.1", 65536), tcp("192.0.2.2", 2)},
-		{"negative port", V1, tcp("192.0.2.1", 1), tcp("192.0.2.2", -1)},
-		{"no version", 0, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)},
-		{"unknown version", 3, tcp("192.0.2.1", 1), tcp("192.0.2.2", 2)},
+		{name: "nil source", v: V2, src: nil, dst: tcp("192.0.2.1", 1)},
+		{name: "nil source and destination", v: V2, src: nil, dst: nil},
+		{name: "typed nil source", v: V1, src: (*net.TCPAddr)(nil), dst: tcp("192.0.2.1", 1)},
+		{name: "typed nil udp source", v: V2, src: (*net.UDPAddr)(nil), dst: nil},
+		{name: "typed nil unix source", v: V2, src: (*net.UnixAddr)(nil), dst: nil},
+		{name: "source without ip", v: V1, src: &net.TCPAddr{Port: 1234}, dst: tcp("192.0.2.1", 1)},
+		{name: "custom source", v: V2, src: dummyAddr("client"), dst: tcp("192.0.2.1", 1)},
+		{name: "custom destination", v: V2, src: tcp("192.0.2.1", 1), dst: dummyAddr("server")},
+		{name: "tcp and udp", v: V1, src: tcp("192.0.2.1", 1), dst: udp("192.0.2.2", 2)},
+		{name: "udp and tcp", v: V2, src: udp("192.0.2.1", 1), dst: tcp("192.0.2.2", 2)},
+		{name: "tcp and unix", v: V2, src: tcp("192.0.2.1", 1), dst: unix},
+		{name: "unix and tcp", v: V2, src: unix, dst: tcp("192.0.2.1", 1)},
+		{name: "unix stream and datagram", v: V2, src: unix, dst: &net.UnixAddr{Name: "/b", Net: "unixgram"}},
+		{name: "unix in version 1", v: V1, src: unix, dst: unix},
+		{name: "unix name too long", v: V2, src: &net.UnixAddr{Name: strings.Repeat("a", unixPathLen+1), Net: "unix"}, dst: unix},
+		{name: "port out of range", v: V2, src: tcp("192.0.2.1", 65536), dst: tcp("192.0.2.2", 2)},
+		{name: "negative port", v: V1, src: tcp("192.0.2.1", 1), dst: tcp("192.0.2.2", -1)},
+		{name: "no version", v: 0, src: tcp("192.0.2.1", 1), dst: tcp("192.0.2.2", 2)},
+		{name: "unknown version", v: 3, src: tcp("192.0.2.1", 1), dst: tcp("192.0.2.2", 2)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if h, err := NewHeader(tt.v, tt.src, tt.dst); err == nil {
@@ -112,18 +112,18 @@ func TestUnsupportedAddressPairs(t *testing.T) {
 
 // A header without addresses is encoded as such, and LOCAL only on request.
 func TestHeaderWithoutAddresses(t *testing.T) {
-	tlvs := mkTLVs(t, field{TLVAuthority, "example.com"})
+	tlvs := mkTLVs(t, field{t: TLVAuthority, v: "example.com"})
 	for _, tt := range []struct {
 		name string
-		h    Header
 		want string
+		h    Header
 	}{
-		{"v1 local", Header{Version: V1, Local: true}, "PROXY UNKNOWN\r\n"},
-		{"v1 unspecified", Header{Version: V1}, "PROXY UNKNOWN\r\n"},
-		{"v2 local", Header{Version: V2, Local: true}, string(mustDecodeHex(t, proxyV2Sig+"20000000"))},
-		{"v2 local ignores addresses", Header{Version: V2, Local: true, Source: dummyAddr("a")}, string(mustDecodeHex(t, proxyV2Sig+"20000000"))},
-		{"v2 unspecified", Header{Version: V2}, string(mustDecodeHex(t, proxyV2Sig+"21000000"))},
-		{"v2 local tlvs", Header{Version: V2, Local: true, TLVs: tlvs}, string(mustDecodeHex(t, proxyV2Sig+"2000000e")) + string(tlvs)},
+		{name: "v1 local", h: Header{Version: V1, Local: true}, want: "PROXY UNKNOWN\r\n"},
+		{name: "v1 unspecified", h: Header{Version: V1}, want: "PROXY UNKNOWN\r\n"},
+		{name: "v2 local", h: Header{Version: V2, Local: true}, want: string(mustDecodeHex(t, proxyV2Sig+"20000000"))},
+		{name: "v2 local ignores addresses", h: Header{Version: V2, Local: true, Source: dummyAddr("a")}, want: string(mustDecodeHex(t, proxyV2Sig+"20000000"))},
+		{name: "v2 unspecified", h: Header{Version: V2}, want: string(mustDecodeHex(t, proxyV2Sig+"21000000"))},
+		{name: "v2 local tlvs", h: Header{Version: V2, Local: true, TLVs: tlvs}, want: string(mustDecodeHex(t, proxyV2Sig+"2000000e")) + string(tlvs)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			b, err := tt.h.AppendBinary(nil)
@@ -287,7 +287,7 @@ func TestAppendBinaryAllocatesOnce(t *testing.T) {
 		t.Fatalf("header len = %d, want at most %d", len(got), maxV1Len)
 	}
 	h2 := Header{Version: V2, Source: &net.UnixAddr{Name: "/a", Net: "unix"}, Destination: &net.UnixAddr{Name: "/b", Net: "unix"},
-		TLVs: mkTLVs(t, field{TLVUniqueID, strings.Repeat("u", 100)})}
+		TLVs: mkTLVs(t, field{t: TLVUniqueID, v: strings.Repeat("u", 100)})}
 	if raceEnabled {
 		t.Skip("the race detector adds allocations")
 	}
@@ -409,7 +409,7 @@ func TestHeaderWriteTo(t *testing.T) {
 		t.Fatal(err)
 	}
 	big := *small
-	big.TLVs = mkTLVs(t, field{TLVUniqueID, strings.Repeat("u", 1000)})
+	big.TLVs = mkTLVs(t, field{t: TLVUniqueID, v: strings.Repeat("u", 1000)})
 	for _, h := range []*Header{small, &big} {
 		want, _ := h.AppendBinary(nil)
 		var w writeRecorder

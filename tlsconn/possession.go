@@ -207,18 +207,20 @@ func digest(h crypto.Hash, msg []byte) []byte {
 // Its methods are safe for concurrent use. Create it with NewChallenger;
 // the zero value has no key, and its methods fail with ErrNoChallenger.
 type Challenger struct {
-	mu    sync.Mutex
-	clock timeshim.Clock
-	used  usedHeap
-	seen  map[[nonceSize]byte]struct{}
 	epoch time.Time // with a monotonic reading
-	key   [sha256.Size]byte
+	clock timeshim.Clock
+	seen  map[[nonceSize]byte]struct{} // under mu
+	used  usedHeap                     // under mu
 	ttl   time.Duration
 	max   int
+	mu    sync.Mutex
+	key   [sha256.Size]byte
 }
 
 // ChallengerOptions configures NewChallenger.
 type ChallengerOptions struct {
+	// Clock tells the time of TTL; the system clock if nil.
+	Clock timeshim.Clock
 	// TTL is how long a challenge is valid; 0 means DefaultChallengeTTL (5
 	// minutes), and a negative TTL fails NewChallenger.
 	TTL time.Duration
@@ -227,8 +229,6 @@ type ChallengerOptions struct {
 	// MB). It has no unlimited setting: a negative bound fails
 	// NewChallenger.
 	MaxUsed int
-	// Clock tells the time of TTL; the system clock if nil.
-	Clock timeshim.Clock
 }
 
 // NewChallenger returns a Challenger with a new random key.

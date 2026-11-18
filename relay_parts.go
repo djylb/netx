@@ -82,10 +82,10 @@ func (e *RelayEnd) Close() error {
 // An error of Next ends the reading with it. A ChainReader is not safe for
 // concurrent use.
 type ChainReader struct {
-	Next func() (io.Reader, error)
 	cur  io.Reader
-	done bool
 	err  error
+	Next func() (io.Reader, error)
+	done bool
 }
 
 // part returns the part being read, taking the next when there is none, or

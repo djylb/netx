@@ -129,6 +129,11 @@ func (e *rewriteError) Unwrap() error { return e.kind }
 
 // Context holds what variables read for one request.
 type Context struct {
+	// Time is the time of the time variables, time.Now() when zero.
+	Time time.Time
+	// Data holds the caller's facts for the variables it defines, such as
+	// the configuration of the matched route.
+	Data any
 	// Request is the request as the client sent it: for a reverse proxy,
 	// the inbound request, not the outbound one being rewritten.
 	Request *http.Request
@@ -138,11 +143,6 @@ type Context struct {
 	// Client is the client of the request, as a forwarded.Resolver finds
 	// it. When its Addr is invalid, the client is the TCP peer of Request.
 	Client forwarded.Client
-	// Time is the time of the time variables, time.Now() when zero.
-	Time time.Time
-	// Data holds the caller's facts for the variables it defines, such as
-	// the configuration of the matched route.
-	Data any
 }
 
 // Func appends the value of a variable for c to dst. It must not modify c.

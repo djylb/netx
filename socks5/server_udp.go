@@ -147,10 +147,10 @@ func ListenAssociationUDP(ctx context.Context, req *Request) (net.PacketConn, er
 // their clients.
 type udpRelay struct {
 	l       *netx.PacketListener
+	pending map[netip.Addr][]*association // by client IP, until the first datagram; under mu
+	anyPeer *association                  // takes the first source, on its own socket; under mu
 	mu      sync.Mutex
-	pending map[netip.Addr][]*association // by client IP, until the first datagram
-	anyPeer *association                  // takes the first source, on its own socket
-	closed  bool
+	closed  bool // under mu
 }
 
 func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
@@ -334,21 +334,20 @@ func (r *udpRelay) close() error {
 
 // association is one UDP ASSOCIATE request.
 type association struct {
-	s         *Server
+	key       netip.Addr     // the client IP address it is pending under, if known
+	pending   timeshim.Timer // ends an association that never receives a datagram; under mu
+	out       PacketConn
+	control   net.Conn // the control connection once replied to, which close closes; under mu
+	conn      net.Conn // the client's datagram stream once bound; under mu
 	req       *Request
 	relay     *udpRelay
-	out       PacketConn
+	done      chan struct{}
+	s         *Server
 	announced netip.AddrPort // the client's announced source, if specific
-	key       netip.Addr     // the client IP address it is pending under, if known
-	exact     bool           // announced is the control connection's address: only it matches
+	once      sync.Once      // closes done
+	mu        sync.Mutex
 	ownsRelay bool
-
-	mu      sync.Mutex
-	once    sync.Once      // closes done
-	pending timeshim.Timer // ends an association that never receives a datagram
-	conn    net.Conn       // the client's datagram stream once bound
-	control net.Conn       // the control connection once replied to, which close closes
-	done    chan struct{}
+	exact     bool // announced is the control connection's address: only it matches
 }
 
 func (s *Server) associate(ctx context.Context, req *Request) error {

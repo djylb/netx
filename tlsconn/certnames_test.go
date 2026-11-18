@@ -190,14 +190,14 @@ func TestUnder(t *testing.T) {
 	mk := func(names ...string) Names { return CertNames(newTestCert(t, leafTmpl(names...), nil, key, nil)) }
 	tests := []struct {
 		name     string
-		names    Names
 		domain   string
-		apex     bool
-		byWild   bool
+		names    Names
 		subs     []string
 		wild     []string
 		covers   []string
 		uncovers []string
+		apex     bool
+		byWild   bool
 	}{
 		{
 			name: "exact apex", names: mk("example.com"), domain: "example.com", apex: true,

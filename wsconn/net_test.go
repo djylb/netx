@@ -106,26 +106,26 @@ func TestHandshakeRefusals(t *testing.T) {
 	const key = "dGhlIHNhbXBsZSBub25jZQ=="
 	base := "GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key + "\r\n"
 	tests := []struct {
+		opts      *ServerOptions
 		name, req string
 		status    int
-		opts      *ServerOptions
 	}{
-		{"ok", base + "Sec-WebSocket-Version: 13\r\n\r\n", 101, nil},
-		{"lower case tokens", strings.ReplaceAll(base, "Upgrade\r\n", "keep-alive, upgrade\r\n") + "sec-websocket-version: 13\r\n\r\n", 101, nil},
-		{"no host", strings.Replace(base, "Host: h\r\n", "", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", 101, nil},
-		{"version 8", base + "Sec-WebSocket-Version: 8\r\n\r\n", 426, nil},
-		{"post", strings.Replace(base, "GET", "POST", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", 405, nil},
-		{"http 1.0", strings.Replace(base, "1.1", "1.0", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", 505, nil},
-		{"no upgrade", strings.Replace(base, "Upgrade: websocket\r\n", "", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", 426, nil},
-		{"short key", strings.Replace(base, key, "AAAA", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", 400, nil},
-		{"cross origin", base + "Sec-WebSocket-Version: 13\r\nOrigin: https://evil.example\r\n\r\n", 403, nil},
-		{"same origin", base + "Sec-WebSocket-Version: 13\r\nOrigin: https://H\r\n\r\n", 101, nil},
-		{"any origin", base + "Sec-WebSocket-Version: 13\r\nOrigin: https://evil.example\r\n\r\n", 101, &ServerOptions{CheckOrigin: AnyOrigin}},
-		{"origin hook", base + "Sec-WebSocket-Version: 13\r\n\r\n", 401, &ServerOptions{CheckOrigin: func(*httphead.Request) error {
+		{name: "ok", req: base + "Sec-WebSocket-Version: 13\r\n\r\n", status: 101, opts: nil},
+		{name: "lower case tokens", req: strings.ReplaceAll(base, "Upgrade\r\n", "keep-alive, upgrade\r\n") + "sec-websocket-version: 13\r\n\r\n", status: 101, opts: nil},
+		{name: "no host", req: strings.Replace(base, "Host: h\r\n", "", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", status: 101, opts: nil},
+		{name: "version 8", req: base + "Sec-WebSocket-Version: 8\r\n\r\n", status: 426, opts: nil},
+		{name: "post", req: strings.Replace(base, "GET", "POST", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", status: 405, opts: nil},
+		{name: "http 1.0", req: strings.Replace(base, "1.1", "1.0", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", status: 505, opts: nil},
+		{name: "no upgrade", req: strings.Replace(base, "Upgrade: websocket\r\n", "", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", status: 426, opts: nil},
+		{name: "short key", req: strings.Replace(base, key, "AAAA", 1) + "Sec-WebSocket-Version: 13\r\n\r\n", status: 400, opts: nil},
+		{name: "cross origin", req: base + "Sec-WebSocket-Version: 13\r\nOrigin: https://evil.example\r\n\r\n", status: 403, opts: nil},
+		{name: "same origin", req: base + "Sec-WebSocket-Version: 13\r\nOrigin: https://H\r\n\r\n", status: 101, opts: nil},
+		{name: "any origin", req: base + "Sec-WebSocket-Version: 13\r\nOrigin: https://evil.example\r\n\r\n", status: 101, opts: &ServerOptions{CheckOrigin: AnyOrigin}},
+		{name: "origin hook", req: base + "Sec-WebSocket-Version: 13\r\n\r\n", status: 401, opts: &ServerOptions{CheckOrigin: func(*httphead.Request) error {
 			return &HandshakeError{Status: 401, Msg: "no"}
 		}}},
-		{"head too large", base + "X: " + strings.Repeat("a", 200) + "\r\n\r\n", 431, &ServerOptions{MaxHeaderBytes: 100}},
-		{"malformed", "GET / HTTP/1.1\r\nBad Field: x\r\n\r\n", 400, nil},
+		{name: "head too large", req: base + "X: " + strings.Repeat("a", 200) + "\r\n\r\n", status: 431, opts: &ServerOptions{MaxHeaderBytes: 100}},
+		{name: "malformed", req: "GET / HTTP/1.1\r\nBad Field: x\r\n\r\n", status: 400, opts: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,17 +172,17 @@ func TestHandshakeRefusals(t *testing.T) {
 
 func TestClientRefusals(t *testing.T) {
 	tests := []struct {
-		name string
 		resp func(key string) string
+		name string
 	}{
-		{"status 200", func(string) string { return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" }},
-		{"wrong accept", func(string) string {
+		{name: "status 200", resp: func(string) string { return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" }},
+		{name: "wrong accept", resp: func(string) string {
 			return "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n"
 		}},
-		{"unrequested protocol", func(key string) string {
+		{name: "unrequested protocol", resp: func(key string) string {
 			return "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + AcceptKey(key) + "\r\nSec-WebSocket-Protocol: chat\r\n\r\n"
 		}},
-		{"unrequested extension", func(key string) string {
+		{name: "unrequested extension", resp: func(key string) string {
 			return "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + AcceptKey(key) + "\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n"
 		}},
 	}

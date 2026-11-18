@@ -54,13 +54,13 @@ func TestRelayCopiesBothDirections(t *testing.T) {
 	defer func() { _ = userB.Close() }()
 
 	type result struct {
-		aToB, bToA int64
 		err        error
+		aToB, bToA int64
 	}
 	done := make(chan result, 1)
 	go func() {
 		aToB, bToA, err := Relay(context.Background(), relayA, relayB)
-		done <- result{aToB, bToA, err}
+		done <- result{aToB: aToB, bToA: bToA, err: err}
 	}()
 
 	request := bytes.Repeat([]byte("a"), 100_000)
@@ -253,20 +253,20 @@ func TestRelayCanSplice(t *testing.T) {
 	defer func() { _ = pipeA.Close() }()
 	defer func() { _ = pipeB.Close() }()
 	tests := []struct {
-		name string
 		dst  io.Writer
 		src  io.Reader
+		name string
 		want bool
 	}{
-		{"tcp to tcp", tcpA, tcpB, netutil.SpliceOS},
-		{"prefixed tcp to tcp", tcpA, NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), netutil.SpliceOS},
-		{"pipe to tcp", tcpA, pipeA, false},
-		{"tcp to pipe", pipeA, tcpB, false},
-		{"tcp to timeout tcp", NewTimeoutConn(tcpA, time.Second), tcpB, netutil.SpliceOS},
-		{"timeout tcp to tcp", tcpA, NewPrefixConn(NewTimeoutConn(tcpB, time.Second), nil), netutil.SpliceOS},
-		{"tcp to observed tcp", ObserveConn(tcpA, nil, func(int64) error { return nil }), tcpB, false},
-		{"prefixed pipe to tcp", tcpA, NewPrefixConn(pipeA, nil), false},
-		{"nil prefix conn to tcp", tcpA, (*PrefixConn)(nil), false},
+		{name: "tcp to tcp", dst: tcpA, src: tcpB, want: netutil.SpliceOS},
+		{name: "prefixed tcp to tcp", dst: tcpA, src: NewPrefixConn(NewPrefixConn(tcpB, []byte("a")), nil), want: netutil.SpliceOS},
+		{name: "pipe to tcp", dst: tcpA, src: pipeA, want: false},
+		{name: "tcp to pipe", dst: pipeA, src: tcpB, want: false},
+		{name: "tcp to timeout tcp", dst: NewTimeoutConn(tcpA, time.Second), src: tcpB, want: netutil.SpliceOS},
+		{name: "timeout tcp to tcp", dst: tcpA, src: NewPrefixConn(NewTimeoutConn(tcpB, time.Second), nil), want: netutil.SpliceOS},
+		{name: "tcp to observed tcp", dst: ObserveConn(tcpA, nil, func(int64) error { return nil }), src: tcpB, want: false},
+		{name: "prefixed pipe to tcp", dst: tcpA, src: NewPrefixConn(pipeA, nil), want: false},
+		{name: "nil prefix conn to tcp", dst: tcpA, src: (*PrefixConn)(nil), want: false},
 	}
 	for _, tt := range tests {
 		if got := spliceable(tt.dst, tt.src); got != tt.want {
@@ -278,9 +278,9 @@ func TestRelayCanSplice(t *testing.T) {
 // datagramConn returns one queued message per Read, truncated to b like a UDP
 // socket, and records the size of each Write.
 type datagramConn struct {
+	msgs   [][]byte // under mu
+	writes []int    // under mu
 	mu     sync.Mutex
-	msgs   [][]byte
-	writes []int
 }
 
 func (c *datagramConn) Read(b []byte) (int, error) {
@@ -317,8 +317,8 @@ func (*datagramConn) SetWriteDeadline(time.Time) error { return nil }
 // oneConnListener accepts c once and then blocks until closed.
 type oneConnListener struct {
 	c    net.Conn
-	once sync.Once
 	done chan struct{}
+	once sync.Once
 }
 
 func (l *oneConnListener) Accept() (net.Conn, error) {
@@ -464,18 +464,18 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 
 	// Each source holds the payload followed by EOF.
 	tests := []struct {
-		name   string
 		dst    io.Writer
 		source func() net.Conn
+		name   string
 	}{
-		{"prefixed tcp to pipe", pipeA, func() net.Conn {
+		{name: "prefixed tcp to pipe", dst: pipeA, source: func() net.Conn {
 			feed, c := tcpPair(t)
 			t.Cleanup(func() { _ = c.Close() })
 			_, _ = feed.Write(payload)
 			_ = feed.Close()
 			return c
 		}},
-		{"prefixed pipe to tcp", outClient, func() net.Conn {
+		{name: "prefixed pipe to tcp", dst: outClient, source: func() net.Conn {
 			c, feed := net.Pipe()
 			t.Cleanup(func() { _ = c.Close() })
 			go func() {
@@ -516,8 +516,8 @@ func TestRelayCopyPoolsBufferFromPrefixConn(t *testing.T) {
 // datagramSink records the size of each datagram written to it and blocks
 // reads until it is closed.
 type datagramSink struct {
-	datagramConn
 	done chan struct{}
+	datagramConn
 	once sync.Once
 }
 
@@ -590,16 +590,16 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 	})
 	// The wrappers of this package are looked through.
 	for _, tt := range []struct {
-		name string
 		wrap func(net.Conn) net.Conn
+		name string
 	}{
-		{"TimeoutConn", func(c net.Conn) net.Conn { return NewTimeoutConn(c, time.Minute) }},
-		{"ObserveConn", func(c net.Conn) net.Conn {
+		{name: "TimeoutConn", wrap: func(c net.Conn) net.Conn { return NewTimeoutConn(c, time.Minute) }},
+		{name: "ObserveConn", wrap: func(c net.Conn) net.Conn {
 			return ObserveConn(c, func(int64) error { return nil }, nil)
 		}},
-		{"RecordingConn", func(c net.Conn) net.Conn { return NewRecordingConn(c, 0) }},
-		{"PrefixConn", func(c net.Conn) net.Conn { return NewPrefixConn(c, nil) }},
-		{"AddrOverrideConn", func(c net.Conn) net.Conn { return NewAddrOverrideConn(c, nil, nil) }},
+		{name: "RecordingConn", wrap: func(c net.Conn) net.Conn { return NewRecordingConn(c, 0) }},
+		{name: "PrefixConn", wrap: func(c net.Conn) net.Conn { return NewPrefixConn(c, nil) }},
+		{name: "AddrOverrideConn", wrap: func(c net.Conn) net.Conn { return NewAddrOverrideConn(c, nil, nil) }},
 	} {
 		t.Run("FramedConn beneath "+tt.name, func(t *testing.T) {
 			a, b := net.Pipe()
@@ -704,8 +704,8 @@ func TestRelayDatagramsByNetwork(t *testing.T) {
 // queueConn stands for a connection of another package of this module whose
 // datagrams are in a dgram.Queue, such as a transparent.FlowConn.
 type queueConn struct {
-	q dgram.Queue
 	source
+	q dgram.Queue
 }
 
 type source = dgram.Source

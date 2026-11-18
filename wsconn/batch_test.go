@@ -14,10 +14,10 @@ import (
 
 // countConn is a memConn that counts its writes and can fail them.
 type countConn struct {
-	memConn
-	writes  int
-	failAt  int // fail the write that would pass this many bytes; 0 for none
 	failErr error
+	memConn
+	writes int
+	failAt int // fail the write that would pass this many bytes; 0 for none
 }
 
 func (c *countConn) Write(p []byte) (int, error) {

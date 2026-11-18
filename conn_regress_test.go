@@ -166,8 +166,8 @@ func TestPacketListenerCloseHoldingFilterLock(t *testing.T) {
 // deadline, as a Read does when a concurrent SetReadDeadline extends the
 // deadline just after the timeout woke it.
 type deadlineRaceConn struct {
+	fc *FramedConn
 	byteBufferConn
-	fc   *FramedConn
 	step int
 }
 
@@ -237,8 +237,8 @@ func TestFramedConnUnexpectedEOFInsideFrameDesyncs(t *testing.T) {
 // cyclicThroughNetx is a wrapper whose RawConn returns one of this package's
 // wrappers around itself.
 type cyclicThroughNetx struct {
-	countedCloseConn
 	outer net.Conn
+	countedCloseConn
 }
 
 func (c *cyclicThroughNetx) NetConn() net.Conn { return c.outer }

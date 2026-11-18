@@ -352,8 +352,8 @@ func (tempError) Temporary() bool { return true }
 // failingListener fails its first Accepts with errs and then returns conn.
 type failingListener struct {
 	net.Listener
-	errs []error
 	conn net.Conn
+	errs []error
 }
 
 func (l *failingListener) Accept() (net.Conn, error) {

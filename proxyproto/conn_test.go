@@ -28,18 +28,18 @@ func pipeWith(t *testing.T, data []byte) net.Conn {
 func TestNewConn(t *testing.T) {
 	header := wireOf(V1, tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
 	for _, tt := range []struct {
+		err     error
 		name    string
-		cfg     Config
-		data    []byte
 		remote  string
 		payload string
-		err     error
+		data    []byte
+		cfg     Config
 	}{
-		{"required", Config{}, append(header, "hello"...), "203.0.113.7:40000", "hello", nil},
-		{"required without header", Config{}, []byte("hello"), "pipe", "", ErrNoHeader},
-		{"optional", Config{Policy: Optional}, append(header, "hello"...), "203.0.113.7:40000", "hello", nil},
-		{"optional without header", Config{Policy: Optional}, []byte("hello"), "pipe", "hello", nil},
-		{"ignore", Config{Policy: Ignore}, append(header, "hello"...), "pipe", string(header) + "hello", nil},
+		{name: "required", cfg: Config{}, data: append(header, "hello"...), remote: "203.0.113.7:40000", payload: "hello", err: nil},
+		{name: "required without header", cfg: Config{}, data: []byte("hello"), remote: "pipe", payload: "", err: ErrNoHeader},
+		{name: "optional", cfg: Config{Policy: Optional}, data: append(header, "hello"...), remote: "203.0.113.7:40000", payload: "hello", err: nil},
+		{name: "optional without header", cfg: Config{Policy: Optional}, data: []byte("hello"), remote: "pipe", payload: "hello", err: nil},
+		{name: "ignore", cfg: Config{Policy: Ignore}, data: append(header, "hello"...), remote: "pipe", payload: string(header) + "hello", err: nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := NewConn(pipeWith(t, tt.data), tt.cfg)
@@ -167,19 +167,19 @@ func TestHeaderOf(t *testing.T) {
 	header := wireOf(V2, tcp("203.0.113.7", 40000), tcp("198.51.100.1", 443))
 	c := NewConn(pipeWith(t, header), Config{})
 	for _, tt := range []struct {
-		name string
 		c    net.Conn
+		name string
 		want bool
 	}{
-		{"conn", c, true},
-		{"wrapped", &wrapConn{&wrapConn{c}}, true},
-		{"tls", tls.Server(c, &tls.Config{}), true},
-		{"plain", &wrapConn{pipeWith(t, nil)}, false},
-		{"nil", nil, false},
-		{"nil conn", (*Conn)(nil), false},
-		{"nil tls", (*tls.Conn)(nil), false},
-		{"wrapping nil", &wrapConn{}, false},
-		{"loop", &loopConn{}, false},
+		{name: "conn", c: c, want: true},
+		{name: "wrapped", c: &wrapConn{&wrapConn{c}}, want: true},
+		{name: "tls", c: tls.Server(c, &tls.Config{}), want: true},
+		{name: "plain", c: &wrapConn{pipeWith(t, nil)}, want: false},
+		{name: "nil", c: nil, want: false},
+		{name: "nil conn", c: (*Conn)(nil), want: false},
+		{name: "nil tls", c: (*tls.Conn)(nil), want: false},
+		{name: "wrapping nil", c: &wrapConn{}, want: false},
+		{name: "loop", c: &loopConn{}, want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h, err := HeaderOf(tt.c)
@@ -200,28 +200,28 @@ func TestTrustPrefixes(t *testing.T) {
 	policy := TrustPrefixes(prefixes...)
 	prefixes[0] = netip.MustParsePrefix("0.0.0.0/0") // the policy keeps its own copy
 	for _, tt := range []struct {
-		name string
 		peer net.Addr
+		name string
 		want Policy
 	}{
-		{"ipv4 inside", tcp("10.1.2.3", 1), Required},
-		{"ipv4 outside", tcp("192.0.2.1", 1), Ignore},
-		{"4-byte ipv4", &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1).To4(), Port: 1}, Required},
-		{"ipv4-mapped", tcp("::ffff:10.0.0.1", 1), Required},
-		{"udp", udp("10.0.0.1", 1), Required},
-		{"ipv6 inside", tcp("2001:db8::1", 1), Required},
-		{"ipv6 with zone", &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1, Zone: "eth0"}, Required},
-		{"ipv6 outside", tcp("2001:db9::1", 1), Ignore},
-		{"other type with port", dummyAddr("10.0.0.1:80"), Required},
-		{"other type ipv6 with zone", dummyAddr("[2001:db8::1%eth0]:80"), Required},
-		{"other type without port", dummyAddr("10.0.0.1"), Required},
-		{"other type outside", dummyAddr("192.0.2.1:80"), Ignore},
-		{"not an address", dummyAddr("pipe"), Ignore},
-		{"unix", &net.UnixAddr{Name: "/run/lb.sock", Net: "unix"}, Ignore},
-		{"tcp without ip", &net.TCPAddr{Port: 1}, Ignore},
-		{"nil", nil, Ignore},
-		{"nil tcp", (*net.TCPAddr)(nil), Ignore},
-		{"nil unix", (*net.UnixAddr)(nil), Ignore},
+		{name: "ipv4 inside", peer: tcp("10.1.2.3", 1), want: Required},
+		{name: "ipv4 outside", peer: tcp("192.0.2.1", 1), want: Ignore},
+		{name: "4-byte ipv4", peer: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1).To4(), Port: 1}, want: Required},
+		{name: "ipv4-mapped", peer: tcp("::ffff:10.0.0.1", 1), want: Required},
+		{name: "udp", peer: udp("10.0.0.1", 1), want: Required},
+		{name: "ipv6 inside", peer: tcp("2001:db8::1", 1), want: Required},
+		{name: "ipv6 with zone", peer: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1, Zone: "eth0"}, want: Required},
+		{name: "ipv6 outside", peer: tcp("2001:db9::1", 1), want: Ignore},
+		{name: "other type with port", peer: dummyAddr("10.0.0.1:80"), want: Required},
+		{name: "other type ipv6 with zone", peer: dummyAddr("[2001:db8::1%eth0]:80"), want: Required},
+		{name: "other type without port", peer: dummyAddr("10.0.0.1"), want: Required},
+		{name: "other type outside", peer: dummyAddr("192.0.2.1:80"), want: Ignore},
+		{name: "not an address", peer: dummyAddr("pipe"), want: Ignore},
+		{name: "unix", peer: &net.UnixAddr{Name: "/run/lb.sock", Net: "unix"}, want: Ignore},
+		{name: "tcp without ip", peer: &net.TCPAddr{Port: 1}, want: Ignore},
+		{name: "nil", peer: nil, want: Ignore},
+		{name: "nil tcp", peer: (*net.TCPAddr)(nil), want: Ignore},
+		{name: "nil unix", peer: (*net.UnixAddr)(nil), want: Ignore},
 	} {
 		if got := policy(tt.peer); got != tt.want {
 			t.Errorf("%s: policy(%v) = %d, want %d", tt.name, tt.peer, got, tt.want)

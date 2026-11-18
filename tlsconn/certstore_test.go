@@ -595,9 +595,9 @@ func TestCertStoreLoadErrors(t *testing.T) {
 	errDown := errors.New("source down")
 	var result atomic.Value // of func() (*tls.Certificate, error)
 	type report struct {
-		name string
 		err  error
 		got  *tls.Certificate
+		name string
 	}
 	reports := make(chan report, 4)
 	s := &CertStore{RetryAfter: time.Minute, IdleTimeout: -1, Clock: fake,
@@ -606,7 +606,7 @@ func TestCertStoreLoadErrors(t *testing.T) {
 		}}
 	s.OnError = func(err *CertError) {
 		got, _ := s.forName(context.Background(), err.Name)
-		reports <- report{err.Name, err.Err, got}
+		reports <- report{name: err.Name, err: err.Err, got: got}
 	}
 	// Runs the first load of name in this goroutine, so that its report, if
 	// any, is in by the time it returns.

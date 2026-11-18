@@ -41,37 +41,37 @@ func TestVariables(t *testing.T) {
 	client := forwarded.Client{Addr: netip.MustParseAddrPort("198.51.100.1:0"), Hops: 2, Proto: "https", Host: "public.example"}
 	for _, tt := range []struct {
 		tmpl string
-		c    Context
 		want string
+		c    Context
 	}{
-		{"${scheme}", Context{Request: r}, "http"},
-		{"${scheme}|${https}", Context{Request: tlsReq}, "https|on"},
-		{"[${https}]", Context{Request: r}, "[]"},
-		{"${host}", Context{Request: r}, "example.com"},
-		{"${http_host}", Context{Request: r}, "Example.COM:8080"},
-		{"${request_method} ${request_uri}", Context{Request: r}, "GET /a%20b/c?x=1&y=two&x=3"},
-		{"${uri}${is_args}${args}", Context{Request: r}, "/a b/c?x=1&y=two&x=3"},
-		{"${query_string}", Context{Request: r}, "x=1&y=two&x=3"},
-		{"${arg_x},${arg_y},${arg_z}", Context{Request: r}, "1,two,"},
-		{"${cookie_sid}|${cookie_b}|${cookie_c}", Context{Request: r}, "abc|2|"},
-		{"${remote_addr} ${remote_ip}:${remote_port}", Context{Request: r}, "10.0.0.1 10.0.0.1:41000"},
-		{"${remote_addr}:${remote_port}", Context{Request: r, Client: client}, "198.51.100.1:"},
-		{"${peer_addr}:${peer_port}", Context{Request: r, Client: client}, "10.0.0.1:41000"},
-		{"${server_addr}:${server_port}", Context{Request: r}, "192.0.2.10:8080"},
-		{"${forwarded_proto}://${forwarded_host}", Context{Request: r, Client: client}, "https://public.example"},
-		{"${forwarded_proto}://${forwarded_host}", Context{Request: r}, "http://Example.COM:8080"},
-		{"${proxy_add_x_forwarded_for}", Context{Request: r}, "198.51.100.1, 10.0.0.9, 10.0.0.1"},
-		{"${proxy_add_forwarded}", Context{Request: r}, `for=198.51.100.1, for=10.0.0.1;host="Example.COM:8080";proto=http`},
-		{"${http_user_agent}|${http_x_missing}|${http_upgrade}|${http_connection}", Context{Request: r}, "test/1||websocket|Upgrade"},
-		{"${status} ${upstream_http_location} ${upstream_http_x_up}", Context{Request: r, Response: res}, "302 /next u1"},
-		{"[${status}${upstream_http_location}]", Context{Request: r}, "[]"},
-		{"${msec}", Context{Time: when}, "1792803723.456"},
-		{"${time_iso8601}", Context{Time: when}, "2026-10-24T01:02:03Z"},
-		{"${time_http}", Context{Time: when.In(time.FixedZone("x", 3600))}, "Sat, 24 Oct 2026 01:02:03 GMT"},
-		{"${msec}", Context{Time: time.UnixMilli(-1500)}, "-2.500"},
-		{"${scheme}${host}${remote_addr}${proxy_add_x_forwarded_for}", Context{}, "http"},
-		{"$$${scheme}$ $x $", Context{Request: r}, "$http$ $x $"},
-		{"${scheme}://${host}${request_uri}", Context{Request: r}, "http://example.com/a%20b/c?x=1&y=two&x=3"},
+		{tmpl: "${scheme}", c: Context{Request: r}, want: "http"},
+		{tmpl: "${scheme}|${https}", c: Context{Request: tlsReq}, want: "https|on"},
+		{tmpl: "[${https}]", c: Context{Request: r}, want: "[]"},
+		{tmpl: "${host}", c: Context{Request: r}, want: "example.com"},
+		{tmpl: "${http_host}", c: Context{Request: r}, want: "Example.COM:8080"},
+		{tmpl: "${request_method} ${request_uri}", c: Context{Request: r}, want: "GET /a%20b/c?x=1&y=two&x=3"},
+		{tmpl: "${uri}${is_args}${args}", c: Context{Request: r}, want: "/a b/c?x=1&y=two&x=3"},
+		{tmpl: "${query_string}", c: Context{Request: r}, want: "x=1&y=two&x=3"},
+		{tmpl: "${arg_x},${arg_y},${arg_z}", c: Context{Request: r}, want: "1,two,"},
+		{tmpl: "${cookie_sid}|${cookie_b}|${cookie_c}", c: Context{Request: r}, want: "abc|2|"},
+		{tmpl: "${remote_addr} ${remote_ip}:${remote_port}", c: Context{Request: r}, want: "10.0.0.1 10.0.0.1:41000"},
+		{tmpl: "${remote_addr}:${remote_port}", c: Context{Request: r, Client: client}, want: "198.51.100.1:"},
+		{tmpl: "${peer_addr}:${peer_port}", c: Context{Request: r, Client: client}, want: "10.0.0.1:41000"},
+		{tmpl: "${server_addr}:${server_port}", c: Context{Request: r}, want: "192.0.2.10:8080"},
+		{tmpl: "${forwarded_proto}://${forwarded_host}", c: Context{Request: r, Client: client}, want: "https://public.example"},
+		{tmpl: "${forwarded_proto}://${forwarded_host}", c: Context{Request: r}, want: "http://Example.COM:8080"},
+		{tmpl: "${proxy_add_x_forwarded_for}", c: Context{Request: r}, want: "198.51.100.1, 10.0.0.9, 10.0.0.1"},
+		{tmpl: "${proxy_add_forwarded}", c: Context{Request: r}, want: `for=198.51.100.1, for=10.0.0.1;host="Example.COM:8080";proto=http`},
+		{tmpl: "${http_user_agent}|${http_x_missing}|${http_upgrade}|${http_connection}", c: Context{Request: r}, want: "test/1||websocket|Upgrade"},
+		{tmpl: "${status} ${upstream_http_location} ${upstream_http_x_up}", c: Context{Request: r, Response: res}, want: "302 /next u1"},
+		{tmpl: "[${status}${upstream_http_location}]", c: Context{Request: r}, want: "[]"},
+		{tmpl: "${msec}", c: Context{Time: when}, want: "1792803723.456"},
+		{tmpl: "${time_iso8601}", c: Context{Time: when}, want: "2026-10-24T01:02:03Z"},
+		{tmpl: "${time_http}", c: Context{Time: when.In(time.FixedZone("x", 3600))}, want: "Sat, 24 Oct 2026 01:02:03 GMT"},
+		{tmpl: "${msec}", c: Context{Time: time.UnixMilli(-1500)}, want: "-2.500"},
+		{tmpl: "${scheme}${host}${remote_addr}${proxy_add_x_forwarded_for}", c: Context{}, want: "http"},
+		{tmpl: "$$${scheme}$ $x $", c: Context{Request: r}, want: "$http$ $x $"},
+		{tmpl: "${scheme}://${host}${request_uri}", c: Context{Request: r}, want: "http://example.com/a%20b/c?x=1&y=two&x=3"},
 	} {
 		tm, err := Compile(tt.tmpl, nil)
 		if err != nil {
@@ -113,20 +113,20 @@ func TestHostVariants(t *testing.T) {
 
 func TestCompileErrors(t *testing.T) {
 	for _, tt := range []struct {
-		tmpl string
 		err  error
+		tmpl string
 	}{
-		{"${scheme", ErrSyntax},
-		{"${}", ErrSyntax},
-		{"${a-b}", ErrSyntax},
-		{"${ scheme }", ErrSyntax},
-		{"${nope}", ErrUnknownVariable},
-		{"${Scheme}", ErrUnknownVariable},
-		{"${http_}", ErrUnknownVariable},
-		{"${unset}", ErrUnknownVariable},
-		{"a\r\nX-Evil: 1", ErrInvalidValue},
-		{"a\x00", ErrInvalidValue},
-		{"a\x7f", ErrInvalidValue},
+		{tmpl: "${scheme", err: ErrSyntax},
+		{tmpl: "${}", err: ErrSyntax},
+		{tmpl: "${a-b}", err: ErrSyntax},
+		{tmpl: "${ scheme }", err: ErrSyntax},
+		{tmpl: "${nope}", err: ErrUnknownVariable},
+		{tmpl: "${Scheme}", err: ErrUnknownVariable},
+		{tmpl: "${http_}", err: ErrUnknownVariable},
+		{tmpl: "${unset}", err: ErrUnknownVariable},
+		{tmpl: "a\r\nX-Evil: 1", err: ErrInvalidValue},
+		{tmpl: "a\x00", err: ErrInvalidValue},
+		{tmpl: "a\x7f", err: ErrInvalidValue},
 	} {
 		if _, err := Compile(tt.tmpl, nil); !errors.Is(err, tt.err) {
 			t.Errorf("Compile(%q) error = %v, want %v", tt.tmpl, err, tt.err)
@@ -198,13 +198,13 @@ func TestParseRules(t *testing.T) {
 		t.Fatalf("rules = %+v", rules)
 	}
 	for _, tt := range []struct {
-		text, msg string
 		err       error
+		text, msg string
 	}{
-		{"no colon", "line 1", ErrSyntax},
-		{"\n\nBad Name: x", "line 3", ErrSyntax},
-		{": x", "line 1", ErrSyntax},
-		{"A: 1\nX: ${nope}", "line 2", ErrUnknownVariable},
+		{text: "no colon", msg: "line 1", err: ErrSyntax},
+		{text: "\n\nBad Name: x", msg: "line 3", err: ErrSyntax},
+		{text: ": x", msg: "line 1", err: ErrSyntax},
+		{text: "A: 1\nX: ${nope}", msg: "line 2", err: ErrUnknownVariable},
 	} {
 		_, err := ParseRules(tt.text, nil)
 		if !errors.Is(err, tt.err) || !strings.Contains(err.Error(), tt.msg) {

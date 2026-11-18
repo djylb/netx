@@ -85,14 +85,14 @@ func TestSOCKS4Errors(t *testing.T) {
 		t.Errorf("IPv6 error = %v, want %v", err, ErrAddrType)
 	}
 	for _, tt := range []struct {
-		dst  netx.Addr
 		user string
+		dst  netx.Addr
 	}{
-		{netx.Addr{Port: 1}, ""},
-		{netx.Addr{Name: "a\x00b", Port: 1}, ""},
-		{netx.Addr{Name: strings.Repeat("a", 256), Port: 1}, ""},
-		{netx.Addr{Name: "a", Port: 1}, "u\x00"},
-		{netx.Addr{Name: "a", Port: 1}, strings.Repeat("u", 1024)},
+		{dst: netx.Addr{Port: 1}, user: ""},
+		{dst: netx.Addr{Name: "a\x00b", Port: 1}, user: ""},
+		{dst: netx.Addr{Name: strings.Repeat("a", 256), Port: 1}, user: ""},
+		{dst: netx.Addr{Name: "a", Port: 1}, user: "u\x00"},
+		{dst: netx.Addr{Name: "a", Port: 1}, user: strings.Repeat("u", 1024)},
 	} {
 		if err := WriteRequest4(io.Discard, CmdConnect, tt.dst, tt.user); !errors.Is(err, ErrMalformed) {
 			t.Errorf("WriteRequest4(%q, %q) error = %v, want %v", tt.dst.Name, tt.user, err, ErrMalformed)

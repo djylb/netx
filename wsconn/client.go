@@ -20,7 +20,6 @@ import (
 
 // ClientOptions configure the client side of a connection.
 type ClientOptions struct {
-	Options
 	// Host, if set, is the Host field of the request, rather than the
 	// URL's host, as for a server behind a front whose name is dialed.
 	Host string
@@ -31,6 +30,7 @@ type ClientOptions struct {
 	Header httphead.Header
 	// Subprotocols are offered by preference in Sec-WebSocket-Protocol.
 	Subprotocols []string
+	Options
 	// HandshakeTimeout bounds Client and Dialer.Dial when their context has no
 	// deadline; 0 means DefaultHandshakeTimeout (10s), and a negative value
 	// means no timeout, as for http.Server.IdleTimeout.
@@ -309,7 +309,6 @@ var ErrNoTLSDialer = errors.New("wsconn: wss URL without a TLS dialer")
 
 // Dialer dials WebSocket connections.
 type Dialer struct {
-	ClientOptions
 	// Forward dials the TCP connections of ws URLs; nil means a zero
 	// net.Dialer. It may reach the server through a proxy.
 	Forward ContextDialer
@@ -319,6 +318,7 @@ type Dialer struct {
 	// be a proxy dialer. Without it wss URLs fail with ErrNoTLSDialer, so
 	// that this package does not link crypto/tls.
 	TLS ContextDialer
+	ClientOptions
 }
 
 // Dial dials rawURL and runs the opening handshake as Client does. ctx, or

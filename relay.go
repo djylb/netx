@@ -16,11 +16,11 @@ import (
 )
 
 type relayOptions struct {
-	idle      time.Duration
-	clock     timeshim.Clock
-	halfClose bool
-	groups    []*ConnGroup
 	flows     [2]RelayFlow // a to b, b to a
+	clock     timeshim.Clock
+	groups    []*ConnGroup
+	idle      time.Duration
+	halfClose bool
 }
 
 // RelayOption configures Relay.
@@ -86,13 +86,13 @@ func (stop relayCloser) Close() error {
 	return nil
 }
 
-func (stop relayCloser) closeMember(cause error, _ bool) error { //nolint:unparam // implements the member interface of ConnGroup
+// stopFor stops the relay for a group closed with cause, if not nil.
+func (stop relayCloser) stopFor(cause error) {
 	if cause == nil {
 		stop(ErrRelayGroupClosed)
 	} else {
 		stop(&groupClosedError{cause: cause})
 	}
-	return nil
 }
 
 // groupClosedError ends a relay that a group closed with a cause; it matches

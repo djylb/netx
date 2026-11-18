@@ -22,23 +22,23 @@ import (
 // For SOCKS over TLS, set Forward to a dialer that returns TLS connections,
 // such as a *tls.Dialer or a tlsconn.Dialer.
 type Dialer struct {
+	// Forward dials the proxy; nil means a zero net.Dialer.
+	Forward netx.ContextDialer
+	// Resolver, if set, resolves host names on the client so that the proxy
+	// receives addresses, as SOCKS4 servers without the 4a extension need.
+	// SOCKS4 uses the first IPv4 address, SOCKS5 the first address.
+	Resolver *net.Resolver
 	// ProxyAddr is the proxy's host:port.
 	ProxyAddr string
-	// SOCKS4 speaks SOCKS4, or SOCKS4a for host names, instead of SOCKS5.
-	// IPv6 targets and UDP cannot be reached with it.
-	SOCKS4 bool
 	// Username and Password are offered with SOCKS5 username/password
 	// authentication (RFC 1929) when Username is not empty; no
 	// authentication is offered as well. SOCKS4 sends Username as the user
 	// ID and ignores Password.
 	Username string
 	Password string
-	// Resolver, if set, resolves host names on the client so that the proxy
-	// receives addresses, as SOCKS4 servers without the 4a extension need.
-	// SOCKS4 uses the first IPv4 address, SOCKS5 the first address.
-	Resolver *net.Resolver
-	// Forward dials the proxy; nil means a zero net.Dialer.
-	Forward netx.ContextDialer
+	// SOCKS4 speaks SOCKS4, or SOCKS4a for host names, instead of SOCKS5.
+	// IPv6 targets and UDP cannot be reached with it.
+	SOCKS4 bool
 }
 
 // Dial is DialContext with a background context, for code that expects a

@@ -18,15 +18,15 @@ func read(s string) (string, error) {
 
 func TestRead(t *testing.T) {
 	for _, tt := range []struct {
-		in, head string
 		err      error
+		in, head string
 	}{
-		{"GET / HTTP/1.1\r\nA: b\r\n\r\nbody", "GET / HTTP/1.1\r\nA: b\r\n\r\n", nil},
-		{"\r\n\nGET / HTTP/1.1\n\n", "GET / HTTP/1.1\n\n", nil},
-		{"GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 100) + "\r\n\r\n", "GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 100) + "\r\n\r\n", nil}, // lines over the buffer
-		{"", "", io.EOF},
-		{"GET / HTTP/1.1\r\n", "", io.ErrUnexpectedEOF},
-		{"GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 2000) + "\r\n\r\n", "", httphead.ErrTooLarge},
+		{in: "GET / HTTP/1.1\r\nA: b\r\n\r\nbody", head: "GET / HTTP/1.1\r\nA: b\r\n\r\n", err: nil},
+		{in: "\r\n\nGET / HTTP/1.1\n\n", head: "GET / HTTP/1.1\n\n", err: nil},
+		{in: "GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 100) + "\r\n\r\n", head: "GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 100) + "\r\n\r\n", err: nil}, // lines over the buffer
+		{in: "", head: "", err: io.EOF},
+		{in: "GET / HTTP/1.1\r\n", head: "", err: io.ErrUnexpectedEOF},
+		{in: "GET / HTTP/1.1\r\nX: " + strings.Repeat("y", 2000) + "\r\n\r\n", head: "", err: httphead.ErrTooLarge},
 	} {
 		head, err := read(tt.in)
 		if !errors.Is(err, tt.err) || err == nil && head != tt.head {
@@ -37,17 +37,17 @@ func TestRead(t *testing.T) {
 
 func TestParseRequestRejects(t *testing.T) {
 	for _, tt := range []struct {
-		head string
 		err  error
+		head string
 	}{
-		{"GET / HTTP/1.1\r\nX: a\r\n b\r\n\r\n", httphead.ErrMalformed},
-		{"GET / HTTP/1.1\r\nX : a\r\n\r\n", httphead.ErrMalformed},
-		{"GET / HTTP/1.1\r\nX: a\rb\r\n\r\n", httphead.ErrMalformed},
-		{"GET / HTTP/1.1\r\nX: a\x00\r\n\r\n", httphead.ErrMalformed},
-		{"GET /a b HTTP/1.1\r\n\r\n", httphead.ErrMalformed},
-		{"GET / HTTP/2.0\r\n\r\n", httphead.ErrVersion},
-		{"GET / http/1.1\r\n\r\n", httphead.ErrMalformed},
-		{"G(T / HTTP/1.1\r\n\r\n", httphead.ErrMalformed},
+		{head: "GET / HTTP/1.1\r\nX: a\r\n b\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET / HTTP/1.1\r\nX : a\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET / HTTP/1.1\r\nX: a\rb\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET / HTTP/1.1\r\nX: a\x00\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET /a b HTTP/1.1\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET / HTTP/2.0\r\n\r\n", err: httphead.ErrVersion},
+		{head: "GET / http/1.1\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "G(T / HTTP/1.1\r\n\r\n", err: httphead.ErrMalformed},
 	} {
 		if _, err := httphead.ParseRequest(tt.head, nil); !errors.Is(err, tt.err) {
 			t.Errorf("ParseRequest(%q) = %v, want %v", tt.head, err, tt.err)
@@ -64,21 +64,21 @@ func TestBodies(t *testing.T) {
 		return h
 	}
 	for _, tt := range []struct {
+		err    error
 		h      httphead.Header
 		minor  int
-		framed httphead.Framing
 		n      int64
-		err    error
+		framed httphead.Framing
 	}{
-		{h("Content-Length", "5"), 1, httphead.Length, 5, nil},
-		{h("Content-Length", "5, 5", "Content-Length", "5"), 1, httphead.Length, 5, nil},
-		{h("Content-Length", "0"), 1, httphead.NoBody, 0, nil},
-		{h("Content-Length", "5, 6"), 1, 0, 0, httphead.ErrMalformed},
-		{h("Content-Length", "-1"), 1, 0, 0, httphead.ErrMalformed},
-		{h("Transfer-Encoding", "Chunked"), 1, httphead.Chunked, 0, nil},
-		{h("Transfer-Encoding", "chunked", "Content-Length", "3"), 1, 0, 0, httphead.ErrMalformed},
-		{h("Transfer-Encoding", "gzip, chunked"), 1, 0, 0, httphead.ErrTransferCoding},
-		{h("Transfer-Encoding", "chunked"), 0, 0, 0, httphead.ErrMalformed},
+		{h: h("Content-Length", "5"), minor: 1, framed: httphead.Length, n: 5, err: nil},
+		{h: h("Content-Length", "5, 5", "Content-Length", "5"), minor: 1, framed: httphead.Length, n: 5, err: nil},
+		{h: h("Content-Length", "0"), minor: 1, framed: httphead.NoBody, n: 0, err: nil},
+		{h: h("Content-Length", "5, 6"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
+		{h: h("Content-Length", "-1"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
+		{h: h("Transfer-Encoding", "Chunked"), minor: 1, framed: httphead.Chunked, n: 0, err: nil},
+		{h: h("Transfer-Encoding", "chunked", "Content-Length", "3"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
+		{h: h("Transfer-Encoding", "gzip, chunked"), minor: 1, framed: 0, n: 0, err: httphead.ErrTransferCoding},
+		{h: h("Transfer-Encoding", "chunked"), minor: 0, framed: 0, n: 0, err: httphead.ErrMalformed},
 	} {
 		f, n, err := httphead.RequestBody(tt.h, tt.minor)
 		if !errors.Is(err, tt.err) || err == nil && (f != tt.framed || n != tt.n) {
@@ -87,17 +87,17 @@ func TestBodies(t *testing.T) {
 	}
 	for _, tt := range []struct {
 		method  string
-		code    int
-		h       httphead.Header
-		framed  httphead.Framing
 		codings string
+		h       httphead.Header
+		code    int
+		framed  httphead.Framing
 	}{
-		{"GET", 200, h("Transfer-Encoding", "gzip, chunked", "Content-Length", "9"), httphead.Chunked, "gzip"},
-		{"GET", 200, h("Transfer-Encoding", "gzip"), httphead.UntilClose, "gzip"},
-		{"GET", 200, nil, httphead.UntilClose, ""},
-		{"HEAD", 200, h("Content-Length", "9"), httphead.NoBody, ""},
-		{"GET", 304, h("Content-Length", "9"), httphead.NoBody, ""},
-		{"GET", 103, nil, httphead.NoBody, ""},
+		{method: "GET", code: 200, h: h("Transfer-Encoding", "gzip, chunked", "Content-Length", "9"), framed: httphead.Chunked, codings: "gzip"},
+		{method: "GET", code: 200, h: h("Transfer-Encoding", "gzip"), framed: httphead.UntilClose, codings: "gzip"},
+		{method: "GET", code: 200, h: nil, framed: httphead.UntilClose, codings: ""},
+		{method: "HEAD", code: 200, h: h("Content-Length", "9"), framed: httphead.NoBody, codings: ""},
+		{method: "GET", code: 304, h: h("Content-Length", "9"), framed: httphead.NoBody, codings: ""},
+		{method: "GET", code: 103, h: nil, framed: httphead.NoBody, codings: ""},
 	} {
 		f, _, codings, err := httphead.ResponseBody(tt.method, tt.code, tt.h)
 		if err != nil || f != tt.framed || codings != tt.codings {

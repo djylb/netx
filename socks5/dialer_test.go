@@ -40,8 +40,8 @@ func serveRaw(t *testing.T, handle func(net.Conn)) string {
 
 // recordingDialer dials with a net.Dialer and records the addresses.
 type recordingDialer struct {
-	mu    sync.Mutex
 	addrs []string
+	mu    sync.Mutex
 }
 
 func (d *recordingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {

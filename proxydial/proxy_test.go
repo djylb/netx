@@ -819,14 +819,14 @@ func TestHTTPDialerHandshakeCanceled(t *testing.T) {
 func TestHTTPConnectError(t *testing.T) {
 	for _, tt := range []struct {
 		reply  string
-		code   int
 		status string
 		header string
+		code   int
 	}{
-		{"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"p\"\r\nContent-Length: 0\r\n\r\n", 407, "407 Proxy Authentication Required", `Basic realm="p"`},
-		{"HTTP/1.1 403 Forbidden\r\n\r\n", 403, "403 Forbidden", ""},
-		{"HTTP/1.0 502 Bad Gateway\r\n\r\n", 502, "502 Bad Gateway", ""},
-		{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 101, "101 Switching Protocols", ""},
+		{reply: "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"p\"\r\nContent-Length: 0\r\n\r\n", code: 407, status: "407 Proxy Authentication Required", header: `Basic realm="p"`},
+		{reply: "HTTP/1.1 403 Forbidden\r\n\r\n", code: 403, status: "403 Forbidden", header: ""},
+		{reply: "HTTP/1.0 502 Bad Gateway\r\n\r\n", code: 502, status: "502 Bad Gateway", header: ""},
+		{reply: "HTTP/1.1 101 Switching Protocols\r\n\r\n", code: 101, status: "101 Switching Protocols", header: ""},
 	} {
 		addr := serveOnce(t, func(c net.Conn) {
 			if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {

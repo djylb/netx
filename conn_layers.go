@@ -25,11 +25,11 @@ type layerInfo struct {
 	conn net.Conn
 	// rwc is what Read and Write go to when that is not conn, as in
 	// WrapConn.
-	rwc  io.ReadWriteCloser
-	kind layerKind
+	rwc io.ReadWriteCloser
 	// datagrams, when not nil, hands over the datagrams that each Read
 	// returns one of.
 	datagrams datagramSource
+	kind      layerKind
 }
 
 // layerKind tells how a connection of this package passes data on.

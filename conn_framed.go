@@ -60,24 +60,24 @@ var ErrFrameDesync = errors.New("netx: framed stream desynchronized by a partial
 //
 // Reads and writes may run concurrently with each other.
 type FramedConn struct {
-	conn     net.Conn
-	br       *bufio.Reader // set by WithFramedReadBuffer
-	rerr     error
-	rpend    error  // error that cut a stream Read short, for the next Read
-	rpendAt  uint64 // rdeadlines before the read that left rpend
-	werr     error
-	remain   int // payload bytes of the current frame not yet read
-	rhdrN    int // bytes of rhdr read so far
-	rmu      sync.Mutex
-	wmu      sync.Mutex
-	wbufs    net.Buffers // header and payload of a vectored write, guarded by wmu
-	wvec     [2][]byte   // backing array of wbufs
-	rhdr     [2]byte
-	whdr     [2]byte // header of a vectored write, guarded by wmu
-	datagram bool
+	rerr    error // under rmu
+	rpend   error // error that cut a stream Read short, for the next Read; under rmu
+	werr    error // under wmu
+	conn    net.Conn
+	br      *bufio.Reader // set by WithFramedReadBuffer
+	wvec    [2][]byte     // backing array of wbufs; under wmu
+	wbufs   net.Buffers   // header and payload of a vectored write, guarded by wmu
+	rpendAt uint64        // rdeadlines before the read that left rpend; under rmu
+	remain  int           // payload bytes of the current frame not yet read; under rmu
+	rhdrN   int           // bytes of rhdr read so far; under rmu
 	// rdeadlines counts the read deadlines set, without rmu, which a
 	// blocked Read holds.
 	rdeadlines atomic.Uint64
+	rmu        sync.Mutex
+	wmu        sync.Mutex
+	rhdr       [2]byte // under rmu
+	whdr       [2]byte // header of a vectored write, guarded by wmu
+	datagram   bool
 }
 
 type framedOptions struct {

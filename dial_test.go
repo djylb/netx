@@ -15,9 +15,9 @@ import (
 // context, and others connect after the delay that delays gives them.
 type stubDialer struct {
 	delays map[string]time.Duration
+	dialed []string            // under mu
+	conns  []*countedCloseConn // under mu
 	mu     sync.Mutex
-	dialed []string
-	conns  []*countedCloseConn
 }
 
 func (d *stubDialer) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
@@ -183,9 +183,9 @@ func TestDialFirst(t *testing.T) {
 
 // dialAnyCase holds the arguments of a DialAny call.
 type dialAnyCase struct {
+	Forward   ContextDialer
 	Addresses []string
 	Stagger   time.Duration
-	Forward   ContextDialer
 }
 
 func (c *dialAnyCase) DialAny(ctx context.Context, network string) (net.Conn, string, error) {

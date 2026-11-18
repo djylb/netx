@@ -405,15 +405,15 @@ func BenchmarkResolve(b *testing.B) {
 	trusted := mustSet(b, "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "2001:db8:1::/48")
 	peer := ap("10.0.0.1:80")
 	for _, bc := range []struct {
+		h    map[string][]string
 		name string
 		hd   Header
-		h    map[string][]string
 	}{
-		{"untrusted", HeaderXForwardedFor, map[string][]string{"X-Forwarded-For": {"198.51.100.1"}}},
-		{"xff/1", HeaderXForwardedFor, map[string][]string{"X-Forwarded-For": {"198.51.100.1"}}},
-		{"xff/3", HeaderXForwardedFor, map[string][]string{"X-Forwarded-For": {"1.1.1.1, 198.51.100.1, 172.16.0.2, 192.168.1.1"}, "X-Forwarded-Proto": {"https"}}},
-		{"forwarded/2", HeaderForwarded, map[string][]string{"Forwarded": {`for="[2001:db8:2::1]:4711";proto=https;host=example.com, for=10.0.0.2`}}},
-		{"x-real-ip", HeaderXRealIP, map[string][]string{"X-Real-Ip": {"198.51.100.1"}}},
+		{name: "untrusted", hd: HeaderXForwardedFor, h: map[string][]string{"X-Forwarded-For": {"198.51.100.1"}}},
+		{name: "xff/1", hd: HeaderXForwardedFor, h: map[string][]string{"X-Forwarded-For": {"198.51.100.1"}}},
+		{name: "xff/3", hd: HeaderXForwardedFor, h: map[string][]string{"X-Forwarded-For": {"1.1.1.1, 198.51.100.1, 172.16.0.2, 192.168.1.1"}, "X-Forwarded-Proto": {"https"}}},
+		{name: "forwarded/2", hd: HeaderForwarded, h: map[string][]string{"Forwarded": {`for="[2001:db8:2::1]:4711";proto=https;host=example.com, for=10.0.0.2`}}},
+		{name: "x-real-ip", hd: HeaderXRealIP, h: map[string][]string{"X-Real-Ip": {"198.51.100.1"}}},
 	} {
 		r := &Resolver{Trusted: trusted, Header: bc.hd}
 		p := peer

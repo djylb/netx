@@ -19,14 +19,13 @@ type peerKey struct {
 
 // packetConn is one peer of a PacketListener.
 type packetConn struct {
-	l    *PacketListener
-	sock *packetSocket // the packet connection it writes from; nil for l's own
-	key  peerKey
-	peer net.Addr
-
+	peer          net.Addr
+	l             *PacketListener
+	sock          *packetSocket // the packet connection it writes from; nil for l's own
+	key           peerKey
+	writeDeadline dgram.Deadline
 	q             dgram.Queue
 	once          sync.Once
-	writeDeadline dgram.Deadline
 }
 
 func (c *packetConn) queue() *dgram.Queue { return &c.q }

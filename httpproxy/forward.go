@@ -26,43 +26,38 @@ import (
 // it, or a stream that decodes or encodes it otherwise. Both bodies stream
 // at once, and RelayOptions apply to the whole exchange.
 type exchange struct {
-	sc  *serverConn
-	req *Request
-	up  *upConn
-
-	reqStream, respStream stream
-	reqHead               headPart
-	respHead              headPart
-	// For the new protocol after an upgrade, the bytes the client sent
-	// with or after the request.
-	rawHead headPart
-	// respFields and outFields are reused for each response head.
-	respFields httphead.Header
-	outFields  httphead.Header
-	// respLength delimits the final response's body, with respFraming.
-	respLength int64
-
 	// failed is why the target's response could not be read, answered with
 	// 502 Bad Gateway or, after ResponseHeaderTimeout, 504.
 	failed error
-	status int
-
 	// For a request that asks for an upgrade, decided is closed once the
 	// final response tells whether the protocol switched, upgraded.
 	decided chan struct{}
-	aborted chan struct{} // closed when the relay stops early
-
+	req     *Request
+	up      *upConn
+	sc      *serverConn
 	// cutMu guards the cut-off of a request that the final response
 	// ended before: cutTimer, which cuts it once its grace has passed, and
 	// finished, set once the relay has returned, after which nothing is cut.
 	cutTimer *time.Timer
-	cutMu    sync.Mutex
+	aborted  chan struct{} // closed when the relay stops early
+	reqHead  headPart
+	respHead headPart
+	// For the new protocol after an upgrade, the bytes the client sent
+	// with or after the request.
+	rawHead headPart
+	// respFields and outFields are reused for each response head.
+	respFields            httphead.Header
+	outFields             httphead.Header
+	reqStream, respStream stream
+	status                int
+	// respLength delimits the final response's body, with respFraming.
+	respLength int64
+	abortMu    sync.Once
+	cutMu      sync.Mutex
 	// headMu guards the response header timeout, with headSeen: set by the
 	// request's direction once the request is sent, cleared by the
 	// response's.
-	headMu  sync.Mutex
-	abortMu sync.Once
-
+	headMu sync.Mutex
 	// reqDone and respDone are set when the request, or the final response,
 	// has been read to its end, by the goroutine of its direction.
 	reqDone, respDone atomic.Bool
@@ -75,7 +70,6 @@ type exchange struct {
 	// response, on a kept connection, for a request that may be sent again.
 	retry    atomic.Bool
 	upgraded atomic.Bool
-
 	// pooled tells that the target's connection may be kept.
 	pooled    bool
 	reqState  uint8

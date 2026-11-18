@@ -93,9 +93,9 @@ func leakProfile() string {
 
 // goroutine is one goroutine of a runtime.Stack dump.
 type goroutine struct {
-	id    uint64
 	top   string // the function running, without its arguments
 	stack string // the goroutine's whole dump
+	id    uint64
 }
 
 // expected reports a goroutine that is no leak: one of the test framework
