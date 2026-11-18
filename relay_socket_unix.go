@@ -25,12 +25,16 @@ type streamSocket struct {
 	err  error
 	peek func(fd uintptr) bool
 	read func(fd uintptr) bool
-	buf  []byte
-	n    int
+	// peekOnce peeks on its first call of a wait and reports readable on
+	// the next, once the poller has woken the wait; see waitReadable.
+	peekOnce func(fd uintptr) bool
+	buf      []byte
+	n        int
 	// The state of a call, which the callbacks below share, so that they are
 	// made once.
 	peekBuf [1]byte
 	blocked bool
+	peeked  bool
 }
 
 // socketSource returns the stream socket that s reads, or nil.
@@ -66,6 +70,13 @@ func socketSource(s *relaySource) relaySocket {
 			st.n, st.err = n, err
 			return true
 		}
+	}
+	st.peekOnce = func(fd uintptr) bool {
+		if st.peeked {
+			return true
+		}
+		st.peeked = true
+		return st.peek(fd)
 	}
 	st.read = func(fd uintptr) bool {
 		for {
@@ -104,6 +115,27 @@ func (s *streamSocket) wait(context.Context) (bool, error) {
 		return false, sockOpError(s.conn, "read", "recvfrom", s.err)
 	}
 	return s.n == 0, nil
+}
+
+// waitReadable waits until the socket is readable, as wait does, for a read
+// that follows at once: it peeks only before it parks and trusts the
+// poller's wake-up after, leaving the end and an error that comes later to
+// that read, which saves a system call per wake-up.
+func (s *streamSocket) waitReadable() error {
+	if s.src.exhausted() || s.src.prefixPending() {
+		return nil
+	}
+	if err := s.src.timeouts.refresh(); err != nil {
+		return err
+	}
+	s.n, s.err, s.peeked = 0, nil, false
+	if err := s.raw.Read(s.peekOnce); err != nil {
+		return rawOpError(err, "read")
+	}
+	if s.err != nil {
+		return sockOpError(s.conn, "read", "recvfrom", s.err)
+	}
+	return nil
 }
 
 // readNow reads into b what the socket holds, without waiting: it reports
@@ -173,5 +205,42 @@ func (s *relaySource) limited(n int64) int64 {
 func (s *relaySource) consumed(n int) {
 	if s.limit != nil {
 		s.limit.N -= int64(n)
+	}
+}
+
+// errWouldBlock ends a ReadFrom of readFromReady once the socket holds
+// nothing more.
+var errWouldBlock = errors.New("netx: read would block")
+
+// socketReader reads a stream socket without waiting, failing with
+// errWouldBlock when it holds nothing.
+type socketReader struct{ s *streamSocket }
+
+func (r socketReader) Read(p []byte) (int, error) {
+	n, blocked, err := r.s.readNow(p)
+	if blocked {
+		return 0, errWouldBlock
+	}
+	return n, err
+}
+
+// readFromReady copies a stream socket into the destination's ReadFrom
+// only while the socket has data: ReadFrom reads until the socket would
+// block and then returns, and the copy waits for more without calling it,
+// so that a buffer or write space ReadFrom takes, which a blocked read would
+// keep, is not held while the direction is idle. ReadFrom must return a
+// read error, as io.ReaderFrom does, and stay usable after it.
+func (s *streamSocket) readFromReady(rf io.ReaderFrom, idle *relayIdle) (int64, error) {
+	r := idle.reader(socketReader{s})
+	var written int64
+	for {
+		if err := s.waitReadable(); err != nil {
+			return written, err
+		}
+		n, err := rf.ReadFrom(r)
+		written += n
+		if !errors.Is(err, errWouldBlock) {
+			return written, err
+		}
 	}
 }

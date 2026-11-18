@@ -630,7 +630,13 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
   `*net.TCPConn`, whose data goes through a pooled 32 KiB buffer instead. On
   Unix systems a stream read straight from a socket takes that buffer only
   once the socket is readable, so idle relays hold no buffers either, and a
-  blocked `Wait` holds none. Any other stream source can implement
+  blocked `Wait` holds none. Such a socket is fed to the writing end's
+  `ReadFrom` only while it has data: `ReadFrom` sees a read error once the
+  socket would block, returns, and is called again when the socket is
+  readable, so whatever it takes for a read, such as the send space of a
+  multiplexed stream, is not held while the direction is idle. It must
+  return read errors as `io.ReaderFrom` does and stay usable after one.
+  Any other stream source can implement
   `netx.ReadableWaiter` (`WaitReadable(ctx) error`), such as a stream of a
   multiplexed connection, to be waited on the same way.
 - Sources that return one datagram per read (`*net.UDPConn`,

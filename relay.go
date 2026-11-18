@@ -150,7 +150,12 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 // end's WriteTo or else the writing end's ReadFrom, as io.Copy would, except
 // those of *net.TCPConn, whose data goes through a pooled 32 KiB buffer
 // instead. A stream read straight from a socket takes that buffer only once
-// the socket is readable, on Unix systems, so that an idle relay holds none.
+// the socket is readable, on Unix systems, so that an idle relay holds none,
+// and is fed to the writing end's ReadFrom only while it has data: once the
+// socket would block, ReadFrom's read fails, ReadFrom returns, and it is
+// called again when the socket is readable, so that what it takes for a
+// read is not held while the direction is idle. ReadFrom must return the
+// read error, as io.ReaderFrom does, and stay usable after it.
 //
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
 // PacketListener connection, a FramedConn with WithFramedDatagrams, or a

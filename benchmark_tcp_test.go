@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,11 +99,24 @@ func BenchmarkFramedConnWriteTCP(b *testing.B) {
 	}
 }
 
+// benchReaderFromConn reads into its connection through a buffer of its
+// own, as a multiplexed stream that reads into its send space does.
+type benchReaderFromConn struct{ net.Conn }
+
+var benchReaderFromBufs = sync.Pool{New: func() any { return new([32 << 10]byte) }}
+
+func (c benchReaderFromConn) ReadFrom(r io.Reader) (int64, error) {
+	buf := benchReaderFromBufs.Get().(*[32 << 10]byte)
+	defer benchReaderFromBufs.Put(buf)
+	return io.CopyBuffer(struct{ io.Writer }{c.Conn}, r, buf[:])
+}
+
 // BenchmarkRelayTCP moves data between two TCP connections, which splice
-// copies on Linux, without and with a counting flow, against io.Copy.
+// copies on Linux, without and with a counting flow, and into a destination
+// with ReadFrom of its own, against io.Copy.
 func BenchmarkRelayTCP(b *testing.B) {
 	const chunk = 64 << 10
-	for _, mode := range []string{"io.Copy", "Relay", "RelayFlow"} {
+	for _, mode := range []string{"io.Copy", "Relay", "RelayFlow", "ReadFrom"} {
 		b.Run(mode, func(b *testing.B) {
 			src, srcPeer := benchTCPPair(b)
 			dstPeer, dst := benchTCPPair(b)
@@ -114,6 +128,8 @@ func BenchmarkRelayTCP(b *testing.B) {
 					_, _ = io.Copy(dst, srcPeer)
 				case "Relay":
 					_, _, _ = Relay(context.Background(), srcPeer, dst)
+				case "ReadFrom":
+					_, _, _ = Relay(context.Background(), srcPeer, benchReaderFromConn{dst})
 				default:
 					var counted int64
 					_, _, _ = Relay(context.Background(), srcPeer, dst, WithRelayFlows(&RelayFlow{Done: func(n int64) error {

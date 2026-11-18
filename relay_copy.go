@@ -102,6 +102,9 @@ func relayCopy(ctx context.Context, d *relaySink, s *relaySource, idle *relayIdl
 	}
 	if rf, ok := d.w.(io.ReaderFrom); ok && !isStdConn(d.w) {
 		tellPath("readfrom")
+		if sock, ok := s.socket().(readyReaderFrom); ok {
+			return sock.readFromReady(rf, idle)
+		}
 		return rf.ReadFrom(idle.reader(s.r))
 	}
 	tellPath("stream")
@@ -117,6 +120,12 @@ type relaySocket interface {
 	// readNow reads what the source holds without waiting, or reports
 	// blocked.
 	readNow(b []byte) (n int, blocked bool, err error)
+}
+
+// readyReaderFrom is a relaySocket that can feed a destination's ReadFrom
+// only while it has data; see streamSocket.readFromReady.
+type readyReaderFrom interface {
+	readFromReady(rf io.ReaderFrom, idle *relayIdle) (int64, error)
 }
 
 // eofNil returns err, or nil for io.EOF, which ends a copy without an error.

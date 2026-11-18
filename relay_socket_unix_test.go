@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -320,4 +322,156 @@ func TestCopyStreamReportsWaitErrorsAsReads(t *testing.T) {
 	if !IsTimeout(err) || !errors.As(err, &oe) || oe.Op != "read" {
 		t.Fatalf("copyStream() error = %v, want a read timeout", err)
 	}
+}
+
+// readFromConn is a connection whose ReadFrom reads its source through a
+// buffer of its own, as a multiplexed stream that reads into its send
+// space does, and counts its calls and those in progress.
+type readFromConn struct {
+	net.Conn
+	calls, inFlight *atomic.Int64
+}
+
+func (c readFromConn) ReadFrom(r io.Reader) (int64, error) {
+	c.calls.Add(1)
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
+	buf := make([]byte, 1024)
+	var n int64
+	for {
+		m, err := r.Read(buf)
+		if m > 0 {
+			k, werr := c.Write(buf[:m])
+			n += int64(k)
+			if werr != nil {
+				return n, werr
+			}
+		}
+		if err == io.EOF {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+}
+
+func (c readFromConn) CloseWrite() error { return c.Conn.(*net.TCPConn).CloseWrite() }
+
+// From a socket, the destination's ReadFrom runs only while the socket has
+// data, so that what it holds is not held while the direction is idle, and
+// EOF still half-closes the destination.
+func TestRelayReadFromOnlyWhileReadable(t *testing.T) {
+	paths := recordPaths(t)
+	client, src := tcpPair(t)
+	dstConn, peer := tcpPair(t)
+	var calls, inFlight atomic.Int64
+	dst := readFromConn{dstConn, &calls, &inFlight}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Relay(context.Background(), src, dst, WithRelayHalfClose())
+		done <- err
+	}()
+	buf := make([]byte, 5)
+	for i := range 3 {
+		if _, err := client.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(peer, buf); err != nil || string(buf) != "hello" {
+			t.Fatalf("round %d: read %q, %v", i, buf, err)
+		}
+		waitFor(t, "ReadFrom to return", func() bool { return inFlight.Load() == 0 })
+	}
+	if n := calls.Load(); n < 3 {
+		t.Fatalf("ReadFrom called %d times, want one per burst", n)
+	}
+	// EOF half-closes the destination; the other direction goes on.
+	_ = client.(*net.TCPConn).CloseWrite()
+	if n, err := peer.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("peer Read() = %d, %v, want EOF", n, err)
+	}
+	if _, err := peer.Write([]byte("back!")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(client, buf); err != nil || string(buf) != "back!" {
+		t.Fatalf("client read %q, %v", buf, err)
+	}
+	_ = peer.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Relay() = %v", err)
+	}
+	if got := paths(); !slices.Contains(got, "readfrom") {
+		t.Fatalf("paths = %v, want readfrom among them", got)
+	}
+}
+
+// A reset of the socket ends a copy into ReadFrom with the error, and the
+// end of the context ends an idle one.
+func TestRelayReadFromErrors(t *testing.T) {
+	t.Run("reset", func(t *testing.T) {
+		client, src := tcpPair(t)
+		dstConn, _ := tcpPair(t)
+		var calls, inFlight atomic.Int64
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := Relay(context.Background(), src, readFromConn{dstConn, &calls, &inFlight})
+			done <- err
+		}()
+		_ = client.(*net.TCPConn).SetLinger(0)
+		_ = client.Close()
+		select {
+		case err := <-done:
+			if !errors.Is(err, syscall.ECONNRESET) {
+				t.Fatalf("Relay() = %v, want a reset", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a reset did not end the relay")
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		_, src := tcpPair(t)
+		dstConn, _ := tcpPair(t)
+		var calls, inFlight atomic.Int64
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cause := errors.New("stop")
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := Relay(ctx, src, readFromConn{dstConn, &calls, &inFlight})
+			done <- err
+		}()
+		time.Sleep(20 * time.Millisecond)
+		cancel(cause)
+		select {
+		case err := <-done:
+			if !errors.Is(err, cause) {
+				t.Fatalf("Relay() = %v, want the cause", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the context did not end the relay")
+		}
+	})
+	t.Run("copy", func(t *testing.T) {
+		// Copy closes nothing: the end of ctx interrupts the wait with a
+		// deadline.
+		_, src := tcpPair(t)
+		dstConn, _ := tcpPair(t)
+		var calls, inFlight atomic.Int64
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cause := errors.New("stop")
+		done := make(chan error, 1)
+		go func() {
+			_, err := Copy(ctx, readFromConn{dstConn, &calls, &inFlight}, src, nil)
+			done <- err
+		}()
+		time.Sleep(20 * time.Millisecond)
+		cancel(cause)
+		select {
+		case err := <-done:
+			if !errors.Is(err, cause) {
+				t.Fatalf("Copy() = %v, want the cause", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the context did not end the copy")
+		}
+	})
 }
