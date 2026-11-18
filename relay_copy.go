@@ -10,21 +10,7 @@ import (
 // active, recording the data that passes in idle, if not nil, which Relay
 // has already put into an active f.
 func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow, idle *relayIdle) (int64, error) {
-	// A RelayEnd is copied as its reader and writer are.
-	for {
-		e, ok := dst.(*RelayEnd)
-		if !ok || e == nil {
-			break
-		}
-		dst = e.Writer
-	}
-	for {
-		e, ok := src.(*RelayEnd)
-		if !ok || e == nil {
-			break
-		}
-		src = e.Reader
-	}
+	dst, src = unwrapRelayEnds(dst, src)
 	if c, ok := src.(*ChainReader); ok && c != nil {
 		return copyChain(ctx, dst, c, f, idle)
 	}
@@ -59,6 +45,26 @@ func relayDirection(ctx context.Context, dst io.Writer, src io.Reader, f *RelayF
 	}
 	n, err := copyStream(ctx, d.w, s, f)
 	return prefix + n, err
+}
+
+// unwrapRelayEnds returns the writer and reader of RelayEnds, which are
+// copied as their reader and writer are.
+func unwrapRelayEnds(dst io.Writer, src io.Reader) (io.Writer, io.Reader) {
+	for {
+		e, ok := dst.(*RelayEnd)
+		if !ok || e == nil {
+			break
+		}
+		dst = e.Writer
+	}
+	for {
+		e, ok := src.(*RelayEnd)
+		if !ok || e == nil {
+			break
+		}
+		src = e.Reader
+	}
+	return dst, src
 }
 
 // relayPath, set by tests, is told which way relayCopy copies.
@@ -103,7 +109,7 @@ func relayCopy(ctx context.Context, d *relaySink, s *relaySource, idle *relayIdl
 	if rf, ok := d.w.(io.ReaderFrom); ok && !isStdConn(d.w) {
 		tellPath("readfrom")
 		if sock, ok := s.socket().(readyReaderFrom); ok {
-			return sock.readFromReady(rf, idle)
+			return sock.readFromReady(ctx, rf, idle)
 		}
 		return rf.ReadFrom(idle.reader(s.r))
 	}
@@ -125,7 +131,7 @@ type relaySocket interface {
 // readyReaderFrom is a relaySocket that can feed a destination's ReadFrom
 // only while it has data; see streamSocket.readFromReady.
 type readyReaderFrom interface {
-	readFromReady(rf io.ReaderFrom, idle *relayIdle) (int64, error)
+	readFromReady(ctx context.Context, rf io.ReaderFrom, idle *relayIdle) (int64, error)
 }
 
 // eofNil returns err, or nil for io.EOF, which ends a copy without an error.

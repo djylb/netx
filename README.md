@@ -636,9 +636,16 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
   readable, so whatever it takes for a read, such as the send space of a
   multiplexed stream, is not held while the direction is idle. It must
   return read errors as `io.ReaderFrom` does and stay usable after one.
-  Any other stream source can implement
-  `netx.ReadableWaiter` (`WaitReadable(ctx) error`), such as a stream of a
-  multiplexed connection, to be waited on the same way.
+- A stream source, such as a stream of a multiplexed connection, can
+  implement `netx.ReadNotifier`: `TryRead(p) (int, error)`, which never
+  blocks and returns `netx.ErrWouldBlock` while there is nothing to read,
+  and `NotifyReadable(f func()) (stop func() bool)`, which calls `f` once
+  when the stream becomes readable. Relay then copies from it without a
+  goroutine of its own: a short task copies what there is and ends once the
+  stream would block, and the next notification starts the next one. An idle
+  relay between such a stream and a TCP connection keeps only the goroutine
+  that called Relay, waiting for the TCP side. `Copy` waits on it before it
+  takes a buffer. See the interface's documentation for its full contract.
 - Sources that return one datagram per read (`*net.UDPConn`,
   `PacketListener` connections, `FramedConn` with `WithFramedDatagrams`, and
   connections of other packages whose local address is on a `udp`, `ip` or

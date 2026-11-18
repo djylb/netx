@@ -15,19 +15,15 @@ import (
 )
 
 // blockingEnd is an end whose reads block until it is closed or data is
-// fed; data written to it is counted. It has WriteTo, ReadFrom and
-// WaitReadable as its fields say.
+// fed; data written to it is counted. It has WriteTo and ReadFrom as its
+// fields say.
 type blockingEnd struct {
 	feed     chan []byte
 	closed   chan struct{}
 	written  atomic.Int64
 	writeTos atomic.Int64
-	waits    atomic.Int64
 	reads    atomic.Int64
-	// readBeforeWait counts reads that no WaitReadable preceded.
-	readBeforeWait atomic.Int64
-	once           sync.Once
-	waited         atomic.Bool
+	once     sync.Once
 }
 
 func newBlockingEnd() *blockingEnd {
@@ -36,9 +32,6 @@ func newBlockingEnd() *blockingEnd {
 
 func (e *blockingEnd) Read(p []byte) (int, error) {
 	e.reads.Add(1)
-	if !e.waited.Swap(false) {
-		e.readBeforeWait.Add(1)
-	}
 	select {
 	case b := <-e.feed:
 		return copy(p, b), nil
@@ -95,27 +88,6 @@ func (e readerFromEnd) ReadFrom(r io.Reader) (int64, error) {
 		}
 		if err != nil {
 			return n, eofNil(err)
-		}
-	}
-}
-
-// waiterEnd adds WaitReadable, which waits for fed data without taking it.
-type waiterEnd struct{ *blockingEnd }
-
-func (e waiterEnd) WaitReadable(ctx context.Context) error {
-	e.waits.Add(1)
-	for {
-		if len(e.feed) > 0 {
-			e.waited.Store(true)
-			return nil
-		}
-		select {
-		case <-e.closed:
-			e.waited.Store(true)
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Millisecond):
 		}
 	}
 }
@@ -206,33 +178,6 @@ func TestRelayIdleKeepsReadFrom(t *testing.T) {
 	}
 	if got := paths(); len(got) != 2 || got[0] != "readfrom" || got[1] != "readfrom" {
 		t.Fatalf("paths = %v, want readfrom twice", got)
-	}
-}
-
-// A ReadableWaiter source is waited on before each read, with an idle
-// timeout too, so that the copy takes its buffer only for data.
-func TestRelayWaitsOnReadableWaiter(t *testing.T) {
-	paths := recordPaths(t)
-	a, b := waiterEnd{newBlockingEnd()}, waiterEnd{newBlockingEnd()}
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := Relay(context.Background(), a, b, WithRelayIdleTimeout(time.Hour))
-		done <- err
-	}()
-	waitFor(t, "a wait", func() bool { return a.waits.Load() > 0 })
-	for range 3 {
-		a.feed <- []byte("ping")
-	}
-	waitFor(t, "the data", func() bool { return b.written.Load() == 12 })
-	_ = a.Close()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if n := a.readBeforeWait.Load(); n != 0 {
-		t.Fatalf("%d of %d reads were not waited for", n, a.reads.Load())
-	}
-	if got := paths(); len(got) == 0 || got[0] != "stream" {
-		t.Fatalf("paths = %v, want stream", got)
 	}
 }
 

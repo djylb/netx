@@ -193,33 +193,14 @@ func rawOpError(err error, op string) error {
 	return err
 }
 
-// limited caps n to the bytes left within the source's bound, if it has one.
-func (s *relaySource) limited(n int64) int64 {
-	if s.limit != nil {
-		return min(n, max(s.limit.N, 0))
-	}
-	return n
-}
-
-// consumed counts n bytes read beneath the source's bound down.
-func (s *relaySource) consumed(n int) {
-	if s.limit != nil {
-		s.limit.N -= int64(n)
-	}
-}
-
-// errWouldBlock ends a ReadFrom of readFromReady once the socket holds
-// nothing more.
-var errWouldBlock = errors.New("netx: read would block")
-
 // socketReader reads a stream socket without waiting, failing with
-// errWouldBlock when it holds nothing.
+// ErrWouldBlock when it holds nothing.
 type socketReader struct{ s *streamSocket }
 
 func (r socketReader) Read(p []byte) (int, error) {
 	n, blocked, err := r.s.readNow(p)
 	if blocked {
-		return 0, errWouldBlock
+		return 0, ErrWouldBlock
 	}
 	return n, err
 }
@@ -230,7 +211,7 @@ func (r socketReader) Read(p []byte) (int, error) {
 // so that a buffer or write space ReadFrom takes, which a blocked read would
 // keep, is not held while the direction is idle. ReadFrom must return a
 // read error, as io.ReaderFrom does, and stay usable after it.
-func (s *streamSocket) readFromReady(rf io.ReaderFrom, idle *relayIdle) (int64, error) {
+func (s *streamSocket) readFromReady(_ context.Context, rf io.ReaderFrom, idle *relayIdle) (int64, error) {
 	r := idle.reader(socketReader{s})
 	var written int64
 	for {
@@ -239,7 +220,7 @@ func (s *streamSocket) readFromReady(rf io.ReaderFrom, idle *relayIdle) (int64, 
 		}
 		n, err := rf.ReadFrom(r)
 		written += n
-		if !errors.Is(err, errWouldBlock) {
+		if !errors.Is(err, ErrWouldBlock) {
 			return written, err
 		}
 	}

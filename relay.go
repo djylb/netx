@@ -157,6 +157,14 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 // read is not held while the direction is idle. ReadFrom must return the
 // read error, as io.ReaderFrom does, and stay usable after it.
 //
+// A direction from a ReadNotifier, such as a stream of a multiplexed
+// connection, also beneath the wrappers above, is copied without a
+// goroutine of its own: each notification starts a task that copies
+// through the pooled buffer until TryRead would block, so that an idle
+// relay between such a stream and a TCP connection keeps only the
+// goroutine that called Relay, waiting for the TCP side. A task blocked on
+// a write holds the stream back, as a blocked copy would.
+//
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
 // PacketListener connection, a FramedConn with WithFramedDatagrams, or a
 // connection of another package whose LocalAddr is on a datagram network
@@ -244,32 +252,58 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 			return 0, 0, err
 		}
 	}
-	// finish handles the end of the copy into dst.
-	finish := func(dst io.ReadWriteCloser, copyErr error) {
-		if copyErr == nil && cfg.halfClose && closeWrite(dst) == nil {
-			return
-		}
-		stop(copyErr)
-	}
-
-	// direction copies src to dst and handles its end.
-	direction := func(dst, src io.ReadWriteCloser, f *RelayFlow) int64 {
-		var dirIdle *relayIdle
-		if !f.active() {
-			dirIdle = idle
-		}
-		n, copyErr := relayDirection(flowCtx, dst, src, f, dirIdle)
+	// ended handles the end of the copy into dst.
+	ended := func(dst io.ReadWriteCloser, f *RelayFlow, n int64, copyErr error) {
 		endErr := copyErr
 		if endErr != nil && stopping.Load() {
 			endErr = net.ErrClosed // the relay's own Close ended it
 		}
 		f.end(n, endErr)
-		finish(dst, copyErr)
-		return n
+		if copyErr == nil && cfg.halfClose && closeWrite(dst) == nil {
+			return
+		}
+		stop(copyErr)
+	}
+	dirIdle := func(f *RelayFlow) *relayIdle {
+		if f.active() {
+			return nil // reports to idle itself
+		}
+		return idle
 	}
 	var wg sync.WaitGroup
-	wg.Go(func() { aToB = direction(b, a, &cfg.flows[0]) })
-	bToA = direction(a, b, &cfg.flows[1])
+	// notified starts the copy of src to dst without a goroutine of its own
+	// if src is a ReadNotifier, and reports whether it did.
+	notified := func(dst, src io.ReadWriteCloser, f *RelayFlow, out *int64) bool {
+		c := newNotifyCopy(flowCtx, dst, src, f, dirIdle(f), func(n int64, copyErr error) {
+			*out = n
+			ended(dst, f, n, copyErr)
+			wg.Done()
+		})
+		if c == nil {
+			return false
+		}
+		wg.Add(1)
+		c.start()
+		return true
+	}
+	// direction copies src to dst and handles its end.
+	direction := func(dst, src io.ReadWriteCloser, f *RelayFlow) int64 {
+		n, copyErr := relayDirection(flowCtx, dst, src, f, dirIdle(f))
+		ended(dst, f, n, copyErr)
+		return n
+	}
+	aNotified := notified(b, a, &cfg.flows[0], &aToB)
+	bNotified := notified(a, b, &cfg.flows[1], &bToA)
+	switch {
+	case aNotified && bNotified:
+	case aNotified:
+		bToA = direction(a, b, &cfg.flows[1])
+	case bNotified:
+		aToB = direction(b, a, &cfg.flows[0])
+	default:
+		wg.Go(func() { aToB = direction(b, a, &cfg.flows[0]) })
+		bToA = direction(a, b, &cfg.flows[1])
+	}
 	wg.Wait()
 
 	// Both directions ended with EOF after half-closing, unless the relay
