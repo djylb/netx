@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 // own with async.
 type fakeStream struct {
 	end      error // io.EOF, a reset or net.ErrClosed once the stream ended
+	idle     error // what TryRead returns without data; ErrWouldBlock if nil
 	reg      *fakeReg
 	gate     chan struct{} // if not nil, each Write waits for a token
 	closed   chan struct{}
@@ -42,7 +44,12 @@ func newFakeStream(async bool) *fakeStream {
 	return s
 }
 
-func (s *fakeStream) readableLocked() bool { return len(s.buf) > 0 || s.end != nil }
+// readableLocked reports whether TryRead would return anything but a
+// would-block error; an idle error whose WouldBlock reports false is a
+// failure, so the source is readable.
+func (s *fakeStream) readableLocked() bool {
+	return len(s.buf) > 0 || s.end != nil || s.idle != nil && !IsWouldBlock(s.idle)
+}
 
 func (s *fakeStream) TryRead(p []byte) (int, error) {
 	s.mu.Lock()
@@ -59,6 +66,9 @@ func (s *fakeStream) readLocked(p []byte) (int, error) {
 	}
 	if s.end != nil {
 		return 0, s.end
+	}
+	if s.idle != nil {
+		return 0, s.idle
 	}
 	return 0, ErrWouldBlock
 }
@@ -618,5 +628,61 @@ func BenchmarkIdleRelayStreamTCP(b *testing.B) {
 				wg.Wait()
 			}
 		})
+	}
+}
+
+// ownWouldBlockError is a source's own error type for TryRead finding nothing,
+// recognized by its method alone.
+type ownWouldBlockError bool
+
+func (w ownWouldBlockError) Error() string    { return "source: would block" }
+func (w ownWouldBlockError) WouldBlock() bool { return bool(w) }
+
+func TestIsWouldBlock(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "ErrWouldBlock", err: ErrWouldBlock, want: true},
+		{name: "wrapped ErrWouldBlock", err: fmt.Errorf("read: %w", ErrWouldBlock), want: true},
+		{name: "own type", err: ownWouldBlockError(true), want: true},
+		{name: "wrapped own type", err: fmt.Errorf("read: %w", ownWouldBlockError(true)), want: true},
+		{name: "reports false", err: ownWouldBlockError(false), want: false},
+		{name: "wrapped reports false", err: fmt.Errorf("read: %w", ownWouldBlockError(false)), want: false},
+		{name: "other error", err: io.EOF, want: false},
+		{name: "nil", err: nil, want: false},
+	} {
+		if got := IsWouldBlock(c.err); got != c.want {
+			t.Errorf("%s: IsWouldBlock() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A source's own would-block error, wrapped, idles the copy as
+// ErrWouldBlock does; one whose WouldBlock reports false ends it as any
+// other error.
+func TestRelayNotifierOwnWouldBlock(t *testing.T) {
+	s := newFakeStream(false)
+	s.idle = fmt.Errorf("stream: %w", ownWouldBlockError(true))
+	c1, c2 := tcpPair(t)
+	done := startRelay(s, c1)
+	waitFor(t, "registration", s.pending)
+	s.feed([]byte("ping"))
+	if got := readN(t, c2, 4); got != "ping" {
+		t.Fatalf("got %q", got)
+	}
+	waitFor(t, "registration", s.pending)
+	_ = c2.Close()
+	if err := waitRelay(t, done); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := ownWouldBlockError(false)
+	s = newFakeStream(false)
+	s.idle = failed
+	c1, _ = tcpPair(t)
+	if err := waitRelay(t, startRelay(s, c1)); !errors.Is(err, failed) {
+		t.Fatalf("Relay() = %v, want the source's error", err)
 	}
 }

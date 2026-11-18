@@ -638,7 +638,8 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
   return read errors as `io.ReaderFrom` does and stay usable after one.
 - A stream source, such as a stream of a multiplexed connection, can
   implement `netx.ReadNotifier`: `TryRead(p) (int, error)`, which never
-  blocks and returns `netx.ErrWouldBlock` while there is nothing to read,
+  blocks and returns `netx.ErrWouldBlock`, or any error with a method
+  `WouldBlock() bool` that reports true, while there is nothing to read,
   and `NotifyReadable(f func()) (stop func() bool)`, which calls `f` once
   when the stream becomes readable. Relay then copies from it without a
   goroutine of its own: a short task copies what there is and ends once the

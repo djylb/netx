@@ -220,7 +220,7 @@ func (s *streamSocket) readFromReady(_ context.Context, rf io.ReaderFrom, idle *
 		}
 		n, err := rf.ReadFrom(r)
 		written += n
-		if !errors.Is(err, ErrWouldBlock) {
+		if !IsWouldBlock(err) {
 			return written, err
 		}
 	}

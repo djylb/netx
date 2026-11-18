@@ -12,7 +12,23 @@ import (
 // ErrWouldBlock is returned by ReadNotifier.TryRead when the source holds
 // nothing to read yet and has neither ended nor failed. It also ends an
 // io.ReaderFrom that Relay feeds only while its source has data; see Relay.
-var ErrWouldBlock = errors.New("netx: read would block")
+// Its WouldBlock method reports true, so IsWouldBlock recognizes it; a
+// source may return an error of its own instead.
+var ErrWouldBlock error = wouldBlockError{}
+
+type wouldBlockError struct{}
+
+func (wouldBlockError) Error() string    { return "netx: read would block" }
+func (wouldBlockError) WouldBlock() bool { return true }
+
+// IsWouldBlock reports whether err, or an error it wraps, has a method
+// WouldBlock() bool that reports true, as ErrWouldBlock does: the error
+// says that a read found nothing yet, not that it failed. A source can so
+// signal it without depending on this package.
+func IsWouldBlock(err error) bool {
+	var wb interface{ WouldBlock() bool }
+	return errors.As(err, &wb) && wb.WouldBlock()
+}
 
 // ReadNotifier is a source that can be read without blocking and that tells
 // when it becomes readable, such as a stream of a multiplexed connection.
@@ -21,13 +37,17 @@ var ErrWouldBlock = errors.New("netx: read would block")
 // copies what there is and ends once TryRead would block. Copy waits on it
 // before it takes a buffer, so that an idle copy holds none.
 //
-// The source is readable once TryRead would return anything but
-// ErrWouldBlock: data, the end of the stream after the peer closed its
+// The source is readable once TryRead would return anything but an error
+// for which IsWouldBlock reports true: data, the end of the stream after the peer closed its
 // writing side, or an error, such as for a reset, a local Close or
 // CloseRead, or a read deadline that has passed.
 type ReadNotifier interface {
 	// TryRead reads as Read does but never blocks: while the source holds
-	// no data and has not ended or failed, it returns 0, ErrWouldBlock.
+	// no data and has not ended or failed, it returns 0 and an error for
+	// which IsWouldBlock reports true: ErrWouldBlock, or an error of the
+	// source's own, possibly wrapped, with a method WouldBlock() bool that
+	// reports true. An error whose WouldBlock reports false is an ordinary
+	// error, as is any other.
 	// Otherwise it returns at once what Read would: n > 0 bytes, or 0 and
 	// io.EOF at the end of the stream, or 0 and the error Read would
 	// return. TryRead and Read share the source's data and are not called
@@ -120,7 +140,7 @@ func (s *notifySocket) readNow(b []byte) (int, bool, error) {
 		return 0, false, err
 	}
 	n, err := s.n.TryRead(b)
-	if n == 0 && errors.Is(err, ErrWouldBlock) {
+	if n == 0 && IsWouldBlock(err) {
 		return 0, true, nil
 	}
 	s.src.consumed(n)
@@ -148,7 +168,7 @@ func (s *notifySocket) readFromReady(ctx context.Context, rf io.ReaderFrom, idle
 		}
 		n, err := rf.ReadFrom(r)
 		written += n
-		if !errors.Is(err, ErrWouldBlock) {
+		if !IsWouldBlock(err) {
 			return written, err
 		}
 	}
