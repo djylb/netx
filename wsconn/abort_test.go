@@ -40,7 +40,7 @@ func TestAbortForwardsToConnBeneath(t *testing.T) {
 	c := &Conn{conn: rec, done: make(chan struct{})}
 	cause := errors.New("cut")
 	NewStreamConn(c).Abort(cause)
-	if rec.cause != cause {
+	if !errors.Is(rec.cause, cause) {
 		t.Fatalf("Abort beneath got %v, want %v", rec.cause, cause)
 	}
 }

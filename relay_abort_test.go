@@ -165,7 +165,7 @@ func TestRelayAbortsAborters(t *testing.T) {
 		t.Fatalf("Relay = %v, want %v", err, errKick)
 	}
 	for label, e := range map[string]*abortEnd{"a": a, "beneath a wrapper": inner, "b": b} {
-		if aborts, _, cause := e.counts(); aborts != 1 || cause != errKick {
+		if aborts, _, cause := e.counts(); aborts != 1 || !errors.Is(cause, errKick) {
 			t.Fatalf("%s: %d Aborts with %v, want 1 with %v", label, aborts, cause, errKick)
 		}
 	}
@@ -180,7 +180,7 @@ func TestRelayEndAbortFunc(t *testing.T) {
 	cause := errors.New("cut")
 	e := &RelayEnd{AbortFunc: func(c error) { got = c }, CloseFunc: func() error { t.Fatal("Close called"); return nil }}
 	Abort(e, cause)
-	if got != cause {
+	if !errors.Is(got, cause) {
 		t.Fatalf("AbortFunc got %v, want %v", got, cause)
 	}
 }
