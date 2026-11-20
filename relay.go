@@ -127,9 +127,17 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 
 // Relay copies data between a and b in both directions and closes both when it
 // returns. By default it stops as soon as either direction stops, at EOF or on
-// an error, closing both ends to end the other direction; see WithRelayHalfClose.
+// an error, ending both ends to end the other direction; see WithRelayHalfClose.
 //
-// The end of ctx stops the relay too, closing both ends, and Relay then
+// Only a normal end, EOF, is passed on as an end of data: Relay then closes
+// both ends, or with WithRelayHalfClose shuts down the writing side of the
+// other end. Any other stop, an error in either direction, such as a reset
+// by a peer or an error of a RelayFlow hook, the end of ctx, the idle
+// timeout or a ConnGroup, aborts both ends with Abort instead, a
+// *net.TCPConn with RST and an Aborter with its Abort, so that neither peer
+// takes a cut transfer for a complete one.
+//
+// The end of ctx stops the relay too, aborting both ends, and Relay then
 // returns context.Cause(ctx), unless it had stopped already: cancel a context
 // that many relays share, with a cause, to end them all, for example when an
 // allowance runs out or a service is disabled; relays blocked in a read end
@@ -202,7 +210,8 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 	if len(cfg.groups) > 0 || cfg.flows[0].active() || cfg.flows[1].active() {
 		flowCtx, cancel = context.WithCancel(parent)
 	}
-	// stop ends the relay with stopErr unless it has stopped already; a
+	// stop ends the relay with stopErr unless it has stopped already,
+	// closing both ends for a normal end and aborting them otherwise; a
 	// concurrent call returns only once the ends are closed.
 	var (
 		once     sync.Once
@@ -213,8 +222,13 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 			stopping.Store(true)
 			err = stopErr
 			cancel()
-			_ = a.Close()
-			_ = b.Close()
+			if stopErr == nil {
+				_ = a.Close()
+				_ = b.Close()
+			} else {
+				Abort(a, stopErr)
+				Abort(b, stopErr)
+			}
 		})
 	}
 	if parent.Done() != nil {

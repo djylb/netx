@@ -22,11 +22,15 @@ type RelayEnd struct {
 	// when the direction into this end ends; nil calls the CloseWrite
 	// method of Writer, if it has one.
 	CloseWriteFunc func() error
-	// CloseFunc is called by Close, as when the relay ends; nil closes
-	// Reader and Writer where they are io.Closers. A relay that stops early,
-	// on an error or because its context ended, closes its ends to end the
-	// reads and writes that block on them, so CloseFunc must do that then.
+	// CloseFunc is called by Close, as when the relay ends normally; nil
+	// closes Reader and Writer where they are io.Closers.
 	CloseFunc func() error
+	// AbortFunc is called by Abort, as when the relay stops on an error or
+	// because its context ended; it must end the reads and writes that
+	// block on the end. nil aborts what Reader and Writer read and write
+	// as Abort aborts a connection beneath its wrappers, an Aborter or a
+	// *net.TCPConn, and then calls Close.
+	AbortFunc func(cause error)
 }
 
 func (e *RelayEnd) Read(p []byte) (int, error) {
@@ -70,6 +74,23 @@ func (e *RelayEnd) Close() error {
 		errs = append(errs, c.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// Abort calls AbortFunc, or aborts what Reader and Writer read and write
+// and then calls Close; see Aborter.
+func (e *RelayEnd) Abort(cause error) {
+	switch {
+	case e == nil:
+		return
+	case e.AbortFunc != nil:
+		e.AbortFunc(cause)
+		return
+	}
+	abortBeneath(e.Reader, cause)
+	if any(e.Writer) != any(e.Reader) {
+		abortBeneath(e.Writer, cause)
+	}
+	_ = e.Close()
 }
 
 // ChainReader reads the parts that Next returns one after another, as

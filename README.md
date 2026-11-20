@@ -521,7 +521,15 @@ func forward(ctx context.Context, client, backend net.Conn) {
   `CloseWrite` and the other direction keeps going, for protocols where a
   client shuts down its sending side and then reads the answer. Ends without
   `CloseWrite` are closed as usual. Pair it with an idle timeout.
-- The end of `ctx` ends the relay, closing both ends, and `Relay` returns
+- Only a normal end, EOF, reaches the peers as an end of data. Any other stop
+  (an error in either direction, a hook error, the end of `ctx`, the idle
+  timeout, a `ConnGroup`) aborts both ends with `netx.Abort`, so that neither
+  peer takes a cut transfer for a complete one: a `*net.TCPConn`, also beneath
+  wrappers, is closed with RST (`SO_LINGER 0`), and an end that implements
+  `netx.Aborter` (`Abort(cause error)`), such as a stream of a multiplexed
+  connection or a `wsconn` connection, is aborted. Wrappers of other packages
+  pass the abort on by implementing `Aborter` or a `NetConn() net.Conn` method.
+- The end of `ctx` ends the relay, aborting both ends, and `Relay` returns
   `context.Cause(ctx)`. Cancelling one context ends every relay that shares
   it, also those idle in a read.
 - `WithRelayIdleTimeout(d)` ends a relay through which nothing has passed in
@@ -603,12 +611,13 @@ func relayExchange(ctx context.Context, client, backend net.Conn, head []byte, n
 }
 ```
 
-- `RelayEnd{Reader, Writer, CloseWriteFunc, CloseFunc}` is an end made of
-  parts: Relay reads `Reader` and writes `Writer` as it would as ends of their
-  own, and calls the functions instead of closing, which leaves the
+- `RelayEnd{Reader, Writer, CloseWriteFunc, CloseFunc, AbortFunc}` is an end
+  made of parts: Relay reads `Reader` and writes `Writer` as it would as ends
+  of their own, and calls the functions instead of closing, which leaves the
   connections open after an exchange that ended well. A relay that stops
-  early closes its ends to end blocked reads and writes, so `CloseFunc` must
-  close then.
+  early aborts its ends to end blocked reads and writes: `AbortFunc`, or else
+  the connections beneath `Reader` and `Writer` are aborted and `CloseFunc`
+  is called.
 - `ChainReader{Next}` reads parts one after another, asking for the next one
   each time a part ends, so that a body can follow a head that tells its
   length. Relay and `Copy` copy each part as a source of its own.
@@ -1975,7 +1984,10 @@ func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (ne
   `*CloseError` with its code and reason; the server then closes the
   connection beneath first. `CloseWrite` sends the close frame alone, as a
   half-close: no message can be written after it, and reads go on until
-  the peer's close frame, which ends the connection.
+  the peer's close frame, which ends the connection. `Abort(cause)` ends
+  the connection at once without a close frame, with a reset where it runs
+  over TCP, so that the peer sees a cut; `Relay` uses it when it stops on an
+  error.
 - `StreamConn`: each `Write` is one binary message of one frame, `Read`
   crosses message bounds and also takes text messages; close codes 1000,
   1001 and none, and a peer that just closes the connection between

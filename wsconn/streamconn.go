@@ -82,6 +82,10 @@ func (s *StreamConn) Write(p []byte) (int, error) {
 // Close closes the WebSocket connection as Conn.Close does.
 func (s *StreamConn) Close() error { return s.c.Close() }
 
+// Abort ends the stream at once without the closing handshake; see
+// Conn.Abort.
+func (s *StreamConn) Abort(cause error) { s.c.Abort(cause) }
+
 // LocalAddr returns the local address of the connection beneath.
 func (s *StreamConn) LocalAddr() net.Addr { return s.c.conn.LocalAddr() }
 

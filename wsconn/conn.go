@@ -683,6 +683,22 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 	return nil
 }
 
+// Abort ends the connection at once without the closing handshake, so
+// that the peer sees a cut, not a close frame: the connection beneath is
+// aborted if it has an Abort(error) method, or else closed with RST where
+// it is TCP, beneath wrappers with NetConn methods. Reads and writes in
+// progress fail. A Close afterwards returns an error matching
+// net.ErrClosed. cause is passed to the Abort beneath.
+func (c *Conn) Abort(cause error) {
+	c.closing.Store(true)
+	if a, ok := c.conn.(interface{ Abort(cause error) }); ok {
+		a.Abort(cause)
+	} else {
+		netutil.ResetOnClose(c.conn)
+	}
+	c.closeConn()
+}
+
 // CloseWrite sends a close frame with StatusNormalClosure, after which
 // messages can no longer be written, and leaves the rest of the closing
 // handshake to the reader: reads go on until the peer's close frame,

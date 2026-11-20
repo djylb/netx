@@ -138,3 +138,23 @@ func HostIP(name string) (netip.Addr, bool) {
 	}
 	return ip.Unmap().WithZone(""), true
 }
+
+// ResetOnClose makes the close of the *net.TCPConn beneath v, found
+// through NetConn methods, send RST instead of FIN (SO_LINGER 0). It
+// closes nothing.
+func ResetOnClose(v any) {
+	for range 16 {
+		if v == nil || IsNilPointer(v) {
+			return
+		}
+		if tc, ok := v.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0)
+			return
+		}
+		getter, ok := v.(interface{ NetConn() net.Conn })
+		if !ok {
+			return
+		}
+		v = getter.NetConn()
+	}
+}
