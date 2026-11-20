@@ -16,6 +16,11 @@ type wheelConn struct {
 
 func newWheelTable(t *testing.T, clock *timeshim.Fake, onShutdown func(*wheelConn)) *Table[int, *wheelConn] {
 	t.Helper()
+	return newIdleTable(t, clock, onShutdown, time.Minute)
+}
+
+func newIdleTable(t *testing.T, clock *timeshim.Fake, onShutdown func(*wheelConn), idle time.Duration) *Table[int, *wheelConn] {
+	t.Helper()
 	tab := new(Table[int, *wheelConn])
 	tab.Init(TableOptions[*wheelConn]{
 		Queue: func(c *wheelConn) *Queue { return &c.q },
@@ -28,7 +33,7 @@ func newWheelTable(t *testing.T, clock *timeshim.Fake, onShutdown func(*wheelCon
 				c.q.Close(err)
 			}
 		},
-		Epoch: NewEpoch(clock), Backlog: 1, Idle: time.Minute,
+		Epoch: NewEpoch(clock), Backlog: 1, Idle: idle,
 	})
 	t.Cleanup(func() { tab.Close(nil) })
 	return tab
@@ -37,7 +42,7 @@ func newWheelTable(t *testing.T, clock *timeshim.Fake, onShutdown func(*wheelCon
 func addWheelConn(t *testing.T, tab *Table[int, *wheelConn], key int) *wheelConn {
 	t.Helper()
 	c := &wheelConn{key: key, tab: tab}
-	c.q.Init(4, tab.wheel.epoch)
+	c.q.Init(4, tab.epoch)
 	c.q.Accepted()
 	if _, res := tab.Add(key, c, false); res != Added {
 		t.Fatalf("Add = %v", res)
@@ -46,10 +51,10 @@ func addWheelConn(t *testing.T, tab *Table[int, *wheelConn], key int) *wheelConn
 }
 
 func wheelLen(tab *Table[int, *wheelConn]) int {
-	tab.wheel.mu.Lock()
-	defer tab.wheel.mu.Unlock()
+	tab.wheel.Load().mu.Lock()
+	defer tab.wheel.Load().mu.Unlock()
 	n := 0
-	for _, s := range tab.wheel.slots {
+	for _, s := range tab.wheel.Load().slots {
 		n += len(s)
 	}
 	return n
@@ -74,15 +79,15 @@ func TestWheelRemoveUnlinks(t *testing.T) {
 			t.Fatalf("removed connection %d still has a wheel place", i)
 		}
 	}
-	tab.wheel.mu.Lock()
-	for si, slot := range tab.wheel.slots {
+	tab.wheel.Load().mu.Lock()
+	for si, slot := range tab.wheel.Load().slots {
 		for pos, c := range slot {
 			if int(c.q.wheelSlot) != si+1 || int(c.q.wheelPos) != pos {
 				t.Errorf("connection %d at slot %d/%d records %d/%d", c.key, si, pos, c.q.wheelSlot-1, c.q.wheelPos)
 			}
 		}
 	}
-	tab.wheel.mu.Unlock()
+	tab.wheel.Load().mu.Unlock()
 	clock.Advance(2 * time.Minute)
 	for _, i := range []int{0, 2, 3} {
 		if !conns[i].q.Closed() {
@@ -97,9 +102,9 @@ func TestWheelShutsDownOutsideLock(t *testing.T) {
 	clock := timeshim.NewFake(time.Unix(1000, 0))
 	var tab *Table[int, *wheelConn]
 	tab = newWheelTable(t, clock, func(c *wheelConn) {
-		if tab.wheel.mu.TryLock() {
+		if tab.wheel.Load().mu.TryLock() {
 			c.free = true
-			tab.wheel.mu.Unlock()
+			tab.wheel.Load().mu.Unlock()
 		}
 	})
 	c := addWheelConn(t, tab, 1)
@@ -121,5 +126,35 @@ func TestQueueRingKeepsToBound(t *testing.T) {
 	}
 	if q.Len() != 100 || len(q.ring) != 100 {
 		t.Fatalf("Len %d, ring %d, want 100 and 100", q.Len(), len(q.ring))
+	}
+}
+
+// SetIdle changes the idle timeout of the connections held: a shorter one
+// closes them by it, one set on a table without any starts it, a
+// non-positive one keeps them.
+func TestSetIdleHot(t *testing.T) {
+	clock := timeshim.NewFake(time.Unix(1000, 0))
+	tab := newWheelTable(t, clock, nil)
+	c := addWheelConn(t, tab, 1)
+	tab.SetIdle(8 * time.Second)
+	clock.Advance(12 * time.Second)
+	if !c.q.Closed() {
+		t.Fatal("the shorter idle timeout did not apply to a held connection")
+	}
+
+	none := newIdleTable(t, clock, nil, 0)
+	c = addWheelConn(t, none, 1)
+	none.SetIdle(8 * time.Second)
+	clock.Advance(12 * time.Second)
+	if !c.q.Closed() {
+		t.Fatal("an idle timeout set later did not apply to a held connection")
+	}
+
+	off := newWheelTable(t, clock, nil)
+	c = addWheelConn(t, off, 1)
+	off.SetIdle(0)
+	clock.Advance(3 * time.Minute)
+	if c.q.Closed() {
+		t.Fatal("a connection closed after the idle timeout was turned off")
 	}
 }

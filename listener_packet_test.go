@@ -312,6 +312,26 @@ func TestPacketListenerIdleTimeout(t *testing.T) {
 	}
 }
 
+// SetIdleTimeout applies to the connections a running listener holds.
+func TestPacketListenerSetIdleTimeout(t *testing.T) {
+	const idle, every = time.Minute, 15 * time.Second
+	fake := timeshim.NewFake(time.Now())
+	l := newUDPListener(t, WithPacketClock(fake)) // no idle timeout yet
+	a := dialUDP(t, l)
+	send(t, l, a, "x")
+	c := acceptWithin(t, l)
+	_, _ = c.Read(make([]byte, 1))
+	l.SetIdleTimeout(idle)
+	sweep(t, fake, every, 3)
+	if !isOpen(t, c) {
+		t.Fatal("closed before the idle timeout")
+	}
+	sweep(t, fake, every, 2)
+	if isOpen(t, c) {
+		t.Fatal("the idle timeout set on the running listener did not apply")
+	}
+}
+
 func TestPacketListenerDeadlinesAndClose(t *testing.T) {
 	l := newUDPListener(t)
 	a := dialUDP(t, l)

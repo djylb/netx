@@ -211,6 +211,12 @@ func WithPacketRejectCache(size int, ttl time.Duration) PacketListenerOption {
 	}
 }
 
+// SetIdleTimeout changes the WithPacketIdleTimeout of a running listener,
+// for the connections it holds too: each is checked against d within a
+// quarter of d, so one idle for d by then is closed; a non-positive d keeps
+// idle connections from now on.
+func (l *PacketListener) SetIdleTimeout(d time.Duration) { l.conns.SetIdle(d) }
+
 // NewPacketListener starts reading pc and returns a listener for its peers.
 // The listener owns pc and closes it on Close. A read error meaning that pc
 // is closed or exhausted (net.ErrClosed, io.EOF) closes the listener; other

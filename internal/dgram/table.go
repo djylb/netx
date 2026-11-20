@@ -32,9 +32,11 @@ type Table[K comparable, S comparable] struct {
 	// an error for its reads and removes it from the table.
 	queue    func(S) *Queue
 	shutdown func(S, error)
-	wheel    *idleWheel[S] // nil without an idle timeout
-	conns    sync.Map      // K → S
-	n        atomic.Int64  // connections held
+	wheel    atomic.Pointer[idleWheel[S]] // nil without an idle timeout
+	epoch    *Epoch                       // the idle timeout's time (SetIdle)
+	idleMu   sync.Mutex                   // one SetIdle at a time
+	conns    sync.Map                     // K → S
+	n        atomic.Int64                 // connections held
 	max      int64
 	once     sync.Once // makes done for the zero Table
 	closed   atomic.Bool
@@ -64,8 +66,41 @@ func (t *Table[K, S]) Init(o TableOptions[S]) {
 	t.accept = make(chan S, max(o.Backlog, 1))
 	t.max, t.queue, t.shutdown = int64(o.Limit), o.Queue, o.Shutdown
 	t.lazy()
+	t.epoch = o.Epoch
 	if o.Idle > 0 {
-		t.wheel = newIdleWheel(t, o.Idle, o.Epoch)
+		t.wheel.Store(newIdleWheel(t, o.Idle, o.Epoch))
+	}
+}
+
+// SetIdle changes the idle timeout, also of the connections held: d longer
+// or shorter takes effect for each at its next check (within a quarter of
+// d), a non-positive d stops it. It does nothing after Close.
+func (t *Table[K, S]) SetIdle(d time.Duration) {
+	t.idleMu.Lock()
+	defer t.idleMu.Unlock()
+	if t.closed.Load() {
+		return
+	}
+	w := t.wheel.Load()
+	switch {
+	case d <= 0 && w != nil:
+		t.wheel.Store(nil)
+		w.stop()
+	case d > 0 && w != nil:
+		w.setTimeout(d)
+	case d > 0:
+		// The wheel is published first: an Add after it enters it itself,
+		// one before it is in conns for the walk; add is idempotent.
+		w = newIdleWheel(t, d, t.epoch)
+		t.wheel.Store(w)
+		t.conns.Range(func(_, v any) bool {
+			w.add(v.(S))
+			return true
+		})
+		if t.closed.Load() {
+			t.wheel.Store(nil)
+			w.stop()
+		}
 	}
 }
 
@@ -138,8 +173,8 @@ func (t *Table[K, S]) Add(k K, s S, backlog bool) (S, Result) {
 			return zero, Full
 		}
 	}
-	if t.wheel != nil {
-		t.wheel.add(s)
+	if w := t.wheel.Load(); w != nil {
+		w.add(s)
 	}
 	return s, Added
 }
@@ -148,8 +183,8 @@ func (t *Table[K, S]) Add(k K, s S, backlog bool) (S, Result) {
 func (t *Table[K, S]) drop(k K, s S) {
 	if t.conns.CompareAndDelete(k, s) {
 		t.n.Add(-1)
-		if t.wheel != nil {
-			t.wheel.remove(s)
+		if w := t.wheel.Load(); w != nil {
+			w.remove(s)
 		}
 	}
 }
@@ -197,9 +232,11 @@ func (t *Table[K, S]) Close(err error) {
 		return
 	}
 	close(t.done)
-	if t.wheel != nil {
-		t.wheel.stop() // waits for a check in progress
+	t.idleMu.Lock()
+	if w := t.wheel.Swap(nil); w != nil {
+		w.stop() // waits for a check in progress
 	}
+	t.idleMu.Unlock()
 	t.conns.Range(func(_, v any) bool {
 		t.shutdown(v.(S), err)
 		return true
@@ -268,13 +305,45 @@ func newIdleWheel[K comparable, S comparable](t *Table[K, S], d time.Duration, e
 	return w
 }
 
-// add puts a new connection into the wheel, due d from now.
+// add puts a connection into the wheel, due d from now; one in it
+// already stays where it is.
 func (w *idleWheel[S]) add(s S) {
 	w.mu.Lock()
-	if !w.stopped && !w.queue(s).Closed() {
+	if q := w.queue(s); !w.stopped && !q.Closed() && q.wheelSlot == 0 {
 		w.place(s, w.d)
 	}
 	w.mu.Unlock()
+}
+
+// setTimeout changes the timeout: every connection moves to the slot of
+// its due time under d, and the ticks follow d's quarter.
+func (w *idleWheel[S]) setTimeout(d time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	w.d, w.every = d, max(d/4, 10*time.Millisecond)
+	var all []S
+	var zero S
+	for i := range w.slots {
+		for j, s := range w.slots[i] {
+			q := w.queue(s)
+			q.wheelSlot, q.wheelPos = 0, 0
+			all = append(all, s)
+			w.slots[i][j] = zero
+		}
+		w.slots[i] = w.slots[i][:0]
+	}
+	now := w.epoch.Now()
+	for _, s := range all {
+		left := d
+		if active, accepted := w.queue(s).Activity(); accepted {
+			left = time.Duration(active + int64(d) - now)
+		}
+		w.place(s, left) // at least the next tick: an idle one goes then
+	}
+	w.timer.Reset(w.every)
 }
 
 // remove takes s out of the wheel, if it is in it.
