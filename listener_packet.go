@@ -29,6 +29,13 @@ import (
 // lasts until it is closed, so a server facing untrusted or spoofed peers
 // should set WithPacketIdleTimeout or read deadlines, and WithPacketMaxConns.
 //
+// On a UDP socket bound to a wildcard address, a connection replies from
+// the address its peer's last datagram was sent to, which its LocalAddr
+// reports, rather than from the one routing picks: on Linux, Android,
+// macOS, iOS and Windows, through the socket's packet information
+// (IP_PKTINFO, IPV6_RECVPKTINFO). WriteTo, outside any connection, and
+// other systems send from the address routing picks.
+//
 // Create it with NewPacketListener. The zero value has no packet connection:
 // its Accept waits until Close, its Addr is nil, and its Dial and WriteTo
 // fail.
@@ -39,6 +46,7 @@ type PacketListener struct {
 	reject    *rejectCache // nil without WithPacketRejectCache
 	epoch     *dgram.Epoch // of the idle timeout
 	more      []packetSocket
+	sock      packetSocket // pc's
 	conns     dgram.Table[peerKey, *packetConn]
 	opts      packetListenerOptions
 	wg        sync.WaitGroup
@@ -222,6 +230,8 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 	l.conns.Init(dgram.TableOptions[*packetConn]{Queue: (*packetConn).queue, Shutdown: (*packetConn).shutdown,
 		Epoch: l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle})
 	l.udp, _ = pc.(*net.UDPConn)
+	l.sock = packetSocket{pc: pc, udp: l.udp}
+	l.sock.pktinfo = enablePacketInfo(l.udp)
 	if cfg.rejectSize > 0 && cfg.rejectTTL > 0 {
 		l.reject = newRejectCache(cfg.rejectSize, cfg.rejectTTL, l.epoch)
 	}
@@ -229,6 +239,7 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 		if more != nil {
 			sock := packetSocket{pc: more}
 			sock.udp, _ = more.(*net.UDPConn)
+			sock.pktinfo = enablePacketInfo(sock.udp)
 			l.more = append(l.more, sock)
 		}
 	}
@@ -377,12 +388,13 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 type packetSocket struct {
 	pc  net.PacketConn
 	udp *net.UDPConn // pc, when it is one: alloc-free reads and writes
+	// pktinfo: udp is bound to a wildcard address and reports the
+	// destination of each datagram (listener_packet_pktinfo.go).
+	pktinfo bool
 }
 
 // primary returns the listener's own packet connection.
-func (l *PacketListener) primary() *packetSocket {
-	return &packetSocket{pc: l.pc, udp: l.udp}
-}
+func (l *PacketListener) primary() *packetSocket { return &l.sock }
 
 func (l *PacketListener) readLoop(sock *packetSocket) {
 	done := l.conns.Done()
@@ -405,7 +417,11 @@ func (l *PacketListener) readLoop(sock *packetSocket) {
 		// loop; errors that persist are retried with a growing delay.
 		return backoff.Wait(done)
 	}
-	if b := newBatchReader(sock.udp, l.opts.batch, l.opts.maxDatagram); b != nil {
+	oobSize := 0
+	if sock.pktinfo {
+		oobSize = pktinfoOOB
+	}
+	if b := newBatchReader(sock.udp, l.opts.batch, l.opts.maxDatagram, oobSize); b != nil {
 		for {
 			n, err := b.read()
 			if err != nil {
@@ -416,22 +432,26 @@ func (l *PacketListener) readLoop(sock *packetSocket) {
 			}
 			backoff.Reset()
 			for i := range n {
-				p, ap := b.datagram(i)
-				l.deliver(p, netutil.UnmapAddrPort(ap), nil, sock)
+				p, ap, oob := b.datagram(i)
+				l.deliver(p, netutil.UnmapAddrPort(ap), nil, sock, oob)
 			}
 		}
 	}
 	buf := make([]byte, max(l.opts.maxDatagram, dgram.MaxDatagram))
+	oob := make([]byte, oobSize)
 	for {
 		var (
-			n    int
-			ap   netip.AddrPort
-			addr net.Addr
-			err  error
+			n, oobn int
+			ap      netip.AddrPort
+			addr    net.Addr
+			err     error
 		)
-		if sock.udp != nil {
+		switch {
+		case sock.pktinfo:
+			n, oobn, _, ap, err = sock.udp.ReadMsgUDPAddrPort(buf, oob)
+		case sock.udp != nil:
 			n, ap, err = sock.udp.ReadFromUDPAddrPort(buf)
-		} else {
+		default:
 			n, addr, err = sock.pc.ReadFrom(buf)
 			if ua, ok := addr.(*net.UDPAddr); ok && ua != nil {
 				ap = ua.AddrPort()
@@ -445,12 +465,13 @@ func (l *PacketListener) readLoop(sock *packetSocket) {
 			continue
 		}
 		backoff.Reset()
-		l.deliver(buf[:min(n, l.opts.maxDatagram)], netutil.UnmapAddrPort(ap), addr, sock)
+		l.deliver(buf[:min(n, l.opts.maxDatagram)], netutil.UnmapAddrPort(ap), addr, sock, oob[:oobn])
 	}
 }
 
-// deliver queues one datagram for its peer's connection.
-func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr, sock *packetSocket) {
+// deliver queues one datagram for its peer's connection; oob is the
+// datagram's control data on a socket with pktinfo.
+func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr, sock *packetSocket, oob []byte) {
 	k := peerKey{ap: ap}
 	if !ap.IsValid() {
 		if addr == nil {
@@ -463,6 +484,9 @@ func (l *PacketListener) deliver(p []byte, ap netip.AddrPort, addr net.Addr, soc
 		if c = l.newConn(p, k, addr, sock); c == nil {
 			return
 		}
+	}
+	if sock.pktinfo {
+		c.replyFrom(oob)
 	}
 	c.q.Enqueue(p)
 }
@@ -526,6 +550,10 @@ func (l *PacketListener) writeTo(p []byte, c *packetConn) (int, error) {
 		pc, udp = c.sock.pc, c.sock.udp
 	}
 	if udp != nil && c.key.ap.IsValid() {
+		if f := c.from.Load(); f != nil {
+			n, _, err := udp.WriteMsgUDPAddrPort(p, f.oob, c.key.ap)
+			return n, err
+		}
 		return udp.WriteToUDPAddrPort(p, c.key.ap)
 	}
 	return pc.WriteTo(p, c.peer)

@@ -15,13 +15,13 @@ func TestBatchReaderKeepsZone(t *testing.T) {
 		t.Skip(err)
 	}
 	defer func() { _ = c.Close() }()
-	b := newBatchReader(c, 2, 64)
+	b := newBatchReader(c, 2, 64, 0)
 	sa := (*syscall.RawSockaddrInet6)(unsafe.Pointer(&b.names[0]))
 	sa.Family = syscall.AF_INET6
 	sa.Addr = [16]byte{0xfe, 0x80, 15: 1}
 	sa.Port = 0x3930
 	sa.Scope_id = 1
-	_, ap := b.datagram(0)
+	_, ap, _ := b.datagram(0)
 	if ap.Addr().Zone() == "" {
 		t.Fatalf("link-local source %v lost its zone (scope ID 1)", ap)
 	}

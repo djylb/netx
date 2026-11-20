@@ -240,7 +240,7 @@ func TestPacketListenerReadBatch(t *testing.T) {
 		}
 	}
 	defer func() { _ = pc.Close() }()
-	b := newBatchReader(pc, 4, 32)
+	b := newBatchReader(pc, 4, 32, 0)
 	if b == nil {
 		t.Fatal("no batch reader")
 	}
@@ -260,7 +260,7 @@ func TestPacketListenerReadBatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := range n {
-			p, ap := b.datagram(i)
+			p, ap, _ := b.datagram(i)
 			if ap != c.LocalAddr().(*net.UDPAddr).AddrPort() {
 				t.Fatalf("source %v, want %v", ap, c.LocalAddr())
 			}

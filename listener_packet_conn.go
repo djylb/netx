@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/djylb/netx/internal/dgram"
@@ -19,13 +20,39 @@ type peerKey struct {
 
 // packetConn is one peer of a PacketListener.
 type packetConn struct {
-	peer          net.Addr
-	l             *PacketListener
-	sock          *packetSocket // the packet connection it writes from; nil for l's own
+	peer net.Addr
+	l    *PacketListener
+	sock *packetSocket // the packet connection it writes from; nil for l's own
+	// from is the address the peer's last datagram was sent to, on a
+	// socket bound to a wildcard address; writes go from it. nil: the
+	// address routing picks (a socket bound to one address, or no
+	// datagram yet).
+	from          atomic.Pointer[replySource]
 	key           peerKey
 	writeDeadline dgram.Deadline
 	q             dgram.Queue
 	once          sync.Once
+}
+
+// replySource is a local address that a connection replies from and the
+// control message that sends from it.
+type replySource struct {
+	addr    netip.Addr
+	oob     []byte
+	ifindex uint32
+}
+
+// replyFrom records the destination of a datagram from the peer, given
+// its control data; it allocates only when the destination changes.
+func (c *packetConn) replyFrom(oob []byte) {
+	dst, ifindex := packetDst(oob)
+	if !dst.IsValid() {
+		return
+	}
+	if f := c.from.Load(); f != nil && f.addr == dst && f.ifindex == ifindex {
+		return
+	}
+	c.from.Store(&replySource{addr: dst, ifindex: ifindex, oob: sourceOOB(dst, ifindex)})
 }
 
 func (c *packetConn) queue() *dgram.Queue { return &c.q }
@@ -67,7 +94,18 @@ func (c *packetConn) shutdown(err error) {
 	})
 }
 
-func (c *packetConn) LocalAddr() net.Addr  { return c.l.pc.LocalAddr() }
+// LocalAddr returns the address the peer's datagrams are sent to, when
+// the packet connection is bound to a wildcard address and reports it, and
+// the packet connection's address otherwise.
+func (c *packetConn) LocalAddr() net.Addr {
+	la := c.l.pc.LocalAddr()
+	if f := c.from.Load(); f != nil {
+		if ua, ok := la.(*net.UDPAddr); ok {
+			return net.UDPAddrFromAddrPort(netip.AddrPortFrom(f.addr, uint16(ua.Port)))
+		}
+	}
+	return la
+}
 func (c *packetConn) RemoteAddr() net.Addr { return c.peer }
 
 func (c *packetConn) SetDeadline(t time.Time) error {

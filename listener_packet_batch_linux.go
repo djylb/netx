@@ -23,17 +23,19 @@ type batchReader struct {
 	conn  *net.UDPConn
 	raw   syscall.RawConn
 	fn    func(fd uintptr) bool
-	err   syscall.Errno
 	hdrs  []mmsghdr
 	iovs  []syscall.Iovec
 	names []syscall.RawSockaddrAny
 	bufs  [][]byte
+	oobs  [][]byte // control data of each datagram; nil without
+	err   syscall.Errno
 	n     int
 }
 
-// newBatchReader returns a reader of up to n datagrams of size bytes each
-// from c, or nil when n is below two or c is nil.
-func newBatchReader(c *net.UDPConn, n, size int) *batchReader {
+// newBatchReader returns a reader of up to n datagrams of size bytes each,
+// with oob bytes of control data each, from c, or nil when n is below two
+// or c is nil.
+func newBatchReader(c *net.UDPConn, n, size, oob int) *batchReader {
 	if c == nil || n < 2 {
 		return nil
 	}
@@ -52,10 +54,20 @@ func newBatchReader(c *net.UDPConn, n, size int) *batchReader {
 		h.Iov = &b.iovs[i]
 		h.Iovlen = 1
 	}
+	if oob > 0 {
+		b.oobs = make([][]byte, n)
+		for i := range n {
+			b.oobs[i] = make([]byte, oob)
+			b.hdrs[i].hdr.Control = &b.oobs[i][0]
+		}
+	}
 	b.fn = func(fd uintptr) bool {
 		for i := range b.hdrs {
 			b.hdrs[i].hdr.Namelen = syscall.SizeofSockaddrAny
 			b.hdrs[i].hdr.Flags = 0
+			if b.oobs != nil {
+				b.hdrs[i].hdr.SetControllen(len(b.oobs[i]))
+			}
 			b.hdrs[i].n = 0
 		}
 		for {
@@ -91,20 +103,24 @@ func (b *batchReader) read() (int, error) {
 }
 
 // datagram returns the i-th datagram of the last read, valid until the next
-// one, and its source.
-func (b *batchReader) datagram(i int) ([]byte, netip.AddrPort) {
+// one, its source and its control data.
+func (b *batchReader) datagram(i int) ([]byte, netip.AddrPort, []byte) {
 	p := b.bufs[i][:min(int(b.hdrs[i].n), len(b.bufs[i]))]
+	var oob []byte
+	if b.oobs != nil {
+		oob = b.oobs[i][:min(int(b.hdrs[i].hdr.Controllen), len(b.oobs[i]))]
+	}
 	name := &b.names[i]
 	switch name.Addr.Family {
 	case syscall.AF_INET:
 		sa := (*syscall.RawSockaddrInet4)(unsafe.Pointer(name))
 		port := binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&sa.Port))[:])
-		return p, netip.AddrPortFrom(netip.AddrFrom4(sa.Addr), port)
+		return p, netip.AddrPortFrom(netip.AddrFrom4(sa.Addr), port), oob
 	case syscall.AF_INET6:
 		sa := (*syscall.RawSockaddrInet6)(unsafe.Pointer(name))
 		port := binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&sa.Port))[:])
 		ip := netip.AddrFrom16(sa.Addr)
-		return p, netip.AddrPortFrom(ip.WithZone(netutil.ScopeZone(ip, sa.Scope_id)), port)
+		return p, netip.AddrPortFrom(ip.WithZone(netutil.ScopeZone(ip, sa.Scope_id)), port), oob
 	}
-	return p, netip.AddrPort{}
+	return p, netip.AddrPort{}, oob
 }

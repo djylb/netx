@@ -817,6 +817,12 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   which Linux and Android spread peers by source (elsewhere it returns
   `netx.ErrReusePortUnsupported` for more than one). A connection replies
   from the socket its peer came through.
+- On a socket bound to a wildcard address, a connection replies from the
+  address its peer's last datagram was sent to, and its `LocalAddr` reports
+  that address, on Linux, Android, macOS, iOS and Windows (`IP_PKTINFO`,
+  `IPV6_RECVPKTINFO`); a host with several addresses on the peer's path
+  otherwise answers from the one routing picks, which the peer or its NAT
+  drops. `l.WriteTo` and other systems send from the routed address.
 - `WithPacketReadBatch(n)` reads up to `n` datagrams per system call with
   `recvmmsg` on Linux and Android, holding `n` buffers of the
   `WithPacketMaxDatagram` size per read loop; elsewhere datagrams are read

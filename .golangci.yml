@@ -111,6 +111,12 @@ linters:
         linters:
           - gosec
         text: G103
+      # And its packet information codec, which reads and writes struct
+      # cmsghdr in the platform's layout.
+      - path: ^listener_packet_pktinfo\.go$
+        linters:
+          - gosec
+        text: G103
       # Tests listen and dial on loopback with the plain net functions, bind
       # and configure TLS as the test needs (self-signed, unverified), use
       # local paths and weak randomness, and run the test binary by path.
