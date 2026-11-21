@@ -391,8 +391,12 @@ type halfConn struct {
 // writes block two ends that write at once until one reads. CloseWrite ends
 // the writing direction alone, and after SetLinger(0) Close resets the
 // connection: the peer's reads and writes fail with ECONNRESET.
-func Pipe() (net.Conn, net.Conn) { return halfPipe() }
+func Pipe() (net.Conn, net.Conn) {
+	ab, ba := newStreamDir(), newStreamDir()
+	return &halfConn{r: ba, w: ab}, &halfConn{r: ab, w: ba}
+}
 
+// halfPipe is Pipe with the concrete ends.
 func halfPipe() (*halfConn, *halfConn) {
 	ab, ba := newStreamDir(), newStreamDir()
 	return &halfConn{r: ba, w: ab}, &halfConn{r: ab, w: ba}

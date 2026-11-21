@@ -54,7 +54,8 @@ func TestRelayErrorContextNotWrapped(t *testing.T) {
 	cancel(cause)
 	err := <-done
 	var re *RelayError
-	if err != cause || errors.As(err, &re) {
+	// Unwrapped: the cause itself, not a RelayError or another wrapper.
+	if !errors.Is(err, cause) || errors.Unwrap(err) != nil || errors.As(err, &re) {
 		t.Errorf("err %v", err)
 	}
 }
