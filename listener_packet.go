@@ -557,8 +557,14 @@ func (l *PacketListener) writeTo(p []byte, c *packetConn) (int, error) {
 	}
 	if udp != nil && c.key.ap.IsValid() {
 		if f := c.from.Load(); f != nil {
-			n, _, err := udp.WriteMsgUDPAddrPort(p, f.oob, c.key.ap)
-			return n, err
+			// A datagram goes out whole: report len(p) on success. On
+			// Windows a WSASendMsg that completes at once reports 0 bytes
+			// (the runtime passes no byte count), which callers would take
+			// for a short write.
+			if _, _, err := udp.WriteMsgUDPAddrPort(p, f.oob, c.key.ap); err != nil {
+				return 0, err
+			}
+			return len(p), nil
 		}
 		return udp.WriteToUDPAddrPort(p, c.key.ap)
 	}

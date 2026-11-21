@@ -86,8 +86,13 @@ func TestPacketListenerReplySource(t *testing.T) {
 							if err != nil {
 								return
 							}
-							// echo with the address the conn reports
-							_, _ = c.Write(append(buf[:n:n], []byte(" "+c.LocalAddr().String())...))
+							// echo with the address the conn reports; a
+							// datagram is written whole (Windows reports 0
+							// bytes for a WSASendMsg that completes at once)
+							out := append(buf[:n:n], []byte(" "+c.LocalAddr().String())...)
+							if w, err := c.Write(out); err == nil && w != len(out) {
+								t.Errorf("Write reported %d of %d bytes", w, len(out))
+							}
 						}
 					}()
 				}
