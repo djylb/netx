@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 )
@@ -89,7 +90,7 @@ func TestPacketListenerReplySource(t *testing.T) {
 							// echo with the address the conn reports; a
 							// datagram is written whole (Windows reports 0
 							// bytes for a WSASendMsg that completes at once)
-							out := append(buf[:n:n], []byte(" "+c.LocalAddr().String())...)
+							out := slices.Concat(buf[:n], []byte(" "+c.LocalAddr().String()))
 							if w, err := c.Write(out); err == nil && w != len(out) {
 								t.Errorf("Write reported %d of %d bytes", w, len(out))
 							}
