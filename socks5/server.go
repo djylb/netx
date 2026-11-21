@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/djylb/netx"
@@ -343,11 +344,11 @@ func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
 		return ErrServerClosed
 	}
 	defer s.life.TrackConn(&c, false)
-	return s.serveConn(ctx, c)
+	return s.serveConn(ctx, c, func() bool { return s.life.HandOff(&c) })
 }
 
 // serveConn serves a tracked connection and closes it.
-func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
+func (s *Server) serveConn(ctx context.Context, c net.Conn, handOff func() bool) error {
 	defer func() { _ = c.Close() }()
 	ctx, cancel, err := s.bindContext(ctx)
 	if err != nil {
@@ -358,7 +359,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 	if err != nil {
 		return err
 	}
-	return s.serveRequest(ctx, req)
+	return s.serveRequest(ctx, req, handOff)
 }
 
 // Handshake reads a client's method negotiation, authentication and request
@@ -407,7 +408,8 @@ func (s *Server) ServeRequest(ctx context.Context, req *Request) error {
 		return err
 	}
 	defer cancel()
-	return s.serveRequest(ctx, req)
+	// The connection is the caller's, not tracked: Close ends it through ctx.
+	return s.serveRequest(ctx, req, func() bool { return !s.life.IsClosed() })
 }
 
 // bindContext returns a context that also ends with Close, or ErrServerClosed
@@ -443,12 +445,26 @@ func (s *Server) handshake(ctx context.Context, c net.Conn) (*Request, error) {
 	return nil, err
 }
 
-// serveRequest serves req and closes its connection.
-func (s *Server) serveRequest(ctx context.Context, req *Request) error {
+// serveRequest serves req and closes its connection. handOff gives the
+// connection to the relay of a tunnel, as serve.Tracker.HandOff does.
+func (s *Server) serveRequest(ctx context.Context, req *Request, handOff func() bool) error {
 	defer func() { _ = req.Conn.Close() }()
-	// Ending ctx, as Close does, ends the exchange whatever it waits for.
-	stop := context.AfterFunc(ctx, func() { _ = req.Conn.Close() })
+	// Ending ctx, as Close does, ends the exchange whatever it waits for,
+	// except a tunnel, whose relay then aborts the connection.
+	var tunnel atomic.Bool
+	stop := context.AfterFunc(ctx, func() {
+		if !tunnel.Load() {
+			_ = req.Conn.Close()
+		}
+	})
 	defer stop()
+	own := func() bool {
+		if !handOff() {
+			return false
+		}
+		tunnel.Store(true)
+		return true
+	}
 	if s.Allow != nil {
 		if err := s.Allow(ctx, req); err != nil {
 			code := ReplyFor(err)
@@ -471,7 +487,7 @@ func (s *Server) serveRequest(ctx context.Context, req *Request) error {
 	}
 	switch {
 	case req.Command == CmdConnect:
-		return s.connect(ctx, req)
+		return s.connect(ctx, req, own)
 	case req.Command == CmdUDPAssociate && req.Version != Version4 && (s.UDPSocket != nil || s.ListenUDP != nil):
 		return s.associate(ctx, req)
 	}
@@ -601,23 +617,25 @@ func (s *Server) authenticators() []Authenticator {
 	return s.Auth
 }
 
-func (s *Server) connect(ctx context.Context, req *Request) error {
+// connect serves a CONNECT request with a tunnel. own makes the relay the
+// client connection's owner, which then alone ends it, as Close does, with
+// a reset.
+func (s *Server) connect(ctx context.Context, req *Request, own func() bool) error {
 	dialCtx, cancel := context.WithTimeout(ctx, netutil.Timeout(s.DialTimeout, DefaultDialTimeout))
 	target, err := s.dial(dialCtx, req)
 	cancel()
 	if err != nil {
 		return refuse(req, ReplyFor(err), err)
 	}
+	defer func() { _ = target.Close() }()
+	// Ending ctx ends the relay, which aborts both ends, a relay waiting on
+	// the target after the client half-closed too.
+	if !own() {
+		return ErrServerClosed
+	}
 	if err = req.Reply(ReplySucceeded, netx.AddrFromNetAddr(target.LocalAddr())); err != nil {
-		_ = target.Close()
 		return err
 	}
-	// Ending ctx closes the client connection; the target is closed too, or
-	// a relay waiting on it, for example after the client half-closed, would
-	// outlive Close.
-	stop := context.AfterFunc(ctx, func() { _ = target.Close() })
-	defer stop()
-	defer func() { _ = target.Close() }()
 	opts := []netx.RelayOption{netx.WithRelayHalfClose()}
 	if s.RelayOptions != nil {
 		opts = append(opts, s.RelayOptions(req)...)
@@ -661,9 +679,11 @@ func (s *Server) ActiveConns() int {
 
 // Close stops the listeners passed to Serve, closes the connections being
 // served, ends the UDP associations, closing UDPSocket, and ends the
-// Handshake and ServeRequest calls in progress. Serve then returns
-// ErrServerClosed. Later calls, also of Shutdown, wait until the first has
-// finished and return nil.
+// Handshake and ServeRequest calls in progress. A CONNECT tunnel ends with a
+// reset, as netx.Relay ends when its context does, so that its peers do not
+// take a cut transfer for a complete one. Serve then returns ErrServerClosed.
+// Later calls, also of Shutdown, wait until the first has finished and
+// return nil.
 func (s *Server) Close() error {
 	return s.life.Close(func() error {
 		var shared *udpRelay

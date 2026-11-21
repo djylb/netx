@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx"
 	"github.com/djylb/netx/httphead"
 	"github.com/djylb/netx/httpproxy"
 	"github.com/djylb/netx/internal/nettest"
@@ -727,8 +728,10 @@ func TestCloseEndsTunnelsAndShutdownWaits(t *testing.T) {
 		t.Fatalf("Shutdown() with a live tunnel = %v, want DeadlineExceeded", err)
 	}
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Read(make([]byte, 1)); err != io.EOF {
-		t.Fatalf("tunnel read after Close = %v, want EOF", err)
+	// A tunnel cut by Close ends with a reset, never an end of data, whether
+	// Close or the relay's abort reaches the connection first.
+	if _, err := c.Read(make([]byte, 1)); !netx.IsConnReset(err) {
+		t.Fatalf("tunnel read after Close = %v, want a connection reset", err)
 	}
 	waitFor(t, "the connections to end", func() bool { return s.ActiveConns() == 0 })
 	if err := s.ServeConn(context.Background(), c); !errors.Is(err, httpproxy.ErrServerClosed) {

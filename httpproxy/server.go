@@ -340,7 +340,7 @@ func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
 		return ErrServerClosed
 	}
 	defer s.life.TrackConn(&c, false)
-	return s.serveConn(ctx, c)
+	return s.serveConn(ctx, c, func() bool { return s.life.HandOff(&c) })
 }
 
 // Validate reports a negative setting other than MaxIdleConns, whose
@@ -375,8 +375,10 @@ func (s *Server) IdleConns() int { return s.targets().idleConns() }
 
 // Close stops the listeners passed to Serve, closes the connections being
 // served and those kept to targets, and ends the relays and hooks in
-// progress. Serve then returns ErrServerClosed. Later calls, also of
-// Shutdown, wait until the first has finished and return nil.
+// progress. A CONNECT tunnel ends with a reset, as netx.Relay ends when its
+// context does, so that its peers do not take a cut transfer for a complete
+// one. Serve then returns ErrServerClosed. Later calls, also of Shutdown,
+// wait until the first has finished and return nil.
 func (s *Server) Close() error {
 	return s.life.Close(func() error {
 		s.targets().close()
@@ -448,6 +450,11 @@ type serverConn struct {
 	// request bytes perhaps unread, which closing at once could turn into a
 	// reset that destroys the reply.
 	linger bool
+	// handOff gives the connection to the relay of a tunnel; see
+	// serve.Tracker.HandOff. tunnel is set once it has, which leaves ending
+	// the connection to the relay.
+	handOff func() bool
+	tunnel  atomic.Bool
 }
 
 // maxKeptBuf bounds the buffers kept between requests.
@@ -462,17 +469,22 @@ func (sc *serverConn) trimBuffers() {
 }
 
 // serveConn serves a tracked connection and closes it.
-func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
+func (s *Server) serveConn(ctx context.Context, c net.Conn, handOff func() bool) error {
 	defer func() { _ = c.Close() }()
 	ctx, cancel, ok := s.life.Bind(ctx)
 	if !ok {
 		return ErrServerClosed
 	}
 	defer cancel()
-	// Ending ctx, as Close does, ends the connection whatever it waits for.
-	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	sc := &serverConn{s: s, c: c, br: getReader(c), handOff: handOff}
+	// Ending ctx, as Close does, ends the connection whatever it waits for,
+	// except a tunnel, whose relay then aborts it.
+	stop := context.AfterFunc(ctx, func() {
+		if !sc.tunnel.Load() {
+			_ = c.Close()
+		}
+	})
 	defer stop()
-	sc := &serverConn{s: s, c: c, br: getReader(c)}
 	defer func() {
 		if sc.linger {
 			sc.lingerClose()
@@ -847,9 +859,15 @@ func (sc *serverConn) connect(ctx context.Context, req *Request) error {
 		sc.reply(req, code, nil, true)
 		return refusal(code, err)
 	}
-	// Ending ctx closes the client connection, which ends the reply, and
-	// the relay, which closes both ends.
+	// Ending ctx ends the relay, which aborts both ends. The tunnel is the
+	// relay's from here on, the reply included, which a fresh connection
+	// takes without blocking: nothing else closes the client first and turns
+	// the reset into an end of data.
 	defer func() { _ = target.Close() }()
+	if !sc.handOff() {
+		return ErrServerClosed
+	}
+	sc.tunnel.Store(true)
 	if _, err = sc.c.Write(connectReply); err != nil {
 		return err
 	}

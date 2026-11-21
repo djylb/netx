@@ -22,7 +22,7 @@ type Tracker struct {
 	// Tracked by pointer, as in net/http, since the dynamic types of a
 	// net.Listener or a net.Conn need not be comparable.
 	listeners map[*net.Listener]struct{} // under mu
-	conns     map[*net.Conn]struct{}     // under mu
+	conns     map[*net.Conn]bool         // under mu; true once handed to a relay
 	drained   chan struct{}              // closed when conns empties during Shutdown; under mu
 	closeDone chan struct{}              // closed when the first Close has returned; under mu
 	mu        sync.Mutex
@@ -31,12 +31,13 @@ type Tracker struct {
 }
 
 // Serve accepts connections on l with accept and serves each with serve, in
-// its own goroutine, under the context that Close cancels, passing the
-// errors that end them to onError. It returns closedErr after Shutdown or
-// Close, which close l, or the error that ended accepting.
+// its own goroutine, under the context that Close cancels, passing it the
+// connection's HandOff, and passes the errors that end them to onError. It
+// returns closedErr after Shutdown or Close, which close l, or the error
+// that ended accepting.
 func (t *Tracker) Serve(l net.Listener, closedErr error,
 	accept func(context.Context, net.Listener) (net.Conn, error),
-	serve func(context.Context, net.Conn) error,
+	serve func(ctx context.Context, c net.Conn, handOff func() bool) error,
 	onError func(net.Conn, error)) error {
 	if !t.track(&l, true) {
 		_ = l.Close()
@@ -62,7 +63,7 @@ func (t *Tracker) Serve(l net.Listener, closedErr error,
 		}
 		go func() {
 			defer t.TrackConn(&c, false)
-			if err := serve(ctx, c); err != nil {
+			if err := serve(ctx, c, func() bool { return t.HandOff(&c) }); err != nil {
 				onError(c, err)
 			}
 		}()
@@ -116,15 +117,33 @@ func (t *Tracker) TrackConn(c *net.Conn, add bool) bool {
 			return false
 		}
 		if t.conns == nil {
-			t.conns = make(map[*net.Conn]struct{})
+			t.conns = make(map[*net.Conn]bool)
 		}
-		t.conns[c] = struct{}{}
+		t.conns[c] = false
 		return true
 	}
 	delete(t.conns, c)
 	if len(t.conns) == 0 && t.drained != nil {
 		close(t.drained)
 		t.drained = nil
+	}
+	return true
+}
+
+// HandOff gives a tracked connection to a relay that ends with the context
+// from Bind, which then alone ends the connection, abnormally: Close leaves
+// it open, so that its own close does not race the relay's abort and the
+// peer sees a reset, never an end of data, whichever comes first. It
+// returns false after Close, which closes the connection as it does any
+// other, and the caller must not start the relay.
+func (t *Tracker) HandOff(c *net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	if _, ok := t.conns[c]; ok {
+		t.conns[c] = true
 	}
 	return true
 }
@@ -215,7 +234,7 @@ func (t *Tracker) Shutdown(ctx context.Context, closeFn func() error) error {
 }
 
 // Close cancels the context, closes the listeners and the tracked
-// connections and then calls extra, if not nil, for what else the server
+// connections, except those handed off, and then calls extra, if not nil, for what else the server
 // closes. Later calls wait until the first has finished and return nil.
 func (t *Tracker) Close(extra func() error) error {
 	t.mu.Lock()
@@ -239,7 +258,12 @@ func (t *Tracker) Close(extra func() error) error {
 	// Close outside the lock: closing a *tls.Conn can block for seconds while
 	// it sends close_notify, and serving goroutines need the lock to finish.
 	listeners := slices.Collect(maps.Keys(t.listeners))
-	conns := slices.Collect(maps.Keys(t.conns))
+	var conns []*net.Conn
+	for c, handedOff := range t.conns {
+		if !handedOff {
+			conns = append(conns, c)
+		}
+	}
 	t.mu.Unlock()
 	var errs []error
 	for _, l := range listeners {

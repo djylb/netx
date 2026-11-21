@@ -838,3 +838,35 @@ func TestServerCloseEndsRelayWaitingOnTarget(t *testing.T) {
 		t.Fatal("ServeConn kept relaying after Close")
 	}
 }
+
+// Close cuts a tunnel with a reset on both ends, never an end of data, whether
+// Close or the relay's abort reaches a connection first.
+func TestServerCloseResetsTunnelEnds(t *testing.T) {
+	target, targetConns := silentTarget(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socks5.Server{}
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(ln) }()
+	c, err := (&socks5.Dialer{ProxyAddr: ln.Addr().String()}).Dial("tcp", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	tc := <-targetConns
+	defer func() { _ = tc.Close() }()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-served; !errors.Is(err, socks5.ErrServerClosed) {
+		t.Fatalf("Serve() = %v", err)
+	}
+	for name, conn := range map[string]net.Conn{"client": c, "target": tc} {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Read(make([]byte, 1)); !netx.IsConnReset(err) {
+			t.Errorf("%s Read() after Close = %v, want a connection reset", name, err)
+		}
+	}
+}
