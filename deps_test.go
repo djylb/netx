@@ -44,6 +44,7 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/wsconn", false, false},     // httphead; wsconn/deps_test.go checks the rest
 		{module + "/wsconn/wshttp", true, false},
 		{module + "/safedial", false, false},
+		{module + "/memnet", false, true},
 	}
 	internal, err := exec.Command(goCmd, "list", module+"/internal/...").Output()
 	if err != nil {
