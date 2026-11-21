@@ -163,12 +163,6 @@ linters:
       - path: _test\.go
         linters:
           - canonicalheader
-      # Tests wait for a goroutine on its done channel, of errors that the
-      # test does not look at.
-      - path: _test\.go
-        linters:
-          - errcheck
-        text: "Error return value is not checked"
       # Tests build errors in place, repeat their case names and unpack
       # fixtures they partly ignore.
       - path: (_test\.go|internal/leakcheck/)
