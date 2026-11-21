@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"slices"
@@ -38,8 +39,16 @@ type SelfSignedOptions struct {
 	// the certificates it issues may be used for.
 	ExtKeyUsage []x509.ExtKeyUsage
 	// ValidFor is how long the certificate is valid; one year if not
-	// positive. Validity starts an hour in the past to allow for clock skew.
+	// positive. Validity starts an hour before Now to allow for clock skew
+	// and ends ValidFor after Now.
 	ValidFor time.Duration
+	// Now is the time the certificate is made at; the zero time means
+	// time.Now(). Set it to make certificates by an injected clock.
+	Now time.Time
+	// Rand is the source of the serial number, of a generated key where
+	// the standard library takes one, and of the signature; nil means
+	// crypto/rand.Reader.
+	Rand io.Reader
 }
 
 // NewSelfSigned returns a self-signed certificate with its Leaf set, a
@@ -51,7 +60,7 @@ func NewSelfSigned(opts SelfSignedOptions) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	return create(tmpl, tmpl, key, key, nil)
+	return create(opts.Rand, tmpl, tmpl, key, key, nil)
 }
 
 // NewCA returns a self-signed certificate authority with its Leaf set, for
@@ -73,7 +82,7 @@ func NewCA(opts SelfSignedOptions) (tls.Certificate, error) {
 	tmpl.MaxPathLen, tmpl.MaxPathLenZero = 0, true
 	tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature
 	tmpl.ExtKeyUsage = slices.Clone(opts.ExtKeyUsage)
-	return create(tmpl, tmpl, key, key, nil)
+	return create(opts.Rand, tmpl, tmpl, key, key, nil)
 }
 
 // Issue returns a certificate for opts, signed by ca as NewCA returns it,
@@ -99,15 +108,19 @@ func Issue(ca tls.Certificate, opts SelfSignedOptions) (tls.Certificate, error) 
 	if tmpl.NotAfter.After(caLeaf.NotAfter) {
 		tmpl.NotAfter = caLeaf.NotAfter
 	}
-	return create(tmpl, caLeaf, key, caKey, ca.Certificate)
+	return create(opts.Rand, tmpl, caLeaf, key, caKey, ca.Certificate)
 }
 
 // baseTemplate returns the key of opts, generated if not given, and a
 // template with its serial number, validity and subject.
 func baseTemplate(opts SelfSignedOptions) (*x509.Certificate, crypto.Signer, error) {
+	rnd := opts.Rand
+	if rnd == nil {
+		rnd = rand.Reader
+	}
 	key := opts.Key
 	if key == nil {
-		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rnd)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -117,11 +130,15 @@ func baseTemplate(opts SelfSignedOptions) (*x509.Certificate, crypto.Signer, err
 	if validFor <= 0 {
 		validFor = 365 * 24 * time.Hour
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rnd, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, nil, err
 	}
-	notBefore := time.Now().Add(-time.Hour)
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	notBefore := now.Add(-time.Hour)
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		NotBefore:             notBefore,
@@ -164,10 +181,13 @@ func leafTemplate(opts SelfSignedOptions) (*x509.Certificate, crypto.Signer, err
 	return tmpl, key, nil
 }
 
-// create signs tmpl for key with parent and parentKey and returns it with
-// chain after it.
-func create(tmpl, parent *x509.Certificate, key, parentKey crypto.Signer, chain [][]byte) (tls.Certificate, error) {
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, key.Public(), parentKey)
+// create signs tmpl for key with parent and parentKey, drawing on rnd (nil:
+// crypto/rand), and returns it with chain after it.
+func create(rnd io.Reader, tmpl, parent *x509.Certificate, key, parentKey crypto.Signer, chain [][]byte) (tls.Certificate, error) {
+	if rnd == nil {
+		rnd = rand.Reader
+	}
+	der, err := x509.CreateCertificate(rnd, tmpl, parent, key.Public(), parentKey)
 	if err != nil {
 		return tls.Certificate{}, err
 	}

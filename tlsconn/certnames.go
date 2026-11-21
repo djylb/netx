@@ -96,6 +96,51 @@ func Covers(cert *x509.Certificate, name string) bool {
 	return false
 }
 
+// CanonicalSAN returns a DNS subject alternative name in the form in which
+// Names lists it: an exact name or a wildcard pattern such as *.example.com,
+// lowercase and without a trailing dot. It fails with ErrInvalidName for a
+// name that covers nothing by the rules of Names, such as *.com, a partial
+// wildcard, an IP address or a name with characters outside letters,
+// digits, hyphens and underscores. Like a certificate's names, san must be
+// ASCII; pass international names in their A-label form.
+func CanonicalSAN(san string) (string, error) {
+	base, wildcard, ok := sanName(san)
+	switch {
+	case !ok:
+		return "", ErrInvalidName
+	case wildcard:
+		return "*." + base, nil
+	}
+	return base, nil
+}
+
+// CoversName reports whether one subject alternative name in text form
+// covers name, by the rules of Names: san is a DNS name, a wildcard pattern
+// or an IP address, as stored outside a certificate (a list of the names a
+// certificate was issued for, say), and name a DNS name or an IP address. An
+// IP address covers only itself, and a DNS name or wildcard only DNS names.
+func CoversName(san, name string) bool {
+	if sanIP, ok := parseIP(san); ok {
+		ip, ok := parseIP(name)
+		return ok && ip == sanIP
+	}
+	base, wildcard, ok := sanName(san)
+	if !ok {
+		return false
+	}
+	if _, ok := parseIP(name); ok {
+		return false
+	}
+	n, err := CanonicalName(name)
+	if err != nil {
+		return false
+	}
+	if wildcard {
+		return parentOf(n) == base
+	}
+	return n == base
+}
+
 // equalLower reports whether s, lowercased in ASCII only, is lower.
 func equalLower(s, lower string) bool {
 	if len(s) != len(lower) {

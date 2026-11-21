@@ -452,3 +452,26 @@ func TestCertID(t *testing.T) {
 		t.Fatal("CertID of no certificate is not empty")
 	}
 }
+
+func TestNewSelfSignedNowRand(t *testing.T) {
+	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	var rnd countingReader
+	cert, err := NewSelfSigned(SelfSignedOptions{Hosts: []string{"a.test"}, Now: now, ValidFor: 48 * time.Hour, Rand: &rnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cert.Leaf.NotBefore.Equal(now.Add(-time.Hour)) || !cert.Leaf.NotAfter.Equal(now.Add(48*time.Hour)) {
+		t.Errorf("validity %v to %v", cert.Leaf.NotBefore, cert.Leaf.NotAfter)
+	}
+	if rnd.n == 0 {
+		t.Error("Rand not read")
+	}
+}
+
+// countingReader is crypto/rand that counts what it is asked for.
+type countingReader struct{ n int }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.n += len(p)
+	return rand.Read(p)
+}

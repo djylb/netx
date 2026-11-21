@@ -177,7 +177,8 @@ func perHost() *tls.Config {
   `ExtKeyUsage` says otherwise: `x509.ExtKeyUsageClientAuth` for a client
   certificate, or both for peers that take either side. `EncodePEM` writes it,
   or any `tls.Certificate` with an RSA, ECDSA, Ed25519 or ECDH key, as PEM that
-  `tls.X509KeyPair` reads back.
+  `tls.X509KeyPair` reads back. `Now` and `Rand` make it by an injected clock
+  and randomness source; validity ends `ValidFor` after `Now`.
 - For a private network, `NewCA` makes a self-signed CA that signs leaves
   only (MaxPathLen 0), and `Issue(ca, opts)` signs a leaf for `opts.Hosts`
   with `opts.ExtKeyUsage` (server by default, `ClientAuth` for mutual TLS),
@@ -356,7 +357,11 @@ func prove(challenger *tlsconn.Challenger, leaf *x509.Certificate, userKey crypt
   `CanonicalName`: lowercase, without a trailing dot, international labels
   as A-labels (`bücher.test` is `xn--bcher-kva.test`). `Names.Covers`
   answers by binary search; `Covers` checks a certificate without
-  allocating.
+  allocating. For names kept outside a certificate, such as the list a
+  certificate was issued for, `CoversName(san, name)` applies the same rules
+  to one name in text form (DNS name, wildcard or IP address), and
+  `CanonicalSAN` gives a DNS name or wildcard in the form `Names` lists it, or
+  `ErrInvalidName` for one that covers nothing.
 - `VerifyDomain(chain, domain, opts)` verifies the chain and requires the
   certificate to cover the domain itself (`Apex`, exactly or by a wildcard
   for its parent, then with `ApexByWildcard`). One that covers only names

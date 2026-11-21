@@ -6,6 +6,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -335,5 +336,38 @@ func BenchmarkCovers(b *testing.B) {
 				n.Covers(bc.host)
 			}
 		})
+	}
+}
+
+// TestCoversNameAgreesWithCovers checks CoversName and CanonicalSAN against
+// Covers and CertNames on a certificate holding the one name.
+func TestCoversNameAgreesWithCovers(t *testing.T) {
+	sans := []string{"a.com", "A.Com.", "*.a.com", "*.A.COM.", "*.com", "f*.a.com", "a.*.com", "*.", "", "1.2.3.4",
+		"::1", "a..com", "-a.com", "a_b.com", "xn--bcher-kva.example", "bücher.example", "1.2.3", "*.1.2.3", "10.0.0.1"}
+	names := []string{"a.com", "A.COM.", "x.a.com", "x.y.a.com", ".a.com", "com", "x.com", "1.2.3.4", "::1",
+		"::ffff:1.2.3.4", "a_b.com", "xn--bcher-kva.example", "bücher.example", "fa.a.com", "", "10.0.0.1"}
+	for _, san := range sans {
+		cert := &x509.Certificate{DNSNames: []string{san}}
+		if ip, err := netip.ParseAddr(san); err == nil {
+			cert = &x509.Certificate{IPAddresses: []net.IP{ip.AsSlice()}}
+		}
+		for _, name := range names {
+			if got, want := CoversName(san, name), Covers(cert, name); got != want {
+				t.Errorf("CoversName(%q, %q) = %v, Covers = %v", san, name, got, want)
+			}
+		}
+		if cert.DNSNames == nil {
+			continue
+		}
+		n := CertNames(cert)
+		c, err := CanonicalSAN(san)
+		switch {
+		case len(n.Invalid) > 0:
+			if err == nil {
+				t.Errorf("CanonicalSAN(%q) = %q, want an error", san, c)
+			}
+		case len(n.DNS) == 1 && c != n.DNS[0], len(n.Wildcards) == 1 && c != n.Wildcards[0], err != nil:
+			t.Errorf("CanonicalSAN(%q) = %q %v, CertNames %+v", san, c, err, n)
+		}
 	}
 }
