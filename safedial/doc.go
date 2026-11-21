@@ -22,7 +22,8 @@
 // unicast addresses, as netx.ScopeOf classifies them. AllowScopes,
 // DenyScopes, AllowPrefixes, DenyPrefixes, AllowPorts, DenyPorts,
 // AllowPortRange, DenyPortRange, AllowNames and DenyNames build others,
-// and All and Any combine them.
+// All and Any combine them, and WithEmbeddedIPv4 makes a range policy
+// judge translation addresses also by the IPv4 address they embed.
 //
 // For relays that send datagrams to many destinations, such as SOCKS5 UDP
 // associations, WrapPacketConn and WrapAddrPacketConn check the destination

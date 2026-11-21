@@ -238,3 +238,36 @@ func TestPolicyAllocs(t *testing.T) {
 		t.Errorf("%v allocations per check", n)
 	}
 }
+
+func TestWithEmbeddedIPv4(t *testing.T) {
+	deny := DenyPrefixes(netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"))
+	p := WithEmbeddedIPv4(deny)
+	for s, ok := range map[string]bool{
+		"127.0.0.1":          false,
+		"::ffff:127.0.0.1":   false,
+		"64:ff9b::7f00:1":    false,
+		"64:ff9b::a9fe:a9fe": false,
+		"2002:a9fe:a9fe::1":  false,
+		"::7f00:1":           false,
+		"64:ff9b::808:808":   true,
+		"::1":                true,
+		"2001:db8::1":        true,
+	} {
+		err := p.Check(addrT(s, 80))
+		if (err == nil) != ok || err != nil && !errors.Is(err, ErrPrefix) {
+			t.Errorf("%s: %v, want allowed %v", s, err, ok)
+		}
+		if s == "64:ff9b::7f00:1" && deny.Check(addrT(s, 80)) != nil {
+			t.Errorf("unwrapped DenyPrefixes refuses %s", s)
+		}
+	}
+	if err := p.Check(nameT("example.com", 80)); err != nil {
+		t.Errorf("name: %v", err)
+	}
+	if err := WithEmbeddedIPv4(nil).Check(addrT("127.0.0.1", 80)); err != nil {
+		t.Errorf("nil policy: %v", err)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = p.Check(addrT("64:ff9b::808:808", 80)) }); n != 0 {
+		t.Errorf("Check allocates %v times", n)
+	}
+}

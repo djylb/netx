@@ -2,6 +2,7 @@ package netx
 
 import (
 	"encoding/binary"
+	"math/rand/v2"
 	"net/netip"
 	"strings"
 	"testing"
@@ -261,5 +262,75 @@ func BenchmarkScopeOf(b *testing.B) {
 				ScopeOf(a)
 			}
 		})
+	}
+}
+
+func TestEmbeddedIPv4(t *testing.T) {
+	for in, want := range map[string]string{
+		"::ffff:10.1.2.3":               "10.1.2.3",
+		"64:ff9b::a9fe:a9fe":            "169.254.169.254",
+		"64:ff9b::808:808":              "8.8.8.8",
+		"64:ff9b:1:a9fe:a9:fea9:fe00::": "169.254.169.254",
+		"2002:a9fe:a9fe::":              "169.254.169.254",
+		"2002:7f00:1:1::1%eth0":         "127.0.0.1",
+		"::7f00:1":                      "127.0.0.1",
+		"::2":                           "0.0.0.2",
+		"::1":                           "",
+		"::":                            "",
+		"2001:db8::1":                   "",
+		"2001::1":                       "", // Teredo: two addresses
+		"64:ff9b:2::1":                  "",
+		"10.0.0.1":                      "",
+		"::1:0:0:1":                     "",
+	} {
+		v4, ok := EmbeddedIPv4(netip.MustParseAddr(in))
+		if got := ""; ok {
+			got = v4.String()
+			if !v4.Is4() || got != want {
+				t.Errorf("EmbeddedIPv4(%s) = %s, want %q", in, got, want)
+			}
+		} else if want != "" {
+			t.Errorf("EmbeddedIPv4(%s) = none, want %s", in, want)
+		}
+	}
+	if _, ok := EmbeddedIPv4(netip.Addr{}); ok {
+		t.Error("the zero Addr embeds an address")
+	}
+}
+
+// TestEmbeddedIPv4Layout checks the bit arithmetic against the byte
+// layouts of the RFCs over random addresses of each prefix.
+func TestEmbeddedIPv4Layout(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	layouts := []struct {
+		prefix netip.Prefix
+		bytes  [4]int
+	}{
+		{netip.MustParsePrefix("64:ff9b::/96"), [4]int{12, 13, 14, 15}},
+		{netip.MustParsePrefix("64:ff9b:1::/48"), [4]int{6, 7, 9, 10}},
+		{netip.MustParsePrefix("2002::/16"), [4]int{2, 3, 4, 5}},
+		{netip.MustParsePrefix("::/96"), [4]int{12, 13, 14, 15}},
+	}
+	for _, l := range layouts {
+		for range 1000 {
+			var b [16]byte
+			for i := range b {
+				b[i] = byte(r.Uint32())
+			}
+			p := l.prefix.Addr().As16()
+			for i := range l.prefix.Bits() {
+				m := byte(0x80) >> (i % 8)
+				b[i/8] = b[i/8]&^m | p[i/8]&m
+			}
+			a := netip.AddrFrom16(b)
+			if a == netip.IPv6Unspecified() || a == netip.IPv6Loopback() {
+				continue
+			}
+			v4, ok := EmbeddedIPv4(a)
+			want := netip.AddrFrom4([4]byte{b[l.bytes[0]], b[l.bytes[1]], b[l.bytes[2]], b[l.bytes[3]]})
+			if !ok || v4 != want {
+				t.Fatalf("EmbeddedIPv4(%s) = %s %v, want %s", a, v4, ok, want)
+			}
+		}
 	}
 }

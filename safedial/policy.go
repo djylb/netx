@@ -187,6 +187,36 @@ func AllowPrefixes(prefixes ...netip.Prefix) Policy { return newPrefixPolicy(pre
 // prefix makes it refuse every address.
 func DenyPrefixes(prefixes ...netip.Prefix) Policy { return newPrefixPolicy(prefixes, false) }
 
+// embeddedPolicy judges an address also by the IPv4 address it embeds.
+type embeddedPolicy struct{ p Policy }
+
+func (e embeddedPolicy) Check(t Target) error {
+	if err := e.p.Check(t); err != nil {
+		return err
+	}
+	if v4, ok := netx.EmbeddedIPv4(t.Addr); ok {
+		t.Addr = v4
+		return e.p.Check(t)
+	}
+	return nil
+}
+
+// WithEmbeddedIPv4 returns a policy that allows a target that p allows
+// both as it is and, for an address that embeds an IPv4 address
+// (netx.EmbeddedIPv4: NAT64, 6to4, IPv4-compatible), with that IPv4
+// address in its place, and otherwise returns the reason p gives. Range
+// policies such as DenyPrefixes match an address by its own form alone;
+// wrapped, a denied IPv4 range cannot be reached through a translator under
+// an IPv6 spelling. Scope policies need no wrapping, as netx.ScopeOf already
+// judges translation addresses by what they embed. A nil p allows every
+// target, as All() does.
+func WithEmbeddedIPv4(p Policy) Policy {
+	if p == nil {
+		return All()
+	}
+	return embeddedPolicy{p}
+}
+
 // portPolicy holds a bit for each port.
 type portPolicy struct {
 	set   [1 << 16 / 64]uint64

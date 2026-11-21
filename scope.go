@@ -274,10 +274,9 @@ func scope6(hi, lo uint64) Scope {
 			continue
 		}
 		switch e.scope {
-		case scopeNAT64:
-			return embedded(uint32(lo))
-		case scope6to4:
-			return embedded(uint32(hi >> 16))
+		case scopeNAT64, scope6to4:
+			v, _ := embeddedIPv4(hi, lo)
+			return embedded(v)
 		case scopeTeredo:
 			if scope4(uint32(hi)) != ScopeGlobal {
 				return ScopeReserved
@@ -289,6 +288,52 @@ func scope6(hi, lo uint64) Scope {
 		return e.scope
 	}
 	return ScopeReserved
+}
+
+// EmbeddedIPv4 returns the IPv4 address that a carries in its IPv6 form,
+// the address that a translator or relay on the path delivers to: an
+// IPv4-mapped address (::ffff:a.b.c.d), the NAT64 well-known prefix
+// 64:ff9b::/96 (RFC 6052), the NAT64 local-use prefix 64:ff9b:1::/48 in the
+// RFC 6052 /48 layout (RFC 8215), 6to4 2002::/16 (RFC 3056) and the
+// deprecated IPv4-compatible form ::a.b.c.d (RFC 4291), apart from :: and
+// ::1, which are IPv6's own. It reports false for an IPv4 address and for an
+// IPv6 address of any other form; a Teredo address carries two IPv4
+// addresses, and ScopeOf judges both. The zone is ignored.
+//
+// A policy that judges addresses by range should judge an address that
+// embeds IPv4 also by the embedded address, so that the same host cannot be
+// reached under another spelling.
+func EmbeddedIPv4(a netip.Addr) (netip.Addr, bool) {
+	if a.Is4In6() {
+		return a.Unmap(), true
+	}
+	if !a.Is6() {
+		return netip.Addr{}, false
+	}
+	b := a.As16()
+	v, ok := embeddedIPv4(binary.BigEndian.Uint64(b[:8]), binary.BigEndian.Uint64(b[8:]))
+	if !ok {
+		return netip.Addr{}, false
+	}
+	var v4 [4]byte
+	binary.BigEndian.PutUint32(v4[:], v)
+	return netip.AddrFrom4(v4), true
+}
+
+// embeddedIPv4 returns the IPv4 address that the IPv6 address hi:lo embeds,
+// for the forms of EmbeddedIPv4 other than IPv4-mapped.
+func embeddedIPv4(hi, lo uint64) (uint32, bool) {
+	switch {
+	case match6(hi, lo, 0x0064ff9b00000000, 0, 96): // NAT64, bits 96 to 127
+		return uint32(lo), true
+	case match6(hi, lo, 0x0064ff9b00010000, 0, 48): // NAT64 local use, bits 48 to 63 and 72 to 87
+		return uint32(hi&0xffff)<<16 | uint32(lo>>40)&0xffff, true
+	case match6(hi, lo, 0x2002000000000000, 0, 16): // 6to4, bits 16 to 47
+		return uint32(hi >> 16), true
+	case hi == 0 && lo>>32 == 0 && lo > 1: // IPv4-compatible, not :: and ::1
+		return uint32(lo), true
+	}
+	return 0, false
 }
 
 // embedded returns the scope of a translation address that embeds v.

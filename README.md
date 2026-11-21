@@ -891,6 +891,9 @@ case netx.ScopePrivate, netx.ScopeShared, netx.ScopeLinkLocal:
   `ScopeShared` (100.64.0.0/10), `ScopeMulticast`, `ScopeBroadcast`,
   `ScopeDocumentation`, `ScopeBenchmarking`, `ScopeReserved` and
   `ScopeGlobal`.
+- `EmbeddedIPv4` returns the IPv4 address an IPv6 address carries
+  (IPv4-mapped, NAT64 64:ff9b::/96 and 64:ff9b:1::/48, 6to4, IPv4-compatible);
+  `ScopeOf` uses the same extraction.
 - IPv4-mapped addresses are classified as IPv4; zones are ignored. Globally
   reachable entries inside reserved blocks, such as the PCP and TURN anycast
   addresses 192.0.0.9 and 2001:1::1, are global; IPv6 outside 2000::/3 that
@@ -2191,7 +2194,9 @@ if errors.As(err, &denied) { // errors.Is(err, safedial.ErrDenied) too
   `AllowNames` and `DenyNames` (`example.com` matches it and its subdomains,
   `*.example.com` only subdomains; internationalised patterns match in
   their punycode form, and a `DenyNames` pattern that is no host name
-  refuses every name), and `All`/`Any` to combine them. An allowed name
+  refuses every name), `All`/`Any` to combine them, and `WithEmbeddedIPv4`,
+  which judges an address that embeds IPv4 (NAT64, 6to4, IPv4-compatible)
+  also as that IPv4 address, so that prefix rules hold under every spelling. An allowed name
   reaches whatever its DNS points to, so pair `AllowNames` with the scopes
   or prefixes its names may reach; name rules do not stop another name or
   an IP address that reaches the same host. A target with neither an
