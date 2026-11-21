@@ -284,8 +284,8 @@ func TestEmbeddedIPv4(t *testing.T) {
 		"::1:0:0:1":                     "",
 	} {
 		v4, ok := EmbeddedIPv4(netip.MustParseAddr(in))
-		if got := ""; ok {
-			got = v4.String()
+		if ok {
+			got := v4.String()
 			if !v4.Is4() || got != want {
 				t.Errorf("EmbeddedIPv4(%s) = %s, want %q", in, got, want)
 			}

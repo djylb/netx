@@ -75,7 +75,7 @@ func (n *Net) lose(p float64) bool {
 		return true
 	}
 	if n.Rand == nil {
-		return rand.Float64() < p
+		return rand.Float64() < p //nolint:gosec // simulated loss, not a secret: a seeded Net.Rand replaces it
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()

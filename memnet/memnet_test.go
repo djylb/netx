@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -112,7 +111,7 @@ func TestLinkOff(t *testing.T) {
 	if _, err := c.Write([]byte("x")); !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
 		t.Errorf("write on a cut link: %v", err)
 	}
-	if _, err := n.Dial(context.Background(), "tcp", addr); !errors.Is(err, syscall.ECONNREFUSED) {
+	if _, err := n.Dial(context.Background(), "tcp", addr); !errors.Is(err, errCodeRefused) {
 		t.Errorf("dial over a cut link: %v", err)
 	}
 	n.SetLink(addr, LinkPair{})
@@ -157,8 +156,8 @@ func TestPipeBuffersCrossWrites(t *testing.T) {
 // CloseWrite ends one direction: the peer reads EOF and can still write.
 func TestHalfClose(t *testing.T) {
 	a, b := Pipe()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 	if err := a.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
@@ -177,10 +176,10 @@ func TestHalfClose(t *testing.T) {
 // After SetLinger(0), Close resets: the peer fails with ECONNRESET.
 func TestLingerZeroResets(t *testing.T) {
 	a, b := Pipe()
-	defer b.Close()
-	_ = a.(interface{ SetLinger(int) error }).SetLinger(0)
+	defer func() { _ = b.Close() }()
+	_ = a.(interface{ SetLinger(sec int) error }).SetLinger(0)
 	_ = a.Close()
-	if _, err := b.Read(make([]byte, 1)); !errors.Is(err, syscall.ECONNRESET) {
+	if _, err := b.Read(make([]byte, 1)); !errors.Is(err, errCodeReset) {
 		t.Fatalf("read after a reset: %v", err)
 	}
 }
@@ -188,9 +187,9 @@ func TestLingerZeroResets(t *testing.T) {
 // SetLinger and Close may run at once, as on a *net.TCPConn.
 func TestSetLingerBesideClose(t *testing.T) {
 	a, b := Pipe()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	var wg sync.WaitGroup
-	wg.Go(func() { _ = a.(interface{ SetLinger(int) error }).SetLinger(0) })
+	wg.Go(func() { _ = a.(interface{ SetLinger(sec int) error }).SetLinger(0) })
 	wg.Go(func() { _ = a.Close() })
 	wg.Wait()
 }
@@ -198,8 +197,8 @@ func TestSetLingerBesideClose(t *testing.T) {
 // A deadline set while a read blocks ends it.
 func TestDeadlines(t *testing.T) {
 	a, b := Pipe()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 	done := make(chan error, 1)
 	go func() { _, err := a.Read(make([]byte, 1)); done <- err }()
 	_ = a.SetReadDeadline(time.Now())
@@ -210,7 +209,7 @@ func TestDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	go func() { _, _, err := p.ReadFrom(make([]byte, 1)); done <- err }()
 	_ = p.SetReadDeadline(time.Now())
 	if err := <-done; !errors.Is(err, os.ErrDeadlineExceeded) {
@@ -255,7 +254,7 @@ func TestResolve(t *testing.T) {
 func TestListenerLifecycle(t *testing.T) {
 	n := New()
 	ctx := context.Background()
-	if _, err := n.Dial(ctx, "tcp", "10.0.0.9:1"); !errors.Is(err, syscall.ECONNREFUSED) {
+	if _, err := n.Dial(ctx, "tcp", "10.0.0.9:1"); !errors.Is(err, errCodeRefused) {
 		t.Errorf("dial to nothing: %v", err)
 	}
 	l, err := n.Listen(ctx, "tcp", "10.0.0.9:1")
@@ -284,7 +283,7 @@ func TestLoopbackUDP(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if a := c.LocalAddr().(*net.UDPAddr); !a.IP.Equal(net.IPv4(127, 0, 0, 1)) || a.Port == 0 {
 		t.Fatalf("bound %v", a)
 	}

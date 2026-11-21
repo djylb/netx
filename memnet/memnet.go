@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/djylb/timeshim"
@@ -61,11 +60,13 @@ func (n *Net) SetHost(name string, addrs ...netip.Addr) {
 	n.hosts[name] = slices.Clone(addrs)
 }
 
-// errRefused is a connect to nothing listening, as the OS reports it.
-// errReset is a connection reset by the peer, as the OS reports it.
-var errReset error = &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+const network = "tcp"
 
-var errRefused error = &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+// errReset is a connection reset by the peer, as the OS reports it.
+var errReset error = &net.OpError{Op: "read", Net: network, Err: os.NewSyscallError("read", errCodeReset)}
+
+// errRefused is a connect to nothing listening, as the OS reports it.
+var errRefused error = &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", errCodeRefused)}
 
 func (n *Net) bindLocked(addr string, used func(string) bool) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
@@ -95,7 +96,7 @@ func (n *Net) Listen(_ context.Context, _, addr string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &listener{n: n, addr: memAddr{"tcp", a}, ch: make(chan net.Conn), done: make(chan struct{})}
+	l := &listener{n: n, addr: memAddr{network, a}, ch: make(chan net.Conn), done: make(chan struct{})}
 	n.listeners[a] = l
 	return l, nil
 }
@@ -142,7 +143,7 @@ func (n *Net) dial(ctx context.Context, src netip.Addr, addr string) (net.Conn, 
 	var from net.Addr
 	if src.IsValid() {
 		n.next++
-		from = memAddr{"tcp", netip.AddrPortFrom(src, uint16(1024+n.next%64000)).String()}
+		from = memAddr{network, netip.AddrPortFrom(src, uint16(1024+n.next%64000)).String()}
 	}
 	n.mu.Unlock()
 	if l == nil || n.LinkOf(addr).To.Off {
