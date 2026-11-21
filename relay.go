@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,6 +126,49 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 	}
 }
 
+// RelaySide names an end of a Relay: RelayA is its argument a, RelayB its
+// argument b.
+type RelaySide uint8
+
+// The ends of a Relay.
+const (
+	RelayA RelaySide = iota + 1
+	RelayB
+)
+
+// String returns "a" or "b".
+func (s RelaySide) String() string {
+	switch s {
+	case RelayA:
+		return "a"
+	case RelayB:
+		return "b"
+	}
+	return "relay side " + strconv.Itoa(int(s))
+}
+
+// Other returns the other end.
+func (s RelaySide) Other() RelaySide { return 3 - s }
+
+// RelayError is the error of a Relay that the failure of one direction
+// stopped: From is the end whose data that direction copied, so that the
+// error is one of reading From, of writing From.Other(), or of the
+// RelayFlow of that direction. Err is the error itself, which errors.Is and
+// errors.As find through it. Whether it was the read or the write is told by
+// Err where it is a *net.OpError; Relay does not take its fast paths apart to
+// tell it otherwise.
+type RelayError struct {
+	From RelaySide
+	Err  error
+}
+
+func (e *RelayError) Error() string {
+	return "netx: relay from " + e.From.String() + ": " + e.Err.Error()
+}
+
+// Unwrap returns Err.
+func (e *RelayError) Unwrap() error { return e.Err }
+
 // Relay copies data between a and b in both directions and closes both when it
 // returns. By default it stops as soon as either direction stops, at EOF or on
 // an error, ending both ends to end the other direction; see WithRelayHalfClose.
@@ -145,8 +189,11 @@ func WithRelayFlows(aToB, bToA *RelayFlow) RelayOption {
 // already passes no byte.
 //
 // It returns the bytes copied from a to b and from b to a, and the error that
-// stopped the relay, or nil if it stopped at EOF. Errors caused by Relay
-// closing the connections are not reported.
+// stopped the relay, or nil if it stopped at EOF. The failure of a direction
+// is a *RelayError, which tells which end's data was being copied, so that a
+// caller can close each end with a cause of its own; the end of ctx, the
+// idle timeout and a ConnGroup stop it with their own errors, as described
+// above. Errors caused by Relay closing the connections are not reported.
 //
 // On Linux and Android, a direction between a *net.TCPConn and another
 // *net.TCPConn or a *net.UnixConn is left to the kernel with splice, through
@@ -269,7 +316,7 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 		}
 	}
 	// ended handles the end of the copy into dst.
-	ended := func(dst io.ReadWriteCloser, f *RelayFlow, n int64, copyErr error) {
+	ended := func(from RelaySide, dst io.ReadWriteCloser, f *RelayFlow, n int64, copyErr error) {
 		endErr := copyErr
 		if endErr != nil && stopping.Load() {
 			endErr = net.ErrClosed // the relay's own Close ended it
@@ -277,6 +324,9 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 		f.end(n, endErr)
 		if copyErr == nil && cfg.halfClose && closeWrite(dst) == nil {
 			return
+		}
+		if copyErr != nil && (parent.Err() == nil || !errors.Is(copyErr, context.Cause(parent))) {
+			copyErr = &RelayError{From: from, Err: copyErr}
 		}
 		stop(copyErr)
 	}
@@ -289,10 +339,10 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 	var wg sync.WaitGroup
 	// notified starts the copy of src to dst without a goroutine of its own
 	// if src is a ReadNotifier, and reports whether it did.
-	notified := func(dst, src io.ReadWriteCloser, f *RelayFlow, out *int64) bool {
+	notified := func(from RelaySide, dst, src io.ReadWriteCloser, f *RelayFlow, out *int64) bool {
 		c := newNotifyCopy(flowCtx, dst, src, f, dirIdle(f), func(n int64, copyErr error) {
 			*out = n
-			ended(dst, f, n, copyErr)
+			ended(from, dst, f, n, copyErr)
 			wg.Done()
 		})
 		if c == nil {
@@ -303,22 +353,22 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 		return true
 	}
 	// direction copies src to dst and handles its end.
-	direction := func(dst, src io.ReadWriteCloser, f *RelayFlow) int64 {
+	direction := func(from RelaySide, dst, src io.ReadWriteCloser, f *RelayFlow) int64 {
 		n, copyErr := relayDirection(flowCtx, dst, src, f, dirIdle(f))
-		ended(dst, f, n, copyErr)
+		ended(from, dst, f, n, copyErr)
 		return n
 	}
-	aNotified := notified(b, a, &cfg.flows[0], &aToB)
-	bNotified := notified(a, b, &cfg.flows[1], &bToA)
+	aNotified := notified(RelayA, b, a, &cfg.flows[0], &aToB)
+	bNotified := notified(RelayB, a, b, &cfg.flows[1], &bToA)
 	switch {
 	case aNotified && bNotified:
 	case aNotified:
-		bToA = direction(a, b, &cfg.flows[1])
+		bToA = direction(RelayB, a, b, &cfg.flows[1])
 	case bNotified:
-		aToB = direction(b, a, &cfg.flows[0])
+		aToB = direction(RelayA, b, a, &cfg.flows[0])
 	default:
-		wg.Go(func() { aToB = direction(b, a, &cfg.flows[0]) })
-		bToA = direction(a, b, &cfg.flows[1])
+		wg.Go(func() { aToB = direction(RelayA, b, a, &cfg.flows[0]) })
+		bToA = direction(RelayB, a, b, &cfg.flows[1])
 	}
 	wg.Wait()
 

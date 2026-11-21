@@ -24,6 +24,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/wsconn/wshttp` | WebSocket for `net/http` handlers, also over HTTP/2                               |
 | `github.com/djylb/netx/proxydial`     | dialing through HTTP(S), SOCKS5 and SOCKS4 proxies, `ALL_PROXY`/`NO_PROXY`        |
 | `github.com/djylb/netx/safedial`      | dialing and UDP relaying limited by a destination policy, rebinding-safe          |
+| `github.com/djylb/netx/memnet`        | in-process network for tests: TCP-like streams, datagrams, faults per link        |
 
 Each package depends only on the standard library and timeshim, and links only
 what it uses.
@@ -31,8 +32,8 @@ what it uses.
 imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
 `httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
 them link anyway) import it; the root package, `duplex`, `proxyproto`,
-`transparent`, `socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn` and
-`safedial` stay small.
+`transparent`, `socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn`,
+`safedial` and `memnet` stay small.
 Settings follow one rule across the packages: the zero value of a field
 selects its default, a safe bound for timeouts and limits unless the field
 says otherwise; a negative timeout means no timeout, as for
@@ -520,8 +521,11 @@ func forward(ctx context.Context, client, backend net.Conn) {
 ```
 
 - `Relay` returns the bytes copied in each direction and the error that
-  stopped the relay, or nil at EOF. Errors caused by its own `Close` calls are
-  not reported.
+  stopped the relay, or nil at EOF. The failure of a direction is a
+  `*netx.RelayError` whose `From` (`netx.RelayA` or `netx.RelayB`) names the
+  end whose data was being copied, so each end can be closed with a cause of
+  its own; the end of `ctx`, the idle timeout and a `ConnGroup` return their
+  own errors. Errors caused by its own `Close` calls are not reported.
 - With `netx.WithRelayHalfClose()`, EOF in one direction is passed on with
   `CloseWrite` and the other direction keeps going, for protocols where a
   client shuts down its sending side and then reads the answer. Ends without
@@ -2222,3 +2226,32 @@ if errors.As(err, &denied) { // errors.Is(err, safedial.ErrDenied) too
   beyond). `Close` cancels the lookups.
 - Checking an IP destination, with `Dialer.Check` or a datagram through
   either wrapper, does not allocate with the policies of this package.
+
+## In-memory network for tests
+
+`github.com/djylb/netx/memnet` is a network inside the process, for tests of
+code that dials, listens and resolves through an injected network:
+
+```go
+n := memnet.New()
+n.Clock = fake // a timeshim.Clock for the link delays
+n.SetHost("svc.test", netip.MustParseAddr("10.0.0.1"))
+l, _ := n.Listen(ctx, "tcp", "10.0.0.1:80")
+c, _ := n.From(netip.MustParseAddr("192.0.2.7")).Dial(ctx, "tcp", "10.0.0.1:80")
+n.SetLink("10.0.0.1:80", memnet.LinkPair{To: memnet.Link{Delay: 50 * time.Millisecond}})
+```
+
+- Streams behave like TCP sockets: 256 KiB buffered in each direction, so
+  both ends may write at once (unlike `net.Pipe`), `CloseWrite` half-closes,
+  `SetLinger(0)` makes `Close` a reset (`ECONNRESET` for the peer), and
+  deadlines end blocked calls with `os.ErrDeadlineExceeded`. `Pipe` gives a
+  pair without a network.
+- Packet endpoints deliver whole datagrams through bounded queues and drop
+  them when full or when nothing listens, as UDP does.
+- `Dial` to no listener fails with `ECONNREFUSED`. `DialFrom` and `From` set
+  the source host, with an ephemeral port, on both ends.
+- `SetLink` sets per address and direction a delay, a rate, a datagram loss
+  (drawn from `Rand`) or `Off`, which refuses dials, drops datagrams and
+  closes the open connections. Delays and rates run on `Clock`.
+- `LoopbackUDP` opens a real UDP socket on 127.0.0.1 with an ephemeral port
+  that no IPv4 wildcard socket shares.
