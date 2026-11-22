@@ -40,7 +40,7 @@ func dialUDP(t *testing.T, l *PacketListener) *net.UDPConn {
 // peerConn returns the connection of l for the peer from, if the read loop
 // has started one.
 func peerConn(l *PacketListener, from *net.UDPConn) *packetConn {
-	c, _ := l.conns.Get(peerKey{ap: from.LocalAddr().(*net.UDPAddr).AddrPort()})
+	c, _ := l.conns.Get(packetFlow{peer: peerKeyOf(from.LocalAddr())})
 	return c
 }
 
@@ -709,7 +709,7 @@ func TestPacketListenerAcceptSkipsClosedConns(t *testing.T) {
 	b := dialUDP(t, l)
 	send(t, l, a, "a")
 	waitUntil(t, func() bool { return l.conns.Pending() == 1 })
-	stale, _ := l.conns.Get(peerKey{ap: a.LocalAddr().(*net.UDPAddr).AddrPort()})
+	stale := peerConn(l, a)
 	if stale == nil {
 		t.Fatal("no connection for the first peer")
 	}
@@ -854,7 +854,7 @@ func TestPacketListenerMaxConnsSpoofedFlood(t *testing.T) {
 	if n := l.conns.Len(); n != limit {
 		t.Fatalf("%d connections after a place was freed, want %d", n, limit)
 	}
-	if _, ok := l.conns.Get(peerKey{ap: src(600)}); !ok {
+	if _, ok := l.conns.Get(packetFlow{peer: peerKey{ap: src(600)}}); !ok {
 		t.Fatal("the freed place did not go to the next new peer")
 	}
 }

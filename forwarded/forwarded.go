@@ -9,9 +9,8 @@
 // at is in its set of trusted proxies, steps to the address that hop
 // recorded, the next entry from the right. The client is the first hop that
 // is not trusted, so that entries a client prepends are never read, or the
-// farthest hop when all are. Only the one header field that the trusted
-// proxies set may be read: a proxy passes the other ones on as the client
-// sent them.
+// farthest hop when all are. A Resolver reads one configured address
+// header. Scheme and host are each trusted only when explicitly enabled.
 //
 // The package parses without allocating on the common path and returns
 // netip values; the trusted proxies are a PrefixSet built once. It depends
@@ -33,17 +32,14 @@ type Header uint8
 const (
 	// HeaderXForwardedFor is X-Forwarded-For, a comma-separated list of
 	// addresses to which each proxy appends the address it received the
-	// request from, in any number of field lines. X-Forwarded-Proto and
-	// X-Forwarded-Host give Client.Proto and Client.Host.
+	// request from, in any number of field lines.
 	HeaderXForwardedFor Header = iota
 	// HeaderForwarded is Forwarded (RFC 7239), a list of elements such as
-	// for=192.0.2.60;proto=https;host=example.com, one per proxy. The
-	// element that names the client gives Client.Proto and Client.Host.
+	// for=192.0.2.60;proto=https;host=example.com, one per proxy.
 	HeaderForwarded
 	// HeaderXRealIP is X-Real-IP, the one address of the client that the
 	// nearest proxy sets; only the TCP peer needs to be trusted, and the
-	// last field line is read. X-Forwarded-Proto and X-Forwarded-Host give
-	// Client.Proto and Client.Host.
+	// last field line is read.
 	HeaderXRealIP
 )
 
@@ -68,20 +64,37 @@ func (h Header) key() string {
 	return h.String()
 }
 
+// Metadata is a set of optional forwarding fields a Resolver may trust.
+type Metadata uint8
+
+const (
+	// TrustProto allows the scheme to populate Client.Proto.
+	TrustProto Metadata = 1 << iota
+	// TrustHost allows the host to populate Client.Host.
+	TrustHost
+)
+
 // Resolver finds the client of a request. Its fields must not change while
 // it is in use; a Resolver is then safe for concurrent use. A nil *Resolver,
 // or one with no trusted proxies, takes every TCP peer for the client.
 type Resolver struct {
-	// Trusted holds the proxies whose header fields are believed.
+	// Trusted holds the proxies whose address records are believed. Metadata
+	// additionally controls which scheme and host fields are believed.
 	Trusted *PrefixSet
 	// Name, if set, is the field read in place of the one Header names,
 	// with the syntax Header gives, such as "Cf-Connecting-Ip" with
 	// HeaderXRealIP. It must be in canonical form, as http.Header keys
 	// are, since the header map is indexed with it.
 	Name string
-	// Header is the field that the trusted proxies set. Fields of the other
-	// kinds are ignored, as a client may have sent them.
+	// Header selects the address syntax and the source of enabled metadata.
 	Header Header
+	// Metadata independently enables TrustProto and TrustHost. The zero
+	// value reads only addresses. With HeaderForwarded, enable a parameter
+	// only if trusted proxies write it in their own Forwarded elements.
+	// With HeaderXForwardedFor or HeaderXRealIP, enable a field only if the
+	// trusted TCP peer removes any client-supplied value or writes its own
+	// as the last value of X-Forwarded-Proto or X-Forwarded-Host, respectively.
+	Metadata Metadata
 }
 
 // Client is the client of a request as a Resolver finds it.
@@ -91,14 +104,14 @@ type Client struct {
 	// as X-Forwarded-For entries usually do. It is the TCP peer when that
 	// is not trusted, or when it is and recorded no client.
 	Addr netip.AddrPort
-	// Proto and Host are the scheme and the Host that the request had when
-	// a trusted proxy received it, or "" when no trusted proxy recorded
-	// them or what it recorded is not a valid scheme or host. For
-	// Forwarded, they come from the element that names the client; for
-	// X-Forwarded-For and X-Real-IP, from the last entry of the last field
-	// line of X-Forwarded-Proto and X-Forwarded-Host when the TCP peer is
-	// trusted, which is what the nearest proxy set or passed on, so the
-	// trusted proxies must set these fields too.
+	// Proto and Host are the enabled scheme and host, or "" when disabled,
+	// absent or invalid. With HeaderForwarded they come from the same
+	// element as Addr, and are empty if the walk stops at an opaque hop.
+	// With HeaderXForwardedFor or HeaderXRealIP they come from the last
+	// entry of the last line of X-Forwarded-Proto and X-Forwarded-Host,
+	// respectively, when the TCP peer is trusted. They describe the request
+	// as received by the nearest trusted proxy and may differ from the
+	// scheme and host the client used at the first proxy.
 	Proto, Host string
 	// Opaque is set when the walk stopped at a hop that a trusted proxy
 	// recorded without a usable address: an obfuscated identifier such as
@@ -141,11 +154,15 @@ func (r *Resolver) Resolve(peer netip.AddrPort, header map[string][]string) Clie
 	default:
 		r.walkList(&c, lines)
 	}
-	if p := lastItem(header["X-Forwarded-Proto"]); validProto(p) {
-		c.Proto = p
+	if r.Metadata&TrustProto != 0 {
+		if p := lastItem(header["X-Forwarded-Proto"]); validProto(p) {
+			c.Proto = p
+		}
 	}
-	if h := lastItem(header["X-Forwarded-Host"]); validHost(h) {
-		c.Host = h
+	if r.Metadata&TrustHost != 0 {
+		if h := lastItem(header["X-Forwarded-Host"]); validHost(h) {
+			c.Host = h
+		}
 	}
 	return c
 }
@@ -192,12 +209,6 @@ func (r *Resolver) walkForwarded(c *Client, lines []string) {
 				continue
 			}
 			c.Proto, c.Host = "", ""
-			if validProto(e.proto) {
-				c.Proto = e.proto
-			}
-			if validHost(e.host) {
-				c.Host = e.host
-			}
 			if !e.hasFor {
 				c.Opaque = "unknown"
 				return
@@ -209,6 +220,12 @@ func (r *Resolver) walkForwarded(c *Client, lines []string) {
 			}
 			c.Addr = ap
 			c.Hops++
+			if r.Metadata&TrustProto != 0 && validProto(e.proto) {
+				c.Proto = e.proto
+			}
+			if r.Metadata&TrustHost != 0 && validHost(e.host) {
+				c.Host = e.host
+			}
 			if !r.Trusted.Contains(ap.Addr()) {
 				return
 			}

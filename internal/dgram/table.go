@@ -192,6 +192,28 @@ func (t *Table[K, S]) drop(k K, s S) {
 // Remove removes s from under k, but not another connection under k.
 func (t *Table[K, S]) Remove(k K, s S) { t.drop(k, s) }
 
+// AddAlias publishes s under an additional key without counting or
+// scheduling s again. It returns false if the key exists or the table is
+// closed. The caller must serialize publication with removal of s's primary
+// entry and remove the alias when shutting s down.
+func (t *Table[K, S]) AddAlias(k K, s S) bool {
+	if t.closed.Load() {
+		return false
+	}
+	if _, exists := t.conns.LoadOrStore(k, s); exists {
+		return false
+	}
+	if t.closed.Load() {
+		t.RemoveAlias(k, s)
+		return false
+	}
+	return true
+}
+
+// RemoveAlias removes an additional key of s without changing its lifetime
+// or the number of connections held.
+func (t *Table[K, S]) RemoveAlias(k K, s S) { t.conns.CompareAndDelete(k, s) }
+
 // Accept waits for the next new connection and marks it accepted, skipping
 // those closed meanwhile. It returns net.ErrClosed once t is closed.
 func (t *Table[K, S]) Accept() (S, error) {

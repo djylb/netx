@@ -372,7 +372,7 @@ Host: ${host}
 		Request:   rules,
 		Response:  respRules,
 		Redirects: []Redirect{{To: MustCompile("${scheme}://${http_host}", nil)}},
-		Resolver:  &forwarded.Resolver{Trusted: trusted},
+		Resolver:  &forwarded.Resolver{Trusted: trusted, Metadata: forwarded.TrustProto},
 		Data:      func(in *http.Request) any { return "r1" },
 	}
 	var seen *http.Request

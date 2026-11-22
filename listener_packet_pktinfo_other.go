@@ -17,3 +17,5 @@ func enablePacketInfo(*net.UDPConn) bool { return false }
 func packetDst([]byte) (netip.Addr, uint32) { return netip.Addr{}, 0 }
 
 func sourceOOB(netip.Addr, uint32) []byte { return nil }
+
+func isPacketSourceInvalidArgument(error) bool { return false }

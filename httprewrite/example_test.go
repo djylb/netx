@@ -61,7 +61,7 @@ X-Real-IP: ${remote_addr}
 	rw := &httprewrite.Rewriter{
 		Request:   rules,
 		Redirects: []httprewrite.Redirect{{To: httprewrite.MustCompile("${forwarded_proto}://${http_host}", nil)}},
-		Resolver:  &forwarded.Resolver{Trusted: trusted},
+		Resolver:  &forwarded.Resolver{Trusted: trusted, Metadata: forwarded.TrustProto},
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {

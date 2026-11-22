@@ -4,19 +4,26 @@ package netx
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"syscall"
 	"unsafe"
 )
 
+// A broadcast or multicast source can cause EINVAL even with a correctly
+// formatted control message. Address classification is separate.
+func isPacketSourceInvalidArgument(err error) bool {
+	return errors.Is(err, pktinfoInvalidArgument)
+}
+
 // A UDP socket bound to a wildcard address sends from the address that
 // routing picks, which on a host with several addresses on the way to a
 // peer need not be the one that the peer sent to; the peer, or a NAT on
 // its path, then drops the reply. A PacketListener on such a socket asks
 // for the destination of each datagram (IP_PKTINFO, IPV6_RECVPKTINFO) and
-// sends the replies of a connection from the address that its peer's last
-// datagram was sent to. A socket bound to one address needs none of it.
+// sends the replies of each flow from its local destination. A socket
+// bound to one address needs none of it.
 
 // pktinfoOOB is the control buffer of one read: room for an IPv4 and an
 // IPv6 packet information message.
@@ -114,6 +121,9 @@ func sourceOOB(src netip.Addr, ifindex uint32) []byte {
 		var info [sizeofInet4Pktinfo]byte
 		a := src.As4()
 		copy(info[inet4PktinfoSrc:], a[:])
+		if src.IsLinkLocalUnicast() {
+			binary.NativeEndian.PutUint32(info[inet4PktinfoIfindex:], ifindex)
+		}
 		return putCmsg(syscall.IPPROTO_IP, ipPktinfoSend, info[:])
 	}
 	var info [sizeofInet6Pktinfo]byte

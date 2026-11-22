@@ -50,6 +50,32 @@ func addWheelConn(t *testing.T, tab *Table[int, *wheelConn], key int) *wheelConn
 	return c
 }
 
+func TestTableAliasRespectsExistingKeyAndClose(t *testing.T) {
+	t.Run("occupied key", func(t *testing.T) {
+		tab := newWheelTable(t, timeshim.NewFake(time.Time{}), nil)
+		a, b := addWheelConn(t, tab, 1), addWheelConn(t, tab, 2)
+		tab.AddAlias(2, a)
+		if got, _ := tab.Get(2); got != b || tab.Len() != 2 {
+			t.Error("an alias replaced an occupied key")
+		}
+		// Restore the primary entry so cleanup can release both slots.
+		if got, _ := tab.Get(2); got != b {
+			tab.RemoveAlias(2, a)
+			tab.AddAlias(2, b)
+		}
+	})
+	t.Run("closed table", func(t *testing.T) {
+		tab := newWheelTable(t, timeshim.NewFake(time.Time{}), nil)
+		c := addWheelConn(t, tab, 1)
+		tab.Close(nil)
+		tab.AddAlias(2, c)
+		if _, ok := tab.Get(2); ok {
+			tab.RemoveAlias(2, c)
+			t.Fatal("a closed table published an alias")
+		}
+	})
+}
+
 func wheelLen(tab *Table[int, *wheelConn]) int {
 	tab.wheel.Load().mu.Lock()
 	defer tab.wheel.Load().mu.Unlock()

@@ -9,15 +9,16 @@ import "syscall"
 type cmsgLen = uint32
 
 const (
-	ipPktinfoRecv       = 26 // IP_RECVPKTINFO, the type of the message too
-	ipPktinfoSend       = 26 // IP_PKTINFO
-	ipv6Pktinfo         = 46 // IPV6_PKTINFO
-	ipv6RecvPktinfo     = 61 // IPV6_RECVPKTINFO
-	sizeofInet4Pktinfo  = 12
-	sizeofInet6Pktinfo  = 20
-	inet4PktinfoIfindex = 0
-	inet4PktinfoSrc     = 4
-	inet4PktinfoAddr    = 8
+	pktinfoInvalidArgument = syscall.EINVAL
+	ipPktinfoRecv          = 26 // IP_RECVPKTINFO, the type of the message too
+	ipPktinfoSend          = 26 // IP_PKTINFO
+	ipv6Pktinfo            = 46 // IPV6_PKTINFO
+	ipv6RecvPktinfo        = 61 // IPV6_RECVPKTINFO
+	sizeofInet4Pktinfo     = 12
+	sizeofInet6Pktinfo     = 20
+	inet4PktinfoIfindex    = 0
+	inet4PktinfoSrc        = 4
+	inet4PktinfoAddr       = 8
 )
 
 func setPacketInfo(fd uintptr, v6 bool) error {

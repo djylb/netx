@@ -15,7 +15,7 @@ func ExampleResolver() {
 	if err != nil {
 		panic(err)
 	}
-	r := &forwarded.Resolver{Trusted: trusted}
+	r := &forwarded.Resolver{Trusted: trusted, Metadata: forwarded.TrustProto}
 
 	req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.RemoteAddr = "10.1.2.3:41000"
@@ -32,8 +32,9 @@ func ExampleResolver() {
 // hop.
 func ExampleHeaderForwarded() {
 	r := &forwarded.Resolver{
-		Trusted: forwarded.NewPrefixSet(netip.MustParsePrefix("192.0.2.0/24")),
-		Header:  forwarded.HeaderForwarded,
+		Trusted:  forwarded.NewPrefixSet(netip.MustParsePrefix("192.0.2.0/24")),
+		Header:   forwarded.HeaderForwarded,
+		Metadata: forwarded.TrustProto | forwarded.TrustHost,
 	}
 	h := http.Header{"Forwarded": {`for="[2001:db8:cafe::17]:4711";proto=https;host=example.com, for=192.0.2.43`}}
 	c := r.Resolve(netip.MustParseAddrPort("192.0.2.1:8000"), h)

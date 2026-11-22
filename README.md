@@ -778,7 +778,7 @@ func serveOne(c net.Conn, h http.Handler) error {
 ### UDP peers
 
 `PacketListener` splits a packet connection, such as a UDP socket, into one
-`net.Conn` per peer, so a UDP server can be written like a TCP server.
+`net.Conn` per flow, so a UDP server can be written like a TCP server.
 
 ```go
 func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
@@ -799,24 +799,29 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
 }
 ```
 
-- The first datagram from a new peer starts a connection; later ones are read
+- The first datagram of a new flow starts a connection; later ones are read
   from it, truncated to the buffer like a UDP socket. Closing a connection
-  lets the next datagram of that peer start a new one.
+  lets the next datagram of that flow start a new one.
 - Datagrams are dropped, as a socket buffer would, when a connection's queue
   (`WithPacketQueue`, 128) or the accept backlog (`WithPacketAcceptBacklog`,
   128) is full. A datagram larger than 2 KiB takes the room of several, so a queue
   holds at most 128 × 2 KiB by default however large the datagrams are.
-  `WithPacketAcceptFilter` sees a new peer's first datagram and rejects it
+  `WithPacketAcceptFilter` sees a new flow's first datagram and can reject it
   before anything is allocated for the peer; it can answer with
   `l.WriteTo`, as a stateless retry does.
 - `WithPacketMaxConns(n)` caps the connections held at once, accepted or
-  waiting; at the cap a new peer's datagram is dropped before the filter runs
+  waiting; at the cap a new flow's datagram is dropped before the filter runs
   or anything is allocated. Spoofed sources can still fill the cap, so pair
   it with `WithPacketIdleTimeout` and a filter that checks a token.
 - `l.Dial(peer)` makes a connection to a known peer from the same socket
   without `Accept`, as hole punching needs; it returns
   `netx.ErrPacketPeerConnected` if the peer has one and
-  `netx.ErrPacketConnLimit` at the cap.
+  `netx.ErrPacketConnLimit` at the cap. With packet information enabled,
+  the first datagram from that peer with a unicast destination at the
+  listener's port fixes the dialed connection's local destination and any
+  link-local scope. Writes before then use the OS-selected source. The
+  binding uses the datagram's claimed source address, so a sender that can
+  spoof the peer's source may bind the connection first.
 - As on a socket, a closed connection or an expired read deadline fails
   `Read` even while datagrams are queued.
 - `WithPacketIdleTimeout` closes a connection that has been idle since `Accept`
@@ -826,7 +831,7 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   datagram up to 2 KiB. A connection's queue grows with the datagrams waiting
   in it, up to its bound, and gives that room back once read, so idle
   connections hold only a few slots whatever the bound.
-- Lookups of a peer's connection take no lock, and the idle timeout checks
+- Lookups of established flows take no lock, and the idle timeout checks
   only the connections due, so a listener scales from a few peers to
   millions without a separate mode.
 - `WithPacketConns(more...)` reads further sockets into the same
@@ -834,13 +839,22 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   address, n)` opens `n` sockets on one address with `SO_REUSEPORT`, among
   which Linux and Android spread peers by source (elsewhere it returns
   `netx.ErrReusePortUnsupported` for more than one). A connection replies
-  from the socket its peer came through.
-- On a socket bound to a wildcard address, a connection replies from the
-  address its peer's last datagram was sent to, and its `LocalAddr` reports
-  that address, on Linux, Android, macOS, iOS and Windows (`IP_PKTINFO`,
-  `IPV6_RECVPKTINFO`); a host with several addresses on the peer's path
-  otherwise answers from the one routing picks, which the peer or its NAT
-  drops. `l.WriteTo` and other systems send from the routed address.
+  from the socket its flow came through.
+- When every socket is a wildcard `*net.UDPConn` with packet information
+  enabled (Linux, Android, macOS, iOS and Windows), unicast flows are keyed
+  by remote address and local destination. Link-local destinations also
+  include the incoming interface in the key. The connection's `LocalAddr`
+  and reply source use the unicast destination. If that source is
+  temporarily unavailable, the flow retries that datagram with an
+  OS-selected source and tries the fixed source on the next write. If the
+  source is confirmed to be a broadcast or multicast address after a write
+  error, the flow uses OS-selected sources for subsequent writes and
+  `LocalAddr` reports the socket's address. All broadcast and multicast traffic
+  from a remote address shares one flow with an OS-selected reply source,
+  separate from that address's unicast flows. Datagrams missing packet
+  information are dropped in this mode. If any socket cannot enable packet
+  information, all sockets use remote-only flow keys and OS-selected reply
+  sources. `l.WriteTo` always uses the OS-selected source.
 - `WithPacketReadBatch(n)` reads up to `n` datagrams per system call with
   `recvmmsg` on Linux and Android, holding `n` buffers of the
   `WithPacketMaxDatagram` size per read loop; elsewhere datagrams are read
@@ -1827,7 +1841,7 @@ r := &forwarded.Resolver{Trusted: trusted} // X-Forwarded-For
 func handler(w http.ResponseWriter, req *http.Request) {
 	peer, _ := forwarded.ParseNode(req.RemoteAddr)
 	c := r.Resolve(peer, req.Header)
-	log.Println(c.Addr.Addr(), c.Proto, c.Host) // client, scheme and host it used
+	log.Println(c.Addr.Addr())
 }
 ```
 
@@ -1838,11 +1852,22 @@ func handler(w http.ResponseWriter, req *http.Request) {
   `Cf-Connecting-Ip`. Fields of the other kinds are ignored, as a client may
   have sent them.
 - `Client` holds the address (IPv4 for IPv4-mapped, port 0 when none was
-  recorded), the number of trusted hops, the scheme and host from the
-  element that names the client (Forwarded) or from X-Forwarded-Proto and
-  X-Forwarded-Host (only when the peer is trusted), and `Opaque` when a
-  trusted proxy recorded an obfuscated or unparsable hop, in which case the
-  address is that proxy's.
+  recorded), the number of trusted hops, and `Opaque` when a trusted proxy
+  recorded an obfuscated or unparsable hop, in which case the address is
+  that proxy's.
+- `Resolver.Metadata` defaults to zero and leaves `Client.Proto` and
+  `Client.Host` empty. Enable each field with `forwarded.TrustProto` or
+  `forwarded.TrustHost`. With `HeaderForwarded`, the scheme and host come
+  from the same element as the resolved client address. A missing or
+  opaque address in the selected element leaves both fields empty.
+- With `HeaderXForwardedFor` or `HeaderXRealIP`, including a custom `Name`,
+  enable a field when the trusted TCP peer removes client-supplied values
+  or writes its own as the last value of `X-Forwarded-Proto` or
+  `X-Forwarded-Host`. Use `Metadata: forwarded.TrustProto` when the proxy
+  sets the scheme and the application needs it. These fields describe
+  the request as received by the nearest trusted proxy and can differ
+  from what the client used at the first proxy. An enabled field is read
+  independently of whether the address header named a client.
 - Forwarded is parsed from the right as well, so that elements a trusted
   proxy appends are read even after a malformed or hostile one.
 - `PrefixSet` is built once, merges overlapping prefixes and looks addresses
@@ -1868,7 +1893,7 @@ X-Internal-Token: ${unset}
 rw := &httprewrite.Rewriter{
 	Request:   rules,
 	Redirects: []httprewrite.Redirect{{To: httprewrite.MustCompile("${forwarded_proto}://${http_host}", nil)}},
-	Resolver:  &forwarded.Resolver{Trusted: trusted},
+	Resolver:  &forwarded.Resolver{Trusted: trusted, Metadata: forwarded.TrustProto},
 }
 proxy := &httputil.ReverseProxy{
 	Rewrite: func(pr *httputil.ProxyRequest) {

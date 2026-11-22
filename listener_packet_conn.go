@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // peerKey names a peer of a PacketListener: a *net.UDPAddr peer by its
@@ -18,17 +19,30 @@ type peerKey struct {
 	s  string
 }
 
-// packetConn is one peer of a PacketListener.
+// packetFlow identifies a connection by peer and, when packet information
+// is available, local unicast destination and its link-local scope.
+type packetFlow struct {
+	peer         peerKey
+	local        packetDestination
+	wildcardDial bool // Dial has no local destination until the peer sends one
+}
+
+type packetDestination struct {
+	ap      netip.AddrPort
+	ifindex uint32
+}
+
+// packetConn is one flow of a PacketListener.
 type packetConn struct {
 	peer net.Addr
 	l    *PacketListener
-	sock *packetSocket // the packet connection it writes from; nil for l's own
-	// from is the address the peer's last datagram was sent to, on a
-	// socket bound to a wildcard address; writes go from it. nil: the
-	// address routing picks (a socket bound to one address, or no
-	// datagram yet).
+	sock *packetSocket // the packet connection it writes from
+	// from records the local destination and the explicit reply source.
+	// Route fallback preserves it for alias cleanup.
 	from          atomic.Pointer[replySource]
-	key           peerKey
+	routedReplies atomic.Bool
+	key           packetFlow
+	counted       bool // registered in the peer index, under l.flowMu
 	writeDeadline dgram.Deadline
 	q             dgram.Queue
 	once          sync.Once
@@ -37,22 +51,18 @@ type packetConn struct {
 // replySource is a local address that a connection replies from and the
 // control message that sends from it.
 type replySource struct {
-	addr    netip.Addr
-	oob     []byte
-	ifindex uint32
+	destination packetDestination
+	addr        netip.AddrPort
+	oob         []byte
 }
 
-// replyFrom records the destination of a datagram from the peer, given
-// its control data; it allocates only when the destination changes.
-func (c *packetConn) replyFrom(oob []byte) {
-	dst, ifindex := packetDst(oob)
-	if !dst.IsValid() {
-		return
-	}
-	if f := c.from.Load(); f != nil && f.addr == dst && f.ifindex == ifindex {
-		return
-	}
-	c.from.Store(&replySource{addr: dst, ifindex: ifindex, oob: sourceOOB(dst, ifindex)})
+func (c *packetConn) setReplySource(dst packetDestination, ifindex uint32) {
+	ip := dst.ap.Addr()
+	c.from.Store(&replySource{
+		destination: dst,
+		addr:        netip.AddrPortFrom(ip.WithZone(netutil.ScopeZone(ip, ifindex)), dst.ap.Port()),
+		oob:         sourceOOB(ip, ifindex),
+	})
 }
 
 func (c *packetConn) queue() *dgram.Queue { return &c.q }
@@ -73,11 +83,51 @@ func (c *packetConn) Write(b []byte) (int, error) {
 		return 0, os.ErrDeadlineExceeded
 	default:
 	}
-	n, err := c.l.writeTo(b, c)
+	n, err := c.writeDatagram(b)
 	if err == nil {
 		c.q.Touch()
 	}
 	return n, err
+}
+
+func (c *packetConn) writeDatagram(p []byte) (int, error) {
+	peer := c.key.peer.ap
+	if udp := c.sock.udp; udp != nil && peer.IsValid() {
+		return c.writeUDP(udp, p, peer)
+	}
+	return c.sock.pc.WriteTo(p, c.peer)
+}
+
+type packetUDPWriter interface {
+	WriteMsgUDPAddrPort(b, oob []byte, addr netip.AddrPort) (int, int, error)
+	WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error)
+}
+
+func (c *packetConn) writeUDP(udp packetUDPWriter, p []byte, peer netip.AddrPort) (int, error) {
+	if f := c.from.Load(); f != nil && !c.routedReplies.Load() {
+		// A datagram goes out whole: report len(p) on success. On
+		// Windows a WSASendMsg that completes at once reports 0 bytes
+		// (the runtime passes no byte count), which callers would take
+		// for a short write.
+		n, _, err := udp.WriteMsgUDPAddrPort(p, f.oob, peer)
+		if err == nil {
+			return len(p), nil
+		}
+		if n != 0 {
+			return 0, err
+		}
+		unavailable := IsAddrNotAvailable(err)
+		if !unavailable && !isPacketSourceInvalidArgument(err) {
+			return 0, err
+		}
+		if confirmedPacketGroup(f.destination.ap.Addr()) {
+			c.routedReplies.CompareAndSwap(false, true)
+		} else if !unavailable {
+			// EINVAL alone does not identify a source address error.
+			return 0, err
+		}
+	}
+	return udp.WriteToUDPAddrPort(p, peer)
 }
 
 // Close removes the connection from its listener.
@@ -88,23 +138,19 @@ func (c *packetConn) Close() error {
 
 func (c *packetConn) shutdown(err error) {
 	c.once.Do(func() {
-		c.l.conns.Remove(c.key, c)
+		c.l.removeConn(c)
 		c.q.Close(err)
 		c.writeDeadline.Stop()
 	})
 }
 
-// LocalAddr returns the address the peer's datagrams are sent to, when
-// the packet connection is bound to a wildcard address and reports it, and
-// the packet connection's address otherwise.
+// LocalAddr returns the flow's fixed local destination, or the packet
+// connection's address when the flow uses OS-selected sources by default.
 func (c *packetConn) LocalAddr() net.Addr {
-	la := c.l.pc.LocalAddr()
-	if f := c.from.Load(); f != nil {
-		if ua, ok := la.(*net.UDPAddr); ok {
-			return net.UDPAddrFromAddrPort(netip.AddrPortFrom(f.addr, uint16(ua.Port)))
-		}
+	if f := c.from.Load(); f != nil && !c.routedReplies.Load() {
+		return net.UDPAddrFromAddrPort(f.addr)
 	}
-	return la
+	return c.sock.pc.LocalAddr()
 }
 func (c *packetConn) RemoteAddr() net.Addr { return c.peer }
 

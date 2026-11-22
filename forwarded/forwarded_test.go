@@ -173,8 +173,8 @@ func FuzzPrefixSet(f *testing.F) {
 
 func TestResolve(t *testing.T) {
 	trusted := mustSet(t, "10.0.0.0/8", "2001:db8:1::/48")
-	xff := &Resolver{Trusted: trusted}
-	fwd := &Resolver{Trusted: trusted, Header: HeaderForwarded}
+	xff := &Resolver{Trusted: trusted, Metadata: TrustProto | TrustHost}
+	fwd := &Resolver{Trusted: trusted, Header: HeaderForwarded, Metadata: TrustProto | TrustHost}
 	xri := &Resolver{Trusted: trusted, Header: HeaderXRealIP}
 	type hdr = map[string][]string
 	for _, tt := range []struct {
@@ -224,11 +224,11 @@ func TestResolve(t *testing.T) {
 		{"forwarded lines", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=1.1.1.1`, `for=198.51.100.7, for="10.0.0.9:_p"`}},
 			Client{Addr: ap("198.51.100.7:0"), Hops: 2}},
 		{"forwarded obfuscated", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=198.51.100.7, for=_hidden;proto=https, for=10.0.0.2`}},
-			Client{Addr: ap("10.0.0.2:0"), Hops: 1, Proto: "https", Opaque: "_hidden"}},
+			Client{Addr: ap("10.0.0.2:0"), Hops: 1, Opaque: "_hidden"}},
 		{"forwarded unknown", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=unknown`}},
 			Client{Addr: ap("10.0.0.1:80"), Opaque: "unknown"}},
 		{"forwarded no for", fwd, "10.0.0.1:80", hdr{"Forwarded": {`proto=https;by=10.0.0.1`}},
-			Client{Addr: ap("10.0.0.1:80"), Proto: "https", Opaque: "unknown"}},
+			Client{Addr: ap("10.0.0.1:80"), Opaque: "unknown"}},
 		{"forwarded malformed spoof", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for="1.1.1.1, for=198.51.100.2`}},
 			Client{Addr: ap("198.51.100.2:0"), Hops: 1}},
 		{"forwarded quoted comma spoof", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for="x, for=10.0.0.5", for=198.51.100.3`}},
@@ -237,6 +237,10 @@ func TestResolve(t *testing.T) {
 			Client{Addr: ap("10.0.0.1:80"), Opaque: "for=="}},
 		{"forwarded duplicate for", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=198.51.100.3;for=198.51.100.4`}},
 			Client{Addr: ap("10.0.0.1:80"), Opaque: "for=198.51.100.3;for=198.51.100.4"}},
+		{"forwarded duplicate empty proto", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=198.51.100.3;Proto=https;proto=""`}},
+			Client{Addr: ap("10.0.0.1:80"), Opaque: `for=198.51.100.3;Proto=https;proto=""`}},
+		{"forwarded duplicate escaped host", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for=198.51.100.3;host=example.com;Host="a\"b"`}},
+			Client{Addr: ap("10.0.0.1:80"), Opaque: `for=198.51.100.3;host=example.com;Host="a\"b"`}},
 		{"forwarded escaped", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for="\[2001:db8:3::1\]";host="a\"b"`}},
 			Client{Addr: ap("[2001:db8:3::1]:0"), Hops: 1}},
 		{"forwarded escaped close", fwd, "10.0.0.1:80", hdr{"Forwarded": {`for="198.51.100.3\"`}},
@@ -265,6 +269,60 @@ func TestResolve(t *testing.T) {
 }
 
 func ap(s string) netip.AddrPort { return netip.MustParseAddrPort(s) }
+
+func TestResolveAddressTrustDoesNotImplyMetadataTrust(t *testing.T) {
+	trusted := mustSet(t, "10.0.0.0/8")
+	peer := ap("10.0.0.1:443")
+	for _, tc := range []struct {
+		header Header
+		name   string
+		value  string
+	}{
+		{HeaderXForwardedFor, "X-Forwarded-For", "198.51.100.9, 10.0.0.2"},
+		{HeaderXRealIP, "X-Real-Ip", "198.51.100.9"},
+		{HeaderXRealIP, "Cf-Connecting-Ip", "198.51.100.9"},
+		{HeaderForwarded, "Forwarded", "for=198.51.100.9;proto=https;host=example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Resolver{Trusted: trusted, Header: tc.header, Name: tc.name}
+			h := map[string][]string{tc.name: {tc.value}, "X-Forwarded-Proto": {"https"}, "X-Forwarded-Host": {"example.com"}}
+			if got := r.Resolve(peer, h); got.Addr != ap("198.51.100.9:0") || got.Proto != "" || got.Host != "" {
+				t.Fatalf("Resolve = %+v, want only the client address", got)
+			}
+		})
+	}
+}
+
+func TestResolveMetadataTrustByField(t *testing.T) {
+	trusted := mustSet(t, "10.0.0.0/8")
+	peer := ap("10.0.0.1:443")
+	h := map[string][]string{
+		"X-Forwarded-For":   {"198.51.100.9"},
+		"X-Forwarded-Proto": {"http, https"},
+		"X-Forwarded-Host":  {"example.com:443"},
+		"Forwarded":         {`for=198.51.100.9;proto=http, for=10.0.0.2;proto=https;host=near.example.com`},
+	}
+	for _, tc := range []struct {
+		header      Header
+		metadata    Metadata
+		proto, host string
+	}{
+		{HeaderXForwardedFor, TrustProto, "https", ""},
+		{HeaderXForwardedFor, TrustHost, "", "example.com:443"},
+		{HeaderForwarded, TrustProto, "http", ""},
+		{HeaderForwarded, TrustHost, "", ""},
+		{HeaderForwarded, TrustProto | TrustHost, "http", ""},
+	} {
+		r := &Resolver{Trusted: trusted, Header: tc.header, Metadata: tc.metadata}
+		if c := r.Resolve(peer, h); c.Addr != ap("198.51.100.9:0") || c.Proto != tc.proto || c.Host != tc.host {
+			t.Errorf("%v with metadata %d: Resolve = %+v, want proto %q and host %q", tc.header, tc.metadata, c, tc.proto, tc.host)
+		}
+		untrusted := ap("192.0.2.1:443")
+		if c := r.Resolve(untrusted, h); c != (Client{Addr: untrusted}) {
+			t.Errorf("%v with metadata %d: untrusted Resolve = %+v", tc.header, tc.metadata, c)
+		}
+	}
+}
 
 func TestHeaderString(t *testing.T) {
 	if HeaderXRealIP.String() != "X-Real-IP" || HeaderForwarded.String() != "Forwarded" || Header(9).String() != "Header(9)" {
@@ -302,7 +360,7 @@ func TestAppend(t *testing.T) {
 // TestRoundTrip checks that what a proxy appends is read back by a Resolver
 // that trusts it.
 func TestRoundTrip(t *testing.T) {
-	r := &Resolver{Trusted: mustSet(t, "10.0.0.0/8"), Header: HeaderForwarded}
+	r := &Resolver{Trusted: mustSet(t, "10.0.0.0/8"), Header: HeaderForwarded, Metadata: TrustProto | TrustHost}
 	for _, client := range []string{"192.0.2.1:0", "192.0.2.1:4711", "[2001:db8::1]:0", "[2001:db8::1]:65535"} {
 		e := Element{For: ap(client), Proto: "https", Host: "[2001:db8::2]:8443"}
 		v := string(AppendForwarded(nil, []string{`for="1.1.1.1, x"`}, e))
@@ -322,7 +380,7 @@ func TestResolveAllocs(t *testing.T) {
 	}
 	peer := ap("10.0.0.1:80")
 	for _, hd := range []Header{HeaderXForwardedFor, HeaderForwarded, HeaderXRealIP} {
-		r := &Resolver{Trusted: trusted, Header: hd}
+		r := &Resolver{Trusted: trusted, Header: hd, Metadata: TrustProto | TrustHost}
 		if n := testing.AllocsPerRun(100, func() { _ = r.Resolve(peer, h) }); n != 0 {
 			t.Errorf("%v: Resolve allocates %v times", hd, n)
 		}
@@ -349,7 +407,7 @@ func FuzzResolve(f *testing.F) {
 	trusted := mustSet(f, "10.0.0.0/8", "2001:db8:1::/48")
 	f.Fuzz(func(t *testing.T, v string, which uint8) {
 		hd := Header(which % 3)
-		r := &Resolver{Trusted: trusted, Header: hd}
+		r := &Resolver{Trusted: trusted, Header: hd, Metadata: TrustProto | TrustHost}
 		peer := ap("10.0.0.1:1")
 		h := map[string][]string{hd.key(): {v}, "X-Forwarded-Proto": {v}, "X-Forwarded-Host": {v}}
 		c := r.Resolve(peer, h)

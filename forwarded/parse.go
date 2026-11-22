@@ -103,6 +103,8 @@ type element struct {
 	raw         string // the element text, for a malformed one
 	forEscaped  bool   // forValue holds quoted-pairs
 	hasFor      bool
+	hasProto    bool
+	hasHost     bool
 	empty       bool // the element is empty, as list syntax allows
 }
 
@@ -205,16 +207,18 @@ func lastElement(s string) (e element, rest string, more, ok bool) {
 			}
 			e.hasFor, e.forValue, e.forEscaped = true, val, escaped
 		case strings.EqualFold(name, "proto"):
-			if e.proto != "" {
+			if e.hasProto {
 				return fail()
 			}
+			e.hasProto = true
 			if !escaped {
 				e.proto = val
 			}
 		case strings.EqualFold(name, "host"):
-			if e.host != "" {
+			if e.hasHost {
 				return fail()
 			}
+			e.hasHost = true
 			if !escaped {
 				e.host = val
 			}
