@@ -9,6 +9,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // The classifiers below match the platform errno first, so they work whatever
@@ -40,15 +42,10 @@ func isTimeout(t *errText) bool {
 // IsClosed reports whether err comes from using a closed connection or
 // listener: net.ErrClosed, io.ErrClosedPipe, or the "use of closed network
 // connection" text that some wrappers pass on without the error value.
-func IsClosed(err error) bool {
-	return err != nil && isClosed(&errText{err: err})
-}
+func IsClosed(err error) bool { return netutil.IsClosed(err) }
 
 func isClosed(t *errText) bool {
-	if errors.Is(t.err, net.ErrClosed) || errors.Is(t.err, io.ErrClosedPipe) {
-		return true
-	}
-	return strings.Contains(t.text(), "use of closed network connection")
+	return netutil.IsClosedValue(t.err) || netutil.IsClosedText(t.text())
 }
 
 // IsCanceled reports whether err comes from a canceled context or
@@ -126,9 +123,6 @@ var (
 	addrInUse = errorClass{errnos: errnoSet(1) << eAddrInUse, texts: []string{
 		"addressalreadyinuse",
 		"onlyoneusageofeachsocketaddress"}}
-	addrNotAvailable = errorClass{errnos: errnoSet(1) << eAddrNotAvail, texts: []string{
-		"cannotassignrequestedaddress",
-		"requestedaddressisnotvalidinitscontext"}}
 	messageTooLarge = errorClass{errnos: errnoSet(1) << eMsgSize, texts: []string{
 		"messagetoolong",
 		"messagesentonadatagramsocketwaslarger"}}
@@ -164,7 +158,9 @@ func IsAddrInUse(err error) bool { return addrInUse.is(err) }
 
 // IsAddrNotAvailable reports whether err looks like an address that is not
 // available on this host, as when binding to an address of another host.
-func IsAddrNotAvailable(err error) bool { return addrNotAvailable.is(err) }
+func IsAddrNotAvailable(err error) bool {
+	return netutil.IsAddrNotAvailable(err)
+}
 
 // IsMessageTooLarge reports whether err looks like a datagram too large to
 // send or receive whole.
@@ -234,7 +230,8 @@ func netErrorKind(t *errText) ErrorKind {
 		return KindPermissionDenied
 	case addrInUse.match(t):
 		return KindAddrInUse
-	case addrNotAvailable.match(t):
+	// Feed the same rule as IsAddrNotAvailable from the shared caches.
+	case netutil.MatchAddrNotAvailable(t.hasErrno(errnoSet(1)<<eAddrNotAvail), t.normalized):
 		return KindAddrNotAvailable
 	case messageTooLarge.match(t):
 		return KindMessageTooLarge
@@ -394,34 +391,21 @@ func (t *errText) lower() string {
 
 // has reports whether the normalized text contains any of subs.
 func (t *errText) has(subs ...string) bool {
-	if t.have&haveNorm == 0 {
-		t.norm = stripSeparators(t.lower())
-		t.have |= haveNorm
-	}
+	norm := t.normalized()
 	for _, sub := range subs {
-		if strings.Contains(t.norm, sub) {
+		if strings.Contains(norm, sub) {
 			return true
 		}
 	}
 	return false
 }
 
-// stripSeparators removes the spaces, hyphens and underscores from s, so that
-// "connection reset by peer" and "connection-reset" variants compare alike.
-func stripSeparators(s string) string {
-	if !strings.ContainsAny(s, " -_") {
-		return s
+func (t *errText) normalized() string {
+	if t.have&haveNorm == 0 {
+		t.norm = netutil.StripSeparators(t.lower())
+		t.have |= haveNorm
 	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := range len(s) {
-		switch c := s[i]; c {
-		case ' ', '-', '_':
-		default:
-			b.WriteByte(c)
-		}
-	}
-	return b.String()
+	return t.norm
 }
 
 // errnoID names a POSIX errno that the classifiers know. platformErrnos

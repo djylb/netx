@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -552,14 +554,44 @@ func (b blockingStream) Close() error                { return b.s.Close() }
 func TestRelayNotifierIdleGoroutines(t *testing.T) {
 	s := newFakeStream(false)
 	c1, c2 := tcpPair(t)
-	before := runtime.NumGoroutine()
-	done := startRelay(s, c1)
-	waitFor(t, "registration", s.pending)
-	waitFor(t, "one goroutine", func() bool { return runtime.NumGoroutine()-before == 1 })
+	done := startIdleRelay(t, s, s, c1)
 	_ = c2.Close()
 	if err := waitRelay(t, done); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func startIdleRelay(t *testing.T, s *fakeStream, a, b io.ReadWriteCloser) <-chan error {
+	t.Helper()
+	// The relay and the tasks it starts inherit this label.
+	const label = "netx.relay-test"
+	var done <-chan error
+	pprof.Do(t.Context(), pprof.Labels(label, t.Name()), func(context.Context) {
+		done = startRelay(a, b)
+	})
+	waitFor(t, "registration", s.pending)
+	labelLine := fmt.Sprintf("# labels: {%q:%q}\n", label, t.Name())
+	waitFor(t, "one relay goroutine", func() bool {
+		var profile bytes.Buffer
+		if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		var previous string
+		for line := range strings.Lines(profile.String()) {
+			if line == labelLine {
+				count, _, _ := strings.Cut(previous, " @ ")
+				k, err := strconv.Atoi(count)
+				if err != nil {
+					t.Fatalf("goroutine profile count %q: %v", count, err)
+				}
+				n += k
+			}
+			previous = line
+		}
+		return n == 1
+	})
+	return done
 }
 
 // BenchmarkIdleRelayStreamTCP reports the goroutines and memory that an idle
@@ -713,16 +745,7 @@ func TestRelayNotifierPrefixIdle(t *testing.T) {
 			}
 			waitFor(t, "registration", s.pending)
 			s.feed([]byte("world"))
-			if got := readN(t, c2, 5); got != "world" {
-				t.Fatalf("got %q", got)
-			}
-			_ = c2.Close()
-			if err := waitRelay(t, done); err != nil {
-				t.Fatal(err)
-			}
-			if _, reads, _ := s.counts(); reads != 0 {
-				t.Fatalf("%d blocking Reads, want none", reads)
-			}
+			finishWorld(t, s, c2, done)
 		})
 	}
 }
@@ -744,12 +767,16 @@ func TestRelayNotifierWrapConn(t *testing.T) {
 		t.Fatal("WrapConn over a blocking stream claims to notify")
 	}
 	c1, c2 := tcpPair(t)
-	before := runtime.NumGoroutine()
-	done := startRelay(w, c1)
-	waitFor(t, "registration", s.pending)
-	waitFor(t, "one goroutine", func() bool { return runtime.NumGoroutine()-before == 1 })
+	done := startIdleRelay(t, s, w, c1)
 	s.feed([]byte("world"))
 	_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	finishWorld(t, s, c2, done)
+}
+
+// finishWorld reads "world" from c2, closes it, waits for the relay and
+// checks that s saw no blocking Read.
+func finishWorld(t *testing.T, s *fakeStream, c2 net.Conn, done <-chan error) {
+	t.Helper()
 	if got := readN(t, c2, 5); got != "world" {
 		t.Fatalf("got %q", got)
 	}

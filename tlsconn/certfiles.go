@@ -1,6 +1,7 @@
 package tlsconn
 
 import (
+	"cmp"
 	"container/list"
 	"crypto/sha256"
 	"crypto/tls"
@@ -86,8 +87,8 @@ type CertFiles struct {
 	// negative bound is an error.
 	MaxEntries int
 	// IdleTimeout drops certificates that have not been loaded for this
-	// long; 0 or a negative value keeps them, unlike other timeouts, as
-	// for MaxEntries.
+	// long; 0 means DefaultIdleTimeout (24h), and a negative value keeps
+	// them. The cache checks for idle entries during loads.
 	IdleTimeout time.Duration
 	// CheckInterval is how often a use checks whether the files of a
 	// certificate changed: their size, modification time or identity, with
@@ -294,11 +295,12 @@ func (c *CertFiles) evictLocked() {
 // IdleTimeout. The list is ordered by last use, so the sweep stops at the
 // first entry still in use.
 func (c *CertFiles) sweepLocked(now time.Time) {
-	if c.IdleTimeout <= 0 || now.Sub(c.lastSweep) < c.IdleTimeout/2 {
+	idle := cmp.Or(c.IdleTimeout, DefaultIdleTimeout)
+	if idle < 0 || now.Sub(c.lastSweep) < idle/2 {
 		return
 	}
 	c.lastSweep = now
-	cutoff := now.Add(-c.IdleTimeout)
+	cutoff := now.Add(-idle)
 	for el := c.lru.Back(); el != nil; el = c.lru.Back() {
 		if !el.Value.(*certEntry).lastUsed.Before(cutoff) {
 			return

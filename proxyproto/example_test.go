@@ -11,6 +11,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/proxyproto"
+	"github.com/djylb/netx/udpflow"
 )
 
 func ExampleNewHeader() {
@@ -74,7 +75,7 @@ func ExampleListener_datagram() {
 		fmt.Println(err)
 		return
 	}
-	pl := &proxyproto.Listener{Listener: netx.NewPacketListener(pc), Config: proxyproto.Config{Datagram: proxyproto.DatagramFirst}}
+	pl := &proxyproto.Listener{Listener: udpflow.NewPacketListener(pc), Config: proxyproto.Config{Datagram: proxyproto.DatagramFirst}}
 	defer func() { _ = pl.Close() }()
 	for {
 		c, err := pl.Accept()

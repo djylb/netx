@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx/internal/nettest"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -219,10 +220,9 @@ func TestRelayFlowCountsTCPAsItPasses(t *testing.T) {
 
 // Datagrams are read whole whatever Wait allows.
 func TestRelayFlowKeepsDatagramsWhole(t *testing.T) {
-	l := newUDPListener(t)
-	client := dialUDP(t, l)
+	l, client := packetPair(t)
 	send(t, l, client, string(bytes.Repeat([]byte("d"), 300)))
-	src := acceptWithin(t, l)
+	src := nettest.AcceptWithin(t, l)
 	sink := &datagramSink{done: make(chan struct{})}
 	flow := RelayFlow{Wait: func(context.Context, int64) (int64, error) { return 1, nil }}
 	done := make(chan struct{})
@@ -444,10 +444,9 @@ func TestRelayIdleDatagramSourcesHoldNoBuffer(t *testing.T) {
 		for range n {
 			switch kind {
 			case "PacketListener":
-				l := newUDPListener(t)
-				c := dialUDP(t, l)
+				l, c := packetPair(t)
 				send(t, l, c, "hello")
-				srcs = append(srcs, acceptWithin(t, l))
+				srcs = append(srcs, nettest.AcceptWithin(t, l))
 				peers = append(peers, c)
 			default:
 				a, b := tcpPair(t)
@@ -566,11 +565,10 @@ func TestRelayFlowFirst(t *testing.T) {
 		}
 	})
 	t.Run("datagrams", func(t *testing.T) {
-		l := newUDPListener(t)
-		client := dialUDP(t, l)
+		l, client := packetPair(t)
 		send(t, l, client, "one")
 		send(t, l, client, "two")
-		src := acceptWithin(t, l)
+		src := nettest.AcceptWithin(t, l)
 		sink := &datagramSink{done: make(chan struct{})}
 		f, seen := record()
 		done := make(chan struct{})

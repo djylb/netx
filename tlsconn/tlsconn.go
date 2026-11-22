@@ -24,9 +24,8 @@
 // field's documentation; for timeouts and limits it is a safe bound unless
 // the field says otherwise. A negative timeout means no timeout, as for
 // http.Server.IdleTimeout. Other negative values are an error unless the
-// field gives them a meaning. The zero value is not a safe bound for
-// CertFiles.MaxEntries and CertFiles.IdleTimeout, whose zero means no
-// bound, as the caller chooses the certificates.
+// field gives them a meaning. CertFiles.MaxEntries has no count bound at
+// zero because the caller chooses the certificates.
 package tlsconn
 
 import (

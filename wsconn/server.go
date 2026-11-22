@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/httphead"
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // HandshakeError is an opening handshake that failed for a reason of HTTP
@@ -453,7 +454,7 @@ func doHandshake(ctx context.Context, conn net.Conn, timeout time.Duration, fn f
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
-	if hasDeadline && isTimeout(err) {
+	if hasDeadline && netutil.IsDeadlineTimeout(err) {
 		return context.DeadlineExceeded
 	}
 	return err

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // countConn is a memConn that counts its writes and can fail them.
@@ -203,7 +205,7 @@ func TestWriteMessagesTimeout(t *testing.T) {
 	if err := srv.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.WriteMessages(Binary, [][]byte{{1}}); !isTimeout(err) {
+	if err := srv.WriteMessages(Binary, [][]byte{{1}}); !netutil.IsDeadlineTimeout(err) {
 		t.Fatal(err)
 	}
 	_ = srv.SetWriteDeadline(time.Time{})

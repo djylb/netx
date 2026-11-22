@@ -7,6 +7,10 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/memnet"
+	"github.com/djylb/netx/udpflow"
+	"github.com/djylb/timeshim"
 )
 
 type dummyAddr string
@@ -98,4 +102,49 @@ func sinkWriter(dst io.Writer) io.Writer {
 	var d relaySink
 	d.init(dst)
 	return d.w
+}
+
+// packetPair is a listener and a peer on the same in-memory network.
+func packetPair(t *testing.T) (*udpflow.PacketListener, net.PacketConn) {
+	t.Helper()
+	n := memnet.New()
+	pc, err := n.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := udpflow.NewPacketListener(pc)
+	t.Cleanup(func() { _ = l.Close() })
+	peer, err := n.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	return l, peer
+}
+
+func send(t *testing.T, l net.Listener, peer net.PacketConn, msg string) {
+	t.Helper()
+	if _, err := peer.WriteTo([]byte(msg), l.Addr()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitPending waits until c has n pending timers, for at most 5s.
+func waitPending(t *testing.T, c *timeshim.Fake, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := c.WaitPending(ctx, n); err != nil {
+		t.Fatalf("%d timers, want %d: %v", c.Pending(), n, err)
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/clock"
 )
 
 // TimeoutConn closes an idle connection: before each read or write it moves
@@ -99,7 +99,7 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle <= 0 {
 		return nil
 	}
-	if dgram.RealEpoch.At(time.Now())+int64(idle) <= c.deadline.Load() {
+	if clock.RealEpoch.At(time.Now())+int64(idle) <= c.deadline.Load() {
 		return nil // at least idle left
 	}
 	c.mu.Lock()
@@ -110,11 +110,11 @@ func (c *TimeoutConn) refreshDeadline() error {
 		return nil
 	}
 	now := time.Now()
-	if dgram.RealEpoch.At(now)+int64(idle) <= c.deadline.Load() {
+	if clock.RealEpoch.At(now)+int64(idle) <= c.deadline.Load() {
 		return nil
 	}
 	ahead := idle + min(idle/16, time.Second)
-	want := dgram.RealEpoch.At(now) + int64(ahead)
+	want := clock.RealEpoch.At(now) + int64(ahead)
 	// now.Add keeps the monotonic reading, so the socket deadline does not
 	// follow wall-clock steps either.
 	rd := now.Add(ahead)

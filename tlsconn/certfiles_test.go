@@ -431,11 +431,18 @@ func TestCertFilesCountsLoadedEntries(t *testing.T) {
 }
 
 func TestCertFilesPEM(t *testing.T) {
-	var c CertFiles
+	clock := timeshim.NewFake(time.Unix(1_700_000_000, 0))
+	c := CertFiles{Clock: clock}
 	certs := make([][2][]byte, 3)
 	for i := range certs {
-		cert, _ := NewSelfSigned(SelfSignedOptions{})
-		certs[i][0], certs[i][1], _ = EncodePEM(cert)
+		cert, err := NewSelfSigned(SelfSignedOptions{Now: clock.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		certs[i][0], certs[i][1], err = EncodePEM(cert)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Concurrent first loads of one certificate share one result.
@@ -472,7 +479,7 @@ func TestCertFilesPEM(t *testing.T) {
 
 	// IdleTimeout drops certificates nobody loads.
 	c.IdleTimeout = 20 * time.Millisecond
-	time.Sleep(30 * time.Millisecond)
+	clock.Advance(30 * time.Millisecond)
 	_, _ = c.LoadPEM(certs[2][0], certs[2][1])
 	if c.Len() != 1 {
 		t.Fatalf("Len() after idle = %d, want 1", c.Len())
@@ -480,6 +487,43 @@ func TestCertFilesPEM(t *testing.T) {
 	c.Clear()
 	if c.Len() != 0 {
 		t.Fatalf("Len() after Clear = %d", c.Len())
+	}
+}
+
+func TestCertFilesIdleTimeoutSettings(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	cert, err := NewSelfSigned(SelfSignedOptions{Now: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := EncodePEM(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name    string
+		timeout time.Duration
+		kept    bool
+	}{
+		{name: "default"},
+		{name: "disabled", timeout: -1, kept: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := timeshim.NewFake(start)
+			c := CertFiles{Clock: clock, IdleTimeout: tt.timeout}
+			first, err := c.LoadPEM(certPEM, keyPEM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(DefaultIdleTimeout + time.Nanosecond)
+			next, err := c.LoadPEM(certPEM, keyPEM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kept := next == first; kept != tt.kept {
+				t.Errorf("cached certificate kept = %v, want %v", kept, tt.kept)
+			}
+		})
 	}
 }
 

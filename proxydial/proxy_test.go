@@ -42,17 +42,21 @@ func serveOnce(t *testing.T, handle func(net.Conn)) string {
 	return ln.Addr().String()
 }
 
-func mustDialer(t *testing.T, rawURL string) netx.ContextDialer {
+func mustDialer(t *testing.T, rawURL string, opts ...Option) netx.ContextDialer {
 	t.Helper()
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := FromURL(u, nil, nil)
+	d, err := FromURL(u, nil, opts...)
 	if err != nil {
 		t.Fatalf("FromURL(%s) error = %v", rawURL, err)
 	}
 	return d
+}
+
+func withTestTLS(cfg *tls.Config) Option {
+	return WithTLS(tlsconn.ProxyTLS(cfg))
 }
 
 func echoAfter(c net.Conn, greeting string) {
@@ -205,7 +209,7 @@ func TestHTTPSProxyUsesTLS(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
 	srv.StartTLS()
 	defer srv.Close()
-	_, err := mustDialer(t, "https://"+srv.Listener.Addr().String()).DialContext(context.Background(), "tcp", "example.com:443")
+	_, err := mustDialer(t, srv.URL, withTestTLS(nil)).DialContext(context.Background(), "tcp", "example.com:443")
 	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 		t.Fatalf("DialContext() error = %v, want certificate verification error", err)
 	}
@@ -301,9 +305,10 @@ func TestSOCKS5Failures(t *testing.T) {
 
 func TestDialContextEndsStalledHandshake(t *testing.T) {
 	// The TLS schemes stall in the TLS handshake.
+	tlsOption := withTestTLS(nil)
 	for _, scheme := range []string{"http", "socks5", "https", "socks5+tls"} {
 		addr := serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
-		d := mustDialer(t, scheme+"://"+addr)
+		d := mustDialer(t, scheme+"://"+addr, tlsOption)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		_, err := d.DialContext(ctx, "tcp", "example.com:80")
@@ -312,11 +317,17 @@ func TestDialContextEndsStalledHandshake(t *testing.T) {
 			t.Fatalf("%s timeout error = %v, want %v", scheme, err, context.DeadlineExceeded)
 		}
 
-		addr = serveOnce(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
-		d = mustDialer(t, scheme+"://"+addr)
-		ctx, cancel = context.WithCancel(context.Background())
-		time.AfterFunc(50*time.Millisecond, cancel)
-		if _, err := d.DialContext(ctx, "tcp", "example.com:80"); !errors.Is(err, context.Canceled) {
+		ctx, cancelHandshake := context.WithCancel(context.Background())
+		addr = serveOnce(t, func(c net.Conn) {
+			var b [1]byte
+			_, _ = c.Read(b[:])
+			cancelHandshake()
+			_, _ = io.Copy(io.Discard, c)
+		})
+		d = mustDialer(t, scheme+"://"+addr, tlsOption)
+		_, err = d.DialContext(ctx, "tcp", "example.com:80")
+		cancelHandshake()
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("%s cancel error = %v, want %v", scheme, err, context.Canceled)
 		}
 	}
@@ -324,12 +335,12 @@ func TestDialContextEndsStalledHandshake(t *testing.T) {
 
 //goland:noinspection HttpUrlsUsage
 func TestFromURLErrors(t *testing.T) {
-	if _, err := FromURL(nil, nil, nil); err == nil {
+	if _, err := FromURL(nil, nil); err == nil {
 		t.Error("FromURL(nil) succeeded")
 	}
 	for _, raw := range []string{"ftp://proxy:21", "http://", "socks5://:1080", "socks6://proxy", "https+tls://proxy", "http+tls://proxy", "ftp+tls://proxy"} {
 		u, _ := url.Parse(raw)
-		_, err := FromURL(u, nil, nil)
+		_, err := FromURL(u, nil)
 		if err == nil {
 			t.Errorf("FromURL(%s) succeeded", raw)
 		}
@@ -347,16 +358,33 @@ func TestFromURLErrors(t *testing.T) {
 	if hd := mustDialer(t, "http://proxy").(*HTTPDialer); hd.ProxyAddr != "proxy:80" || hd.Forward != nil || hd.Header != nil {
 		t.Errorf("http defaults = %#v", hd)
 	}
-	if hd := mustDialer(t, "https://[2001:db8::1]").(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" {
+	if hd := mustDialer(t, "https://[2001:db8::1]", withTestTLS(nil)).(*HTTPDialer); hd.ProxyAddr != "[2001:db8::1]:443" {
 		t.Errorf("https defaults = %#v", hd)
-	} else if td, ok := hd.Forward.(*tlsconn.Dialer); !ok || td.Config != nil || td.Forward != nil {
-		t.Errorf("https Forward = %#v", hd.Forward)
 	}
 	if _, err := d.DialContext(context.Background(), "udp", "example.com:53"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("udp dial error = %v", err)
 	}
 	if _, err := mustDialer(t, "http://proxy").DialContext(context.Background(), "unix", "/x"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("unix dial error = %v", err)
+	}
+}
+
+func TestTLSProxyRequiresDialer(t *testing.T) {
+	for _, raw := range []string{"https://proxy", "socks5+tls://proxy", "socks5h+tls://proxy", "socks4+tls://proxy", "socks4a+tls://proxy"} {
+		for _, opt := range []Option{nil, WithTLS(nil), WithTLS(func(netx.ContextDialer) netx.ContextDialer { return nil }), WithTLS(func(netx.ContextDialer) netx.ContextDialer { return (*tlsconn.Dialer)(nil) })} {
+			if _, err := FromString(raw, nil, opt); !errors.Is(err, ErrNoTLSDialer) {
+				t.Errorf("FromString(%q) error = %v, want ErrNoTLSDialer", raw, err)
+			}
+		}
+	}
+	t.Setenv("ALL_PROXY", "https://proxy")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	if _, err := FromEnvironment(nil); !errors.Is(err, ErrNoTLSDialer) {
+		t.Errorf("FromEnvironment() error = %v, want ErrNoTLSDialer", err)
+	}
+	if _, err := FromEnvironment(nil, withTestTLS(nil)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -374,7 +402,7 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("ALL_PROXY", "")
 	t.Setenv("all_proxy", "")
 	forward := &recordingDialer{}
-	d, err := FromEnvironment(forward, nil)
+	d, err := FromEnvironment(forward)
 	if err != nil || d != forward {
 		t.Fatalf("FromEnvironment(unset) = %v, %v; want forward", d, err)
 	}
@@ -382,7 +410,7 @@ func TestFromEnvironment(t *testing.T) {
 	t.Setenv("all_proxy", "socks5://proxy.internal:1081")
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "localhost, .corp.example, 10.0.0.0/8")
-	d, err = FromEnvironment(forward, nil)
+	d, err = FromEnvironment(forward)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +423,7 @@ func TestFromEnvironment(t *testing.T) {
 	}
 
 	t.Setenv("no_proxy", "")
-	if d, err := FromEnvironment(nil, nil); err != nil {
+	if d, err := FromEnvironment(nil); err != nil {
 		t.Fatal(err)
 	} else if _, ok := d.(*socks5.Dialer); !ok {
 		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5.Dialer", d)
@@ -404,7 +432,7 @@ func TestFromEnvironment(t *testing.T) {
 	// A value without a scheme is an http proxy, as for curl.
 	for raw, want := range map[string]string{"127.0.0.1:1080": "127.0.0.1:1080", "proxy.local:3128": "proxy.local:3128", "proxy.local": "proxy.local:80"} {
 		t.Setenv("ALL_PROXY", raw)
-		d, err := FromEnvironment(nil, nil)
+		d, err := FromEnvironment(nil)
 		if err != nil {
 			t.Fatalf("FromEnvironment(ALL_PROXY=%s) error = %v", raw, err)
 		}
@@ -414,11 +442,11 @@ func TestFromEnvironment(t *testing.T) {
 	}
 
 	t.Setenv("ALL_PROXY", "gopher://proxy")
-	if _, err := FromEnvironment(nil, nil); err == nil {
+	if _, err := FromEnvironment(nil); err == nil {
 		t.Fatal("FromEnvironment(bad scheme) succeeded")
 	}
 	t.Setenv("ALL_PROXY", "http://[::1")
-	if _, err := FromEnvironment(nil, nil); err == nil {
+	if _, err := FromEnvironment(nil); err == nil {
 		t.Fatal("FromEnvironment(bad URL) succeeded")
 	}
 }
@@ -518,11 +546,8 @@ func TestHTTPDialerConfig(t *testing.T) {
 	defer srv.Close()
 
 	// A custom TLS config reaches the HTTPS proxy, and Header adds fields.
-	d := &HTTPDialer{
-		ProxyAddr: srv.Listener.Addr().String(),
-		Forward:   &tlsconn.Dialer{Config: srv.Client().Transport.(*http.Transport).TLSClientConfig},
-		Header:    textproto.MIMEHeader{"User-Agent": {"netx-test"}, "X-Trace": {"1", "2"}},
-	}
+	d := mustDialer(t, srv.URL, withTestTLS(srv.Client().Transport.(*http.Transport).TLSClientConfig)).(*HTTPDialer)
+	d.Header = textproto.MIMEHeader{"User-Agent": {"netx-test"}, "X-Trace": {"1", "2"}}
 	conn, err := d.Dial("tcp", "example.com:443")
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
@@ -557,7 +582,7 @@ func TestFromURLSOCKSVariants(t *testing.T) {
 
 	forward := &recordingDialer{}
 	u, _ := url.Parse("SOCKS5H+TLS://proxy")
-	dialer, err := FromURL(u, forward, nil)
+	dialer, err := FromURL(u, forward, withTestTLS(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +591,7 @@ func TestFromURLSOCKSVariants(t *testing.T) {
 	if !ok || d.SOCKS4 || d.ProxyAddr != "proxy:1080" || td.Config != nil || td.Forward != forward {
 		t.Errorf("socks5h+tls = %#v, forward %#v", d, d.Forward)
 	}
-	if d := mustDialer(t, "socks4a+tls://proxy").(*socks5.Dialer); !d.SOCKS4 || d.Resolver != nil {
+	if d := mustDialer(t, "socks4a+tls://proxy", withTestTLS(nil)).(*socks5.Dialer); !d.SOCKS4 || d.Resolver != nil {
 		t.Errorf("socks4a+tls = %#v", d)
 	}
 }
@@ -590,13 +615,14 @@ func TestSOCKSOverTLS(t *testing.T) {
 	target := serveEcho(t)
 
 	for _, scheme := range []string{"socks5+tls", "socks5h+tls", "socks4a+tls"} {
-		d := mustDialer(t, scheme+"://"+ln.Addr().String())
+		raw := scheme + "://" + ln.Addr().String()
+		d := mustDialer(t, raw, withTestTLS(nil))
 		_, err := d.DialContext(context.Background(), "tcp", target)
 		if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 			t.Fatalf("%s with system roots error = %v, want a certificate error", scheme, err)
 		}
 
-		d.(*socks5.Dialer).Forward.(*tlsconn.Dialer).Config = &tls.Config{RootCAs: roots}
+		d = mustDialer(t, raw, withTestTLS(&tls.Config{RootCAs: roots}))
 		conn, err := d.DialContext(context.Background(), "tcp", target)
 		if err != nil {
 			t.Fatalf("%s DialContext() error = %v", scheme, err)
@@ -685,7 +711,7 @@ func TestHTTPDialerHeaderTabs(t *testing.T) {
 func TestFromEnvironmentBypassDialerDial(t *testing.T) {
 	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1")
 	t.Setenv("NO_PROXY", "localhost")
-	d, err := FromEnvironment(nil, nil)
+	d, err := FromEnvironment(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,17 +871,25 @@ func TestHTTPConnectError(t *testing.T) {
 	}
 }
 
-// FromURL layers a tlsconn.Dialer with the caller's TLS config, which it
-// leaves alone, on forward for https and +tls proxies. The handshake is
-// bounded by the context alone, as the rest of the dial is.
+// FromURL applies the factory only for TLS proxies and uses its result as
+// the proxy transport.
 //
 //goland:noinspection HttpUrlsUsage
-func TestFromURLTLSConfig(t *testing.T) {
+func TestFromURLTLSFactory(t *testing.T) {
 	cfg := &tls.Config{RootCAs: x509.NewCertPool()}
 	forward := &net.Dialer{}
+	wrap := tlsconn.ProxyTLS(cfg)
+	calls := 0
+	opt := WithTLS(func(base netx.ContextDialer) netx.ContextDialer {
+		calls++
+		if base != forward {
+			t.Errorf("factory dialer = %T %v, want %v", base, base, forward)
+		}
+		return wrap(base)
+	})
 	tlsOf := func(raw string) *tlsconn.Dialer {
 		u, _ := url.Parse(raw)
-		d, err := FromURL(u, forward, cfg)
+		d, err := FromURL(u, forward, opt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -870,7 +904,7 @@ func TestFromURLTLSConfig(t *testing.T) {
 		return td
 	}
 	for _, raw := range []string{"https://proxy:8443", "socks5+tls://proxy", "socks4a+tls://proxy"} {
-		if td := tlsOf(raw); td == nil || td.Config != cfg || td.Forward != forward || td.HandshakeTimeout >= 0 {
+		if td := tlsOf(raw); td == nil || td.Config != cfg || td.Forward != forward || td.HandshakeTimeout != 0 {
 			t.Errorf("%s Forward = %#v", raw, td)
 		}
 	}
@@ -881,6 +915,9 @@ func TestFromURLTLSConfig(t *testing.T) {
 		if td := tlsOf(raw); td != nil {
 			t.Errorf("%s uses TLS", raw)
 		}
+	}
+	if calls != 3 {
+		t.Errorf("factory calls = %d, want 3", calls)
 	}
 }
 
@@ -933,13 +970,13 @@ func TestProxyURLErrorsHidePassword(t *testing.T) {
 	} {
 		var errs []error
 		if u, err := url.Parse(raw); err == nil {
-			_, err := FromURL(u, nil, nil)
+			_, err := FromURL(u, nil)
 			errs = append(errs, err)
 		}
 		_, err := ParseURL(raw)
 		errs = append(errs, err)
 		t.Setenv("ALL_PROXY", raw)
-		_, err = FromEnvironment(nil, nil)
+		_, err = FromEnvironment(nil)
 		errs = append(errs, err)
 		for _, err := range errs {
 			if err == nil {
@@ -1034,7 +1071,7 @@ func TestFromEnvironmentBypass(t *testing.T) {
 	t.Setenv("no_proxy", "")
 	t.Setenv("NO_PROXY", "localhost")
 	forward := &recordingDialer{}
-	d, err := FromEnvironment(forward, nil)
+	d, err := FromEnvironment(forward)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1066,11 +1103,11 @@ func TestBypassDial(t *testing.T) {
 }
 
 func TestFromString(t *testing.T) {
-	d, err := FromString("proxy.example:3128", nil, nil)
+	d, err := FromString("proxy.example:3128", nil)
 	if h, ok := d.(*HTTPDialer); err != nil || !ok || h.ProxyAddr != "proxy.example:3128" {
 		t.Fatalf("FromString() = %#v, %v; want an HTTPDialer", d, err)
 	}
-	if _, err := FromString("http://", nil, nil); err == nil {
+	if _, err := FromString("http://", nil); err == nil {
 		t.Fatal("FromString() of a URL without host succeeded")
 	}
 }

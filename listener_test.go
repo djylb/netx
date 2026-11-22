@@ -393,14 +393,13 @@ func TestZeroListeners(t *testing.T) {
 	for name, l := range map[string]net.Listener{
 		"ChanListener":       new(ChanListener),
 		"SingleConnListener": new(SingleConnListener),
-		"PacketListener":     new(PacketListener),
 	} {
 		accepted := make(chan error, 1)
 		go func() {
 			_, err := l.Accept()
 			accepted <- err
 		}()
-		if a := l.Addr(); name != "PacketListener" && (a == nil || a.String() != "pipe") {
+		if a := l.Addr(); a == nil || a.String() != "pipe" {
 			t.Fatalf("%s: Addr() = %v, want pipe", name, a)
 		}
 		if err := l.Close(); err != nil {
@@ -428,11 +427,4 @@ func TestZeroListeners(t *testing.T) {
 		_ = c.Close()
 	}
 	_ = open.Close()
-	var pl PacketListener
-	if _, err := pl.Dial(&net.UDPAddr{Port: 1}); err == nil {
-		t.Fatal("Dial() on the zero PacketListener succeeded")
-	}
-	if _, err := pl.WriteTo(nil, &net.UDPAddr{Port: 1}); err == nil {
-		t.Fatal("WriteTo() on the zero PacketListener succeeded")
-	}
 }

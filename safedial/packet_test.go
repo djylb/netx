@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/dnslookup"
 )
 
 type sentDatagram struct {
@@ -185,7 +185,7 @@ func TestAddrPacketConnBounds(t *testing.T) {
 	r.block = make(chan struct{}) // never answers
 	w := (&Dialer{Resolver: r}).WrapAddrPacketConn(inner)
 	dst := netx.Addr{Name: "slow.example", Port: 53}
-	for range dgram.MaxLookupQueue {
+	for range dnslookup.MaxLookupQueue {
 		if _, err := w.WriteTo([]byte("x"), dst); err != nil {
 			t.Fatal(err)
 		}

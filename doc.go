@@ -1,5 +1,4 @@
-// Package netx provides reusable networking helpers for Go with no
-// third-party dependencies.
+// Package netx provides reusable networking helpers for Go.
 //
 // The root package holds portable connection helpers:
 //
@@ -25,31 +24,45 @@
 //     connects, and RaceDialer races several dialers as a ContextDialer, or
 //     the addresses of a service with DialAny.
 //   - Listeners: ChanListener accepts connections that the program delivers or
-//     dials in memory, NewSingleConnListener serves one connection,
-//     PacketListener splits a UDP socket into one connection per peer, and
+//     dials in memory, NewSingleConnListener serves one connection, and
 //     ListenEphemeralUDP opens a UDP socket on a free port. Accept retries
-//     temporary Accept errors with a backoff.
+//     temporary Accept errors with a backoff. See udpflow.ListenUDPReusePort
+//     for UDP socket groups using SO_REUSEPORT.
 //   - Error classification: IsTimeout, IsClosed, IsConnReset, IsConnRefused
 //     and the other Is* helpers, NetErrorKind and NetErrorDetails. They match
 //     platform errnos, including Winsock codes on Windows, before English
 //     error text.
 //
-// Protocol and platform helpers live in subpackages: tlsconn runs bounded TLS
-// handshakes and handles certificates, proxyproto builds, decodes and serves
-// PROXY protocol headers, transparent accepts transparently redirected TCP
-// connections and UDP datagrams, socks5 implements SOCKS5 and SOCKS4 with a
-// client dialer and a configurable server, httpproxy is an HTTP proxy server of
-// the same shape, httphead parses HTTP/1.x heads, duplex joins a read half and
-// a write half into a connection, and proxydial dials through HTTP CONNECT,
-// SOCKS5 and SOCKS4 proxies, also over TLS.
+// Protocol and platform helpers live in subpackages:
 //
-// Every package depends only on the standard library, and only tlsconn and
-// proxydial import crypto/tls, which adds a large amount of code to a binary
-// even when it is not used.
+//   - duplex joins a read half and a write half into one connection.
+//   - forwarded interprets client metadata from trusted proxies.
+//   - httphead parses HTTP/1.x heads and body framing.
+//   - httpproxy serves HTTP forward proxies and CONNECT tunnels.
+//   - httprewrite applies HTTP header and redirect rewrite rules.
+//   - memnet provides in-process streams and datagrams for tests.
+//   - proxydial dials through HTTP CONNECT, SOCKS5 and SOCKS4 proxies,
+//     with caller-supplied TLS for encrypted proxy connections.
+//   - proxyproto builds, decodes and serves PROXY protocol headers.
+//   - safedial dials and relays datagrams under a destination policy.
+//   - socks5 implements SOCKS5 and SOCKS4 clients and servers.
+//   - tlsconn runs bounded TLS handshakes and handles certificates.
+//   - transparent accepts transparently redirected TCP and UDP flows.
+//   - udpflow demultiplexes packet sockets into datagram connections.
+//   - wsconn handles WebSocket handshakes, frames and stream adapters.
+//   - wsconn/wshttp integrates WebSockets with net/http.
 //
-// Settings: the zero value of a field selects its default, stated in the
-// field's documentation; for timeouts and limits it is a safe bound unless
-// the field says otherwise. A negative timeout means no timeout, as for
-// http.Server.IdleTimeout. Other negative values are an error unless the
-// field gives them a meaning.
+// The module uses the standard library and github.com/djylb/timeshim,
+// which itself uses only the standard library. The only packages that
+// bring in crypto/tls are tlsconn directly and httprewrite and
+// wsconn/wshttp through net/http.
+//
+// Settings use the documented default for zero fields, omitted functional
+// options and optional nil constructor arguments. Defaults for timeouts
+// and limits are bounded unless documented otherwise. An explicit zero
+// passed to an option or constructor follows that parameter's documented
+// rule. A negative timeout disables it unless the setting says otherwise.
+// Other negative values require a documented meaning.
+// Servers and dialers expose settings as fields. Helpers use functional
+// options for optional settings and ordinary arguments for required inputs.
 package netx

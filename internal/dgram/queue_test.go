@@ -12,6 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/bufpool"
+	"github.com/djylb/netx/internal/clock"
 )
 
 func newQueue(n int) *Queue {
@@ -24,7 +27,7 @@ func newQueue(n int) *Queue {
 // per slot.
 func TestQueueBoundsBytes(t *testing.T) {
 	q := newQueue(4) // 4 datagrams, 8 KiB
-	buf := make([]byte, MaxDatagram)
+	buf := make([]byte, bufpool.MaxDatagram)
 	readAll := func() []int {
 		var sizes []int
 		for q.Len() > 0 {
@@ -73,12 +76,9 @@ func TestQueueDeadlineAndClose(t *testing.T) {
 	q.SetReadDeadline(time.Now().Add(time.Hour))
 	q.Enqueue([]byte("y"))
 	q.Close(io.EOF)
-	if q.readDeadline.timer != nil {
-		t.Fatal("deadline timer still pending after Close")
-	}
-	q.SetReadDeadline(time.Now().Add(time.Hour)) // as by a setter racing with Close
-	if q.readDeadline.timer != nil {
-		t.Fatal("a stopped deadline started a timer")
+	q.SetReadDeadline(clock.Past) // as by a setter racing with Close
+	if clock.IsClosed(q.readDeadline.Wait()) {
+		t.Fatal("a stopped deadline was reset after Close")
 	}
 	if q.Len() != 0 {
 		t.Fatal("datagrams kept by a closed queue")
@@ -111,10 +111,10 @@ func TestQueueReadRacingClose(t *testing.T) {
 func TestQueueActivityIsMonotonic(t *testing.T) {
 	q := newQueue(1)
 	q.Accepted()
-	if d := time.Duration(RealEpoch.Now() - q.active.Load()); d < 0 || d > time.Second {
+	if d := time.Duration(clock.RealEpoch.Now() - q.active.Load()); d < 0 || d > time.Second {
 		t.Fatalf("activity stamp is %v behind the monotonic clock, want about 0", d)
 	}
-	if last, accepted := q.Activity(); !accepted || last > RealEpoch.Now() || last < RealEpoch.At(time.Now().Add(-time.Hour)) {
+	if last, accepted := q.Activity(); !accepted || last > clock.RealEpoch.Now() || last < clock.RealEpoch.At(time.Now().Add(-time.Hour)) {
 		t.Fatal("Activity does not follow the activity stamp")
 	}
 }
@@ -122,7 +122,7 @@ func TestQueueActivityIsMonotonic(t *testing.T) {
 func TestQueueDoesNotAllocate(t *testing.T) {
 	q := newQueue(4)
 	p := make([]byte, 100)
-	buf := make([]byte, SmallSize)
+	buf := make([]byte, bufpool.SmallSize)
 	allocs := testing.AllocsPerRun(1000, func() {
 		q.Enqueue(p)
 		if n, err := q.Read(buf); n != len(p) || err != nil {
@@ -219,5 +219,17 @@ func BenchmarkIdleQueueMemory(b *testing.B) {
 				runtime.KeepAlive(qs)
 			}
 		})
+	}
+}
+
+// The ring grows to the bound, which need not be a power of two, and no
+// further.
+func TestQueueRingKeepsToBound(t *testing.T) {
+	q := newQueue(100)
+	for range 150 {
+		q.Enqueue([]byte("x"))
+	}
+	if q.Len() != 100 || len(q.ring) != 100 {
+		t.Fatalf("Len %d, ring %d, want 100 and 100", q.Len(), len(q.ring))
 	}
 }

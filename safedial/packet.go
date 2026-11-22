@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/dnslookup"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -42,13 +42,13 @@ type AddrPacketConn interface {
 // among them, holding the datagrams to a name while it is looked up.
 type guard struct {
 	d     *Dialer
-	names *dgram.Lookups[[]netip.Addr] // unmapped, IPv4 first, zones kept
+	names *dnslookup.Lookups[[]netip.Addr] // unmapped, IPv4 first, zones kept
 }
 
 // newGuard returns a guard whose held datagrams go to send.
 func newGuard(d *Dialer, send func(p []byte, ap netip.AddrPort)) *guard {
 	g := &guard{d: d}
-	g.names = dgram.NewLookups(lookupTimeout, ErrLookupBusy, g.lookup,
+	g.names = dnslookup.NewLookups(lookupTimeout, ErrLookupBusy, g.lookup,
 		func(p []byte, name string, addrs []netip.Addr, port uint16) {
 			if ap, err := g.pick(addrs, name, port); err == nil {
 				send(p, ap)

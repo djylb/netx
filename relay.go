@@ -13,7 +13,7 @@ import (
 
 	"github.com/djylb/timeshim"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/clock"
 )
 
 type relayOptions struct {
@@ -223,7 +223,7 @@ func (e *RelayError) Unwrap() error { return e.Err }
 // a write holds the stream back, as a blocked copy would.
 //
 // A source that returns one datagram per Read, such as a *net.UDPConn, a
-// PacketListener connection, a FramedConn with WithFramedDatagrams, or a
+// udpflow.PacketListener connection, a FramedConn with WithFramedDatagrams, or a
 // connection of another package whose LocalAddr is on a datagram network
 // (udp, ip, unixgram), has each datagram written whole with one Write, empty
 // ones included. A PacketListener connection hands its queued datagrams over
@@ -287,7 +287,8 @@ func Relay(ctx context.Context, a, b io.ReadWriteCloser, opts ...RelayOption) (a
 		defer context.AfterFunc(parent, func() { stop(context.Cause(parent)) })()
 	}
 	if idle != nil {
-		defer idle.start(func() { stop(ErrRelayIdle) })()
+		idle.Start(func() { stop(ErrRelayIdle) })
+		defer idle.End()
 	}
 	// A group that an end's Close closes, while stop runs, calls the
 	// relay's member again, which then must not wait for itself.
@@ -398,10 +399,10 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int6
 	}
 	interrupt := afterFuncSync(ctx, func() {
 		if r, ok := src.(interface{ SetReadDeadline(t time.Time) error }); ok {
-			_ = r.SetReadDeadline(dgram.Past)
+			_ = r.SetReadDeadline(clock.Past)
 		}
 		if w, ok := dst.(interface{ SetWriteDeadline(t time.Time) error }); ok {
-			_ = w.SetWriteDeadline(dgram.Past)
+			_ = w.SetWriteDeadline(clock.Past)
 		}
 	})
 	n, err := relayDirection(ctx, dst, src, f, nil)

@@ -1,3 +1,4 @@
+// Package dgram provides bounded queues for datagram connections.
 package dgram
 
 import (
@@ -6,6 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/netx/internal/bufpool"
+	"github.com/djylb/netx/internal/clock"
 )
 
 // Queue holds the datagrams of one connection until they are read, within a
@@ -14,56 +18,50 @@ import (
 // enqueue and read. Init it before use.
 //
 // The datagrams are in a ring that grows as they queue up, doubling until
-// it reaches the bound, which it never passes, and is let go once it is read empty, so that an idle
-// connection holds at most minRing slots, none before its first datagram,
-// whatever its bound.
+// it reaches the bound, and is released once drained, so an idle connection
+// holds at most minRing slots and none before its first datagram.
 type Queue struct {
 	err    error // returned by reads once closed; set before closed is
 	ready  chan struct{}
 	closed chan struct{}
-	epoch  *Epoch
+	epoch  *clock.Epoch
 	// readDeadline fails reads once it has expired.
-	readDeadline Deadline
-	ring         []*[]byte    // datagrams, in Small buffers when they fit
+	readDeadline clock.Deadline
+	ring         []*[]byte    // datagrams, in bufpool.Small buffers when they fit
 	limit        int          // the most datagrams queued
 	n            int          // datagrams in ring
 	head         int          // index of the oldest datagram in ring
 	queued       int64        // Cost of the datagrams queued
 	budget       int64        // the most Cost queued; one datagram always fits
-	active       atomic.Int64 // Epoch time of the last datagram or of Accept
+	active       atomic.Int64 // clock.Epoch time of the last datagram or of Accept
 	mu           sync.Mutex   // guards ring, head, n and queued
 	// accepted is set by Accept; the idle timeout skips the connection
 	// until then.
 	accepted atomic.Bool
-	// The place of the connection in its Table's idle wheel: the slot
-	// plus one, zero when not in it, and its index there. The wheel's lock
-	// guards them.
-	wheelSlot int32
-	wheelPos  int32
 }
 
 // minRing is the size of a ring when the first datagram queues.
 const minRing = 4
 
-// Init makes q hold up to n datagrams of SmallSize, or as many bytes of
+// Init makes q hold up to n datagrams of bufpool.SmallSize, or as many bytes of
 // larger ones, telling the time of activity by e, the epoch of the Table's
 // idle timeout too, or by the system clock when e is nil.
-func (q *Queue) Init(n int, e *Epoch) {
+func (q *Queue) Init(n int, e *clock.Epoch) {
 	if e == nil {
-		e = RealEpoch
+		e = clock.RealEpoch
 	}
 	q.epoch = e
 	q.limit = max(n, 1)
-	q.budget = int64(q.limit) * SmallSize
+	q.budget = int64(q.limit) * bufpool.SmallSize
 	q.ready = make(chan struct{}, 1)
 	q.closed = make(chan struct{})
-	q.readDeadline = MakeDeadline()
+	q.readDeadline = clock.MakeDeadline()
 }
 
-// Cost is the memory that a queued datagram of n bytes holds: a Small
+// Cost is the memory that a queued datagram of n bytes holds: a bufpool.Small
 // buffer, or an allocation of its own when it is larger.
 func Cost(n int) int64 {
-	return int64(max(n, SmallSize))
+	return int64(max(n, bufpool.SmallSize))
 }
 
 // Enqueue copies p into the queue and reports whether it did, which counts
@@ -74,16 +72,16 @@ func Cost(n int) int64 {
 func (q *Queue) Enqueue(p []byte) bool {
 	cost := Cost(len(p))
 	q.mu.Lock()
-	if IsClosed(q.closed) || q.n >= q.limit || q.n > 0 && q.queued+cost > q.budget {
+	if clock.IsClosed(q.closed) || q.n >= q.limit || q.n > 0 && q.queued+cost > q.budget {
 		q.mu.Unlock()
 		return false
 	}
 	var bp *[]byte
-	if len(p) <= SmallSize {
-		bp = Small.Get()
+	if len(p) <= bufpool.SmallSize {
+		bp = bufpool.Small.Get()
 		*bp = (*bp)[:len(p)]
 	} else {
-		bp = NewBuf(len(p))
+		bp = bufpool.NewBuf(len(p))
 	}
 	copy(*bp, p)
 	if q.n == len(q.ring) {
@@ -141,15 +139,15 @@ func (q *Queue) pop() *[]byte {
 }
 
 // Next returns the next datagram in its buffer, which the caller gives back
-// with Release. As on a socket, a closed queue or an expired deadline fails
+// with bufpool.Release. As on a socket, a closed queue or an expired deadline fails
 // it even while datagrams are queued.
 func (q *Queue) Next() (*[]byte, error) {
 	for {
-		if IsClosed(q.closed) {
+		if clock.IsClosed(q.closed) {
 			return nil, q.err
 		}
 		expired := q.readDeadline.Wait()
-		if IsClosed(expired) {
+		if clock.IsClosed(expired) {
 			return nil, os.ErrDeadlineExceeded
 		}
 		if bp := q.pop(); bp != nil {
@@ -172,7 +170,7 @@ func (q *Queue) Read(b []byte) (int, error) {
 		return 0, err
 	}
 	n := copy(b, *bp)
-	Release(bp)
+	bufpool.Release(bp)
 	return n, nil
 }
 
@@ -187,7 +185,7 @@ func (q *Queue) Close(err error) {
 	q.mu.Unlock()
 	q.readDeadline.Stop()
 	for i := range n {
-		Release(ring[(head+i)%len(ring)])
+		bufpool.Release(ring[(head+i)%len(ring)])
 	}
 }
 
@@ -199,7 +197,7 @@ func (q *Queue) Len() int {
 }
 
 // Closed reports whether Close was called.
-func (q *Queue) Closed() bool { return IsClosed(q.closed) }
+func (q *Queue) Closed() bool { return clock.IsClosed(q.closed) }
 
 // Done returns a channel that is closed by Close.
 func (q *Queue) Done() <-chan struct{} { return q.closed }
@@ -217,7 +215,7 @@ func (q *Queue) Accepted() {
 	q.accepted.Store(true)
 }
 
-// Activity returns the Epoch time of the last activity, and whether the
+// Activity returns the clock.Epoch time of the last activity, and whether the
 // connection was accepted, which starts its idle timeout.
 func (q *Queue) Activity() (last int64, accepted bool) {
 	// accepted first: Accepted touches before it sets it.

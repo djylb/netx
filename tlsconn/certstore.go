@@ -29,8 +29,8 @@ const (
 	// DefaultMaxEntries bounds the names a CertStore loaded when
 	// MaxEntries is 0.
 	DefaultMaxEntries = 1024
-	// DefaultIdleTimeout drops loaded names unused for this long when
-	// IdleTimeout is 0.
+	// DefaultIdleTimeout is how long CertStore keeps unused loaded names
+	// and CertFiles keeps unused certificates when IdleTimeout is zero.
 	DefaultIdleTimeout = 24 * time.Hour
 	// DefaultLoadTimeout bounds a CertStore load when LoadTimeout is 0.
 	DefaultLoadTimeout = 30 * time.Second

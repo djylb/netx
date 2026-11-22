@@ -8,7 +8,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -448,18 +447,10 @@ func (c *Conn) readErr(err error, inside bool) error {
 	if err == io.EOF && (inside || c.rmsg != 0) {
 		err = io.ErrUnexpectedEOF
 	}
-	if !isTimeout(err) {
+	if !netutil.IsDeadlineTimeout(err) {
 		c.rerr = err
 	}
 	return err
-}
-
-func isTimeout(err error) bool {
-	if errors.Is(err, os.ErrDeadlineExceeded) {
-		return true
-	}
-	var ne net.Error
-	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // nextDataFrame reads frames up to the next data frame, handling the
@@ -872,7 +863,7 @@ func (c *Conn) writableLocked() error {
 // writeDone makes a write error sticky unless the write timed out before
 // it wrote anything of its frame.
 func (c *Conn) writeDone(wrote bool, err error) error {
-	if err != nil && (wrote || !isTimeout(err)) {
+	if err != nil && (wrote || !netutil.IsDeadlineTimeout(err)) {
 		c.werr = err
 	}
 	return err

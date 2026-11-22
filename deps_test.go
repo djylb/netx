@@ -3,17 +3,13 @@ package netx
 import (
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// TestPackageDependencies checks what the README promises: every package
-// depends on the standard library, this module and timeshim alone, crypto/tls is
-// linked only by tlsconn, proxydial, and httprewrite and wsconn/wshttp
-// through net/http, and duplex, forwarded, httphead, proxyproto, tlsconn and
-// transparent depend on the standard library, this module's internal
-// packages and timeshim alone, and the internal packages on the standard
-// library and timeshim alone.
+// TestPackageDependencies enforces the module's dependency boundaries and
+// checks which packages bring in crypto/tls.
 func TestPackageDependencies(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
 		t.Skip("cannot run the go command")
@@ -34,17 +30,24 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/duplex", false, true},
 		{module + "/proxyproto", false, true},
 		{module + "/transparent", false, true},
+		{module + "/udpflow", false, true},
 		{module + "/socks5", false, false},
 		{module + "/httpproxy", false, false},
 		{module + "/httphead", false, true},
 		{module + "/tlsconn", true, true},
-		{module + "/proxydial", true, false},
+		{module + "/proxydial", false, false},
 		{module + "/forwarded", false, true},
 		{module + "/httprewrite", true, false}, // net/http links crypto/tls
 		{module + "/wsconn", false, false},     // httphead; wsconn/deps_test.go checks the rest
 		{module + "/wsconn/wshttp", true, false},
 		{module + "/safedial", false, false},
 		{module + "/memnet", false, true},
+	}
+	const internalPrefix = module + "/internal/"
+	allowedInternal := map[string][]string{
+		internalPrefix + "dgram":     {internalPrefix + "clock", internalPrefix + "bufpool"},
+		internalPrefix + "dnslookup": {internalPrefix + "bufpool"},
+		internalPrefix + "flowtable": {internalPrefix + "dgram", internalPrefix + "clock", internalPrefix + "bufpool"},
 	}
 	internal, err := exec.Command(goCmd, "list", module+"/internal/...").Output()
 	if err != nil {
@@ -68,8 +71,8 @@ func TestPackageDependencies(t *testing.T) {
 			case path == "crypto/tls" && !tt.tls:
 				t.Errorf("%s links crypto/tls", tt.pkg)
 			case path == module || strings.HasPrefix(path, module+"/"):
-				internal := strings.HasPrefix(path, module+"/internal/")
-				if tt.leaf && (!internal || strings.HasPrefix(tt.pkg, module+"/internal/")) {
+				if tt.leaf && !strings.HasPrefix(path, internalPrefix) ||
+					strings.HasPrefix(tt.pkg, internalPrefix) && !slices.Contains(allowedInternal[tt.pkg], path) {
 					t.Errorf("%s depends on %s", tt.pkg, path)
 				}
 			case std != "true":

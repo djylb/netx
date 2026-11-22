@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 const (
@@ -176,7 +178,7 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 			return written, true, err
 		}
 		if err := srcRaw.Read(fill); err != nil {
-			return written, true, rawOpError(err, "read")
+			return written, true, netutil.RawOpError(err, "read")
 		}
 		if noPipe {
 			// Through the wrappers, whose reads and writes refresh their
@@ -202,7 +204,7 @@ func spliceCopy(ctx context.Context, d *relaySink, s *relaySource, f *RelayFlow)
 		out = 0
 		writeErr := d.timeouts.refresh()
 		if writeErr == nil {
-			writeErr = rawOpError(dstRaw.Write(drain), "write")
+			writeErr = netutil.RawOpError(dstRaw.Write(drain), "write")
 		}
 		written += out
 		if writeErr == nil && spliceErr != nil {

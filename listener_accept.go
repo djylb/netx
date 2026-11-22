@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/clock"
 )
 
 // IsAcceptRetryable reports whether err, returned by a listener's Accept, is
@@ -33,7 +33,7 @@ func IsAcceptRetryable(err error) bool {
 // such as that of a closed listener, or ctx's error when ctx ends while it
 // waits to retry. ctx does not end a blocked l.Accept; close l for that.
 func Accept(ctx context.Context, l net.Listener) (net.Conn, error) {
-	var backoff dgram.Backoff
+	var backoff clock.Backoff
 	for {
 		c, err := l.Accept()
 		if err == nil {

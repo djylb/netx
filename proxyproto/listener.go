@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/bufpool"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -502,8 +502,8 @@ func signaturePrefix(b []byte) bool {
 }
 
 func (c *Conn) readDatagramHeader() error {
-	bp := dgram.Large.Get()
-	defer dgram.Large.Put(bp)
+	bp := bufpool.Large.Get()
+	defer bufpool.Large.Put(bp)
 	buf := *bp
 	n, err := c.conn.Read(buf)
 	if err != nil {
@@ -582,13 +582,13 @@ func (c *Conn) DroppedDatagrams() uint64 {
 
 func (c *Conn) readEachDatagram(b []byte) (int, *Header, error) {
 	buf := b
-	if len(buf) < dgram.LargeSize {
-		bp := dgram.Large.Get()
-		defer dgram.Large.Put(bp)
+	if len(buf) < bufpool.LargeSize {
+		bp := bufpool.Large.Get()
+		defer bufpool.Large.Put(bp)
 		buf = *bp
 	}
 	for {
-		n, err := c.conn.Read(buf[:dgram.LargeSize])
+		n, err := c.conn.Read(buf[:bufpool.LargeSize])
 		if n == 0 && err != nil {
 			return 0, nil, err
 		}
@@ -671,8 +671,8 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 		return 0, c.err
 	}
 	if c.datagram != 0 {
-		bp := dgram.Large.Get()
-		defer dgram.Large.Put(bp)
+		bp := bufpool.Large.Get()
+		defer bufpool.Large.Put(bp)
 		buf := *bp
 		var total int64
 		for {
@@ -719,8 +719,8 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 	}
 	// Without ReadFrom, io.Copy would allocate a buffer for every call.
 	// Through a stream buffer: the writer has no ReadFrom.
-	bp := dgram.Stream.Get()
-	defer dgram.Stream.Put(bp)
+	bp := bufpool.Stream.Get()
+	defer bufpool.Stream.Put(bp)
 	n, err := io.CopyBuffer(writerOnly{w}, readerOnly{c.conn}, *bp)
 	return total + n, err
 }

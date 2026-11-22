@@ -21,7 +21,7 @@ const maxConnectReplyBytes = 64 << 10
 // HTTPDialer dials through an HTTP proxy with the CONNECT method.
 type HTTPDialer struct {
 	// Forward dials the proxy; nil means a zero net.Dialer. For an https
-	// proxy, set it to a *tlsconn.Dialer, as FromURL does.
+	// proxy, set it to a TLS dialer, such as a *tlsconn.Dialer.
 	Forward netx.ContextDialer
 	// Header holds extra fields for the CONNECT request, such as
 	// User-Agent or Proxy-Authorization.

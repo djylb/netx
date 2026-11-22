@@ -467,3 +467,18 @@ func TestFlowReadHonorsDeadlineBeforeQueue(t *testing.T) {
 	_ = f.SetReadDeadline(time.Time{})
 	readFlow(t, f, "1")
 }
+
+func TestZeroFlowListener(t *testing.T) {
+	var l FlowListener
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	select {
+	case <-l.flows.Done():
+	default:
+		t.Fatal("zero listener's flow table remained open")
+	}
+	if c, err := l.Accept(); c != nil || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept after Close = %v, %v", c, err)
+	}
+}

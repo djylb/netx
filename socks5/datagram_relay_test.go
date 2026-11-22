@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/dnslookup"
 
 	"github.com/djylb/timeshim"
 )
@@ -426,7 +426,7 @@ func TestPacketConnLookupBounds(t *testing.T) {
 	res := &fakeResolver{slow: make(chan struct{})}
 	out, _ := newEgress(t, res)
 	slow := netx.Addr{Name: "slow.test", Port: 9}
-	for i := range dgram.MaxLookupQueue {
+	for i := range dnslookup.MaxLookupQueue {
 		if n, err := out.WriteTo([]byte("x"), slow); n != 1 || err != nil {
 			t.Fatalf("WriteTo %d = %d, %v; want it held", i, n, err)
 		}

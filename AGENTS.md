@@ -6,9 +6,11 @@
   `PATH`) must pass.
 - Standard library only, also for tests, besides
   `github.com/djylb/timeshim` (itself standard library only), which every
-  package, leaf and `internal` ones included, may import. `internal`
-  packages import nothing else of this module; leaf packages never import the root package. Register
-  every new package in `deps_test.go`.
+  package, leaf and `internal` ones included, may import. Internal packages
+  are independent except for `dgram`'s use of `clock` and `bufpool`,
+  `flowtable`'s use of `dgram` and `clock`, and `dnslookup`'s use of
+  `bufpool`. Leaf packages never import the root
+  package. Register every new package in `deps_test.go`.
 - Treat everything from peers and the network as untrusted: bound every read
   and every parse, and reject ambiguous framing instead of guessing.
 - Methods on nil connection and listener pointers return `net.ErrClosed`

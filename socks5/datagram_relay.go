@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/bufpool"
+	"github.com/djylb/netx/internal/clock"
 
 	"github.com/djylb/timeshim"
 )
@@ -64,7 +65,7 @@ var ErrDatagramTooLarge = errors.New("socks5: UDP datagram too large")
 // Each Read of stream must return one datagram with its RFC 1928 header,
 // and each Write sends one, as with a netx.FramedConn made with
 // netx.WithFramedDatagrams, a UDP socket connected to the client, or a
-// netx.PacketListener connection. Relay sends the payload of each datagram
+// udpflow.PacketListener connection. Relay sends the payload of each datagram
 // to its destination through out, and writes each reply that out receives
 // to stream, headed by the reply's source. Datagrams whose fragment number
 // is not 0 are dropped, as RFC 1928 lets a relay that does not reassemble
@@ -130,8 +131,10 @@ func (r *DatagramRelay) Relay(ctx context.Context, stream io.ReadWriteCloser, ou
 		reportInvalid: true,
 	}
 	if cfg.IdleTimeout > 0 {
-		d.idle = startDatagramIdle(cfg.IdleTimeout, cfg.Clock, func() { stop(netx.ErrRelayIdle) })
-		defer d.idle.end()
+		d.idle = new(clock.Idle)
+		d.idle.Init(cfg.IdleTimeout, cfg.Clock)
+		d.idle.Start(func() { stop(netx.ErrRelayIdle) })
+		defer d.idle.End()
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { stop(d.replies()) })
@@ -148,7 +151,7 @@ type datagramRelay struct {
 	sent     func(dst netx.Addr, n int)
 	received func(src netx.Addr, n int)
 	onError  func(err error)
-	idle     *datagramIdle // nil without an idle timeout
+	idle     *clock.Idle // nil without an idle timeout
 	// icmpCredit counts the datagrams sent, up to maxICMPCredit, that a
 	// reported ICMP error can stand for; see replies.
 	icmpCredit atomic.Int32
@@ -165,7 +168,7 @@ const maxICMPCredit = 64
 // largest datagram with its header, so that short relays do not each
 // allocate them.
 var udpBufPool = sync.Pool{New: func() any {
-	b := make([]byte, MaxDatagramHeaderLen+dgram.MaxDatagram)
+	b := make([]byte, MaxDatagramHeaderLen+bufpool.MaxDatagram)
 	return &b
 }}
 
@@ -319,49 +322,6 @@ func (d *datagramRelay) report(err error) {
 
 func (d *datagramRelay) touch() {
 	if d.idle != nil {
-		d.idle.activity.Store(d.idle.epoch.Now())
+		d.idle.Touch()
 	}
-}
-
-// datagramIdle ends a relay that no datagram passed for d.
-type datagramIdle struct {
-	timer    timeshim.Timer // under mu
-	epoch    *dgram.Epoch
-	d        time.Duration
-	activity atomic.Int64 // epoch time of the last datagram
-	mu       sync.Mutex   // orders the timer with end
-	ended    bool         // under mu
-}
-
-func startDatagramIdle(d time.Duration, c timeshim.Clock, stop func()) *datagramIdle {
-	i := &datagramIdle{d: d, epoch: dgram.NewEpoch(c)}
-	i.activity.Store(i.epoch.Now())
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.timer = i.epoch.Clock().AfterFunc(d, func() { i.check(stop) })
-	return i
-}
-
-func (i *datagramIdle) check(stop func()) {
-	i.mu.Lock()
-	if i.ended {
-		i.mu.Unlock()
-		return
-	}
-	left := time.Duration(i.activity.Load() + int64(i.d) - i.epoch.Now())
-	if left > 0 {
-		i.timer.Reset(left)
-		i.mu.Unlock()
-		return
-	}
-	i.ended = true
-	i.mu.Unlock()
-	stop()
-}
-
-func (i *datagramIdle) end() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.ended = true
-	i.timer.Stop()
 }

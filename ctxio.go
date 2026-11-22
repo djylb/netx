@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/clock"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -30,7 +30,7 @@ func DoWithContext(ctx context.Context, c net.Conn, fn func() error) error {
 		_ = c.SetDeadline(deadline)
 	}
 	interrupt := afterFuncSync(ctx, func() {
-		if c.SetDeadline(dgram.Past) != nil {
+		if c.SetDeadline(clock.Past) != nil {
 			_ = c.Close()
 		}
 	})

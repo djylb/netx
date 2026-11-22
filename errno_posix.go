@@ -2,7 +2,11 @@
 
 package netx
 
-import "syscall"
+import (
+	"syscall"
+
+	"github.com/djylb/netx/internal/netutil"
+)
 
 // platformErrnos are the errnos of each errnoID; see errors.go.
 // errnoError is the type of the errors in platformErrnos.
@@ -19,6 +23,6 @@ var platformErrnos = [numErrnoIDs][]errnoError{
 	ePerm:         {syscall.EPERM},
 	eTimedOut:     {syscall.ETIMEDOUT},
 	eAddrInUse:    {syscall.EADDRINUSE},
-	eAddrNotAvail: {syscall.EADDRNOTAVAIL},
+	eAddrNotAvail: netutil.AddrNotAvailableErrnos,
 	eMsgSize:      {syscall.EMSGSIZE},
 }

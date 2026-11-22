@@ -3,13 +3,11 @@ package netx
 import (
 	"context"
 	"io"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/djylb/timeshim"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/clock"
 )
 
 // RelayFlow paces and counts one direction of a Relay or a Copy. Any of its
@@ -111,30 +109,19 @@ func (f *RelayFlow) end(n int64, err error) {
 	}
 }
 
-// relayIdle is the idle timeout of a relay: the flows of both directions
-// record when data passes, and a timer stops the relay once none has for d.
-type relayIdle struct {
-	epoch    *dgram.Epoch
-	timer    timeshim.Timer
-	d        time.Duration
-	activity atomic.Int64 // epoch time of the last data
-	waiting  atomic.Int32 // flows blocked in Wait, which is not idleness
-	mu       sync.Mutex   // orders the timer with start and its stop
-	stopped  bool
-}
+// relayIdle adapts the idle timer to Relay's copy paths and hooks.
+type relayIdle struct{ clock.Idle }
 
 func newRelayIdle(d time.Duration, c timeshim.Clock) *relayIdle {
-	i := &relayIdle{d: d, epoch: dgram.NewEpoch(c)}
-	i.touch()
+	i := new(relayIdle)
+	i.Init(d, c)
 	return i
 }
-
-func (i *relayIdle) touch() { i.activity.Store(i.epoch.Now()) }
 
 // done records n bytes written, as a RelayFlow's Done.
 func (i *relayIdle) done(n int64) error {
 	if n > 0 {
-		i.touch()
+		i.Touch()
 	}
 	return nil
 }
@@ -163,7 +150,7 @@ type idleWriter struct {
 func (w idleWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
 	if n > 0 {
-		w.i.touch()
+		w.i.Touch()
 	}
 	return n, err
 }
@@ -176,7 +163,7 @@ type idleReader struct {
 func (r idleReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	if n > 0 {
-		r.i.touch()
+		r.i.Touch()
 	}
 	return n, err
 }
@@ -185,7 +172,7 @@ func (r idleReader) Read(p []byte) (int, error) {
 func (i *relayIdle) watch(f RelayFlow) RelayFlow {
 	done := f.Done
 	f.Done = func(n int64) error {
-		i.touch()
+		i.Touch()
 		if done != nil {
 			return done(n)
 		}
@@ -193,45 +180,10 @@ func (i *relayIdle) watch(f RelayFlow) RelayFlow {
 	}
 	if wait := f.Wait; wait != nil {
 		f.Wait = func(ctx context.Context, n int64) (int64, error) {
-			i.waiting.Add(1)
-			defer func() {
-				i.touch()
-				i.waiting.Add(-1)
-			}()
+			i.BeginWait()
+			defer i.EndWait()
 			return wait(ctx, n)
 		}
 	}
 	return f
-}
-
-// start starts the timer, which calls stop once the relay is idle, and
-// returns a function that ends it.
-func (i *relayIdle) start(stop func()) func() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.timer = i.epoch.Clock().AfterFunc(i.d, func() { i.check(stop) })
-	return func() {
-		i.mu.Lock()
-		defer i.mu.Unlock()
-		i.stopped = true
-		i.timer.Stop()
-	}
-}
-
-func (i *relayIdle) check(stop func()) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.stopped {
-		return
-	}
-	left := time.Duration(i.activity.Load() + int64(i.d) - i.epoch.Now())
-	if i.waiting.Load() > 0 {
-		left = i.d // a Wait that blocks counts as activity
-	}
-	if left > 0 {
-		i.timer.Reset(left)
-		return
-	}
-	i.stopped = true
-	stop()
 }

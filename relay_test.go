@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/nettest"
 	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/netx/proxyproto"
 )
@@ -558,13 +559,9 @@ func TestRelayKeepsLargeDatagrams(t *testing.T) {
 	// buffer, 9 KiB by default.
 	const sendBuffer = 64 << 10
 	t.Run("PacketListener", func(t *testing.T) {
-		l := newUDPListener(t)
-		client := dialUDP(t, l)
-		_ = client.SetWriteBuffer(sendBuffer)
-		if _, err := client.Write(make([]byte, size)); err != nil {
-			t.Fatal(err)
-		}
-		relayOne(t, acceptWithin(t, l))
+		l, client := packetPair(t)
+		send(t, l, client, string(make([]byte, size)))
+		relayOne(t, nettest.AcceptWithin(t, l))
 	})
 	t.Run("UDPConn", func(t *testing.T) {
 		server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

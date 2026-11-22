@@ -11,8 +11,9 @@ import (
 	"sync"
 
 	"github.com/djylb/netx"
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/dnslookup"
 	"github.com/djylb/netx/internal/netutil"
+	"github.com/djylb/netx/udpflow"
 
 	"github.com/djylb/timeshim"
 )
@@ -53,7 +54,7 @@ var ErrLookupBusy = errors.New("socks5: too many datagrams wait for name lookups
 // not see the cancellation at once.
 func NewPacketConn(c *net.UDPConn) PacketConn {
 	u := &udpPacketConn{c: c, resolver: net.DefaultResolver}
-	u.names = dgram.NewLookups(DefaultDialTimeout, ErrLookupBusy, u.lookup,
+	u.names = dnslookup.NewLookups(DefaultDialTimeout, ErrLookupBusy, u.lookup,
 		func(p []byte, _ string, ip netip.Addr, port uint16) {
 			_, _ = c.WriteToUDPAddrPort(p, netip.AddrPortFrom(ip, port))
 		})
@@ -68,7 +69,7 @@ type ipResolver interface {
 type udpPacketConn struct {
 	c        *net.UDPConn
 	resolver ipResolver
-	names    *dgram.Lookups[netip.Addr]
+	names    *dnslookup.Lookups[netip.Addr]
 }
 
 func (u *udpPacketConn) WriteTo(p []byte, dst netx.Addr) (int, error) {
@@ -146,7 +147,7 @@ func ListenAssociationUDP(ctx context.Context, req *Request) (net.PacketConn, er
 // udpRelay routes the datagrams arriving on one socket to the associations of
 // their clients.
 type udpRelay struct {
-	l       *netx.PacketListener
+	l       *udpflow.PacketListener
 	pending map[netip.Addr][]*association // by client IP, until the first datagram; under mu
 	anyPeer *association                  // takes the first source, on its own socket; under mu
 	mu      sync.Mutex
@@ -159,11 +160,11 @@ func (s *Server) newUDPRelay(pc net.PacketConn) *udpRelay {
 	if queue <= 0 {
 		queue = DefaultUDPQueue
 	}
-	r.l = netx.NewPacketListener(pc,
-		netx.WithPacketAcceptFilter(r.expects),
-		netx.WithPacketQueue(queue),
-		netx.WithPacketIdleTimeout(netutil.Timeout(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
-		netx.WithPacketClock(s.Clock),
+	r.l = udpflow.NewPacketListener(pc,
+		udpflow.WithPacketAcceptFilter(r.expects),
+		udpflow.WithPacketQueue(queue),
+		udpflow.WithPacketIdleTimeout(netutil.Timeout(s.UDPIdleTimeout, DefaultUDPIdleTimeout)),
+		udpflow.WithPacketClock(s.Clock),
 	)
 	go r.acceptLoop()
 	return r

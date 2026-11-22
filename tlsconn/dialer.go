@@ -14,6 +14,20 @@ import (
 // netx.ContextDialer.
 type ContextDialer = netutil.ContextDialer
 
+// ProxyTLS returns a factory for proxydial.WithTLS. It wraps the underlying
+// dialer in a Dialer that verifies the proxy using cfg. A nil cfg uses the
+// system roots. If cfg has no ServerName, the Dialer uses the host of the
+// address passed to DialContext.
+//
+// The handshake uses the dial context's deadline, with
+// DefaultHandshakeTimeout as the fallback when the context has no deadline.
+// cfg must not be modified after it is passed to ProxyTLS.
+func ProxyTLS(cfg *tls.Config) func(ContextDialer) ContextDialer {
+	return func(forward ContextDialer) ContextDialer {
+		return &Dialer{Forward: forward, Config: cfg}
+	}
+}
+
 // Dialer dials connections with Forward and runs a TLS client handshake on
 // them. Unlike tls.Dialer, Forward can be any ContextDialer, such as a proxy
 // dialer, so TLS can be layered on a proxied connection, or a proxy dialer

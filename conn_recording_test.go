@@ -193,10 +193,9 @@ func TestPeek(t *testing.T) {
 
 // On a datagram connection Peek keeps the first datagram whole.
 func TestPeekDatagram(t *testing.T) {
-	l := newUDPListener(t)
-	peer := dialUDP(t, l)
+	l, peer := packetPair(t)
 	big := bytes.Repeat([]byte("d"), 1000)
-	_, _ = peer.Write(big)
+	send(t, l, peer, string(big))
 	c, err := l.Accept()
 	if err != nil {
 		t.Fatal(err)

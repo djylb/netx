@@ -3,6 +3,7 @@ package transparent
 import (
 	"context"
 	"errors"
+	"hash/maphash"
 	"net"
 	"net/netip"
 	"os"
@@ -11,7 +12,10 @@ import (
 
 	"github.com/djylb/timeshim"
 
+	"github.com/djylb/netx/internal/bufpool"
+	"github.com/djylb/netx/internal/clock"
 	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/flowtable"
 )
 
 // FlowListener accepts one connection per flow of the datagrams that TPROXY
@@ -28,14 +32,15 @@ import (
 // would send them to the socket again. After a connection is closed, the next
 // datagram of its flow starts a new one. A connection lasts until it is
 // closed, so a listener facing untrusted or spoofed sources should set
-// WithFlowIdleTimeout or read deadlines.
+// WithFlowIdleTimeout or read deadlines. The zero FlowListener owns no
+// socket and its Accept waits until Close.
 type FlowListener struct {
 	// closeErr is the error of closing c, set once.
 	closeErr  error
 	c         *net.UDPConn
-	epoch     *dgram.Epoch // of the idle timeout
+	epoch     *clock.Epoch // of the idle timeout
 	opts      flowOptions
-	flows     dgram.Table[flowKey, *FlowConn]
+	flows     flowtable.Table[flowKey, struct{}, *FlowConn]
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	// mu orders the reply loops that wg counts before Close's wait: once
@@ -46,6 +51,14 @@ type FlowListener struct {
 
 type flowKey struct {
 	src, dst netip.AddrPort
+}
+
+func hashFlow(seed maphash.Seed, key flowKey) uint64 {
+	var h maphash.Hash
+	h.SetSeed(seed)
+	flowtable.WriteAddrPort(&h, key.src)
+	flowtable.WriteAddrPort(&h, key.dst)
+	return h.Sum64()
 }
 
 type flowOptions struct {
@@ -160,9 +173,13 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 	}
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
-	l := &FlowListener{c: c, opts: cfg, epoch: dgram.NewEpoch(cfg.clock)}
-	l.flows.Init(dgram.TableOptions[*FlowConn]{Queue: (*FlowConn).queue, Shutdown: (*FlowConn).shutdown,
-		Epoch: l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle})
+	l := &FlowListener{c: c, opts: cfg, epoch: clock.NewEpoch(cfg.clock)}
+	l.flows.Init(flowtable.TableOptions[flowKey, struct{}, *FlowConn]{
+		Queue: (*FlowConn).queue, Shutdown: (*FlowConn).shutdown,
+		Membership: func(f *FlowConn) *flowtable.Membership[flowKey, struct{}] { return &f.membership },
+		HashKey:    hashFlow,
+		Epoch:      l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle,
+	})
 	return l
 }
 
@@ -170,6 +187,9 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 // net.ErrClosed once the listener is closed. The idle timeout of a
 // connection starts when it is accepted.
 func (l *FlowListener) Accept() (net.Conn, error) {
+	if l == nil {
+		return nil, net.ErrClosed
+	}
 	f, err := l.flows.Accept()
 	if err != nil {
 		return nil, err
@@ -180,12 +200,17 @@ func (l *FlowListener) Accept() (net.Conn, error) {
 // Close closes the socket and every connection of the listener, and waits
 // for the listener's goroutines to stop.
 func (l *FlowListener) Close() error {
+	if l == nil {
+		return net.ErrClosed
+	}
 	l.closeOnce.Do(func() {
 		l.mu.Lock()
 		l.closed = true
 		l.mu.Unlock()
 		l.flows.Close(net.ErrClosed)
-		l.closeErr = l.c.Close()
+		if l.c != nil {
+			l.closeErr = l.c.Close()
+		}
 	})
 	l.wg.Wait()
 	return l.closeErr
@@ -193,13 +218,16 @@ func (l *FlowListener) Close() error {
 
 // Addr returns the listening socket's address.
 func (l *FlowListener) Addr() net.Addr {
+	if l == nil || l.c == nil {
+		return nil
+	}
 	return l.c.LocalAddr()
 }
 
 func (l *FlowListener) readLoop() {
-	buf := make([]byte, dgram.MaxDatagram)
+	buf := make([]byte, bufpool.MaxDatagram)
 	done := l.flows.Done()
-	var backoff dgram.Backoff
+	var backoff clock.Backoff
 	for {
 		n, info, err := ReadFromUDP(l.c, buf)
 		if err == nil {
@@ -207,7 +235,7 @@ func (l *FlowListener) readLoop() {
 			l.deliver(buf[:n], info)
 			continue
 		}
-		if dgram.IsClosed(done) {
+		if clock.IsClosed(done) {
 			return
 		}
 		switch {
@@ -286,6 +314,7 @@ type FlowConn struct {
 	// reply is the socket that answers the flow, once a Write opened it.
 	reply      *net.UDPConn
 	key        flowKey
+	membership flowtable.Membership[flowKey, struct{}]
 	q          dgram.Queue
 	closeOnce  sync.Once
 	mu         sync.Mutex // reply, writeDeadline
@@ -300,16 +329,24 @@ type datagramSource = dgram.Source
 
 // Redirected reports whether the flow was redirected to the listener rather
 // than sent to it directly, which only WithFlowDirect accepts.
-func (f *FlowConn) Redirected() bool { return f.redirected }
+func (f *FlowConn) Redirected() bool { return f != nil && f.redirected }
 
 // Read reads the next datagram of the flow into b, truncated to b. As on a
 // socket, an expired read deadline fails it even while datagrams are
 // queued. It returns io.EOF once an idle timeout closed f, and net.ErrClosed
 // once f or the listener is closed.
-func (f *FlowConn) Read(b []byte) (int, error) { return f.q.Read(b) }
+func (f *FlowConn) Read(b []byte) (int, error) {
+	if f == nil {
+		return 0, net.ErrClosed
+	}
+	return f.q.Read(b)
+}
 
 // Write sends b to the source as one datagram from the original destination.
 func (f *FlowConn) Write(b []byte) (int, error) {
+	if f == nil {
+		return 0, net.ErrClosed
+	}
 	if !f.redirected {
 		f.mu.Lock()
 		dl := f.writeDeadline
@@ -389,7 +426,7 @@ func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 			continue
 		}
 		f.q.Enqueue((*bp)[:n])
-		dgram.Large.Put(bp)
+		bufpool.Large.Put(bp)
 	}
 }
 
@@ -397,6 +434,9 @@ func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 // Reads and Writes return net.ErrClosed, and the next datagram of the flow
 // starts a new connection.
 func (f *FlowConn) Close() error {
+	if f == nil {
+		return net.ErrClosed
+	}
 	if f.q.Closed() {
 		return net.ErrClosed
 	}
@@ -412,7 +452,7 @@ func (f *FlowConn) shutdown(err error) {
 	f.closeOnce.Do(func() {
 		// Removed first, so that a datagram arriving from here on starts a
 		// new flow rather than finding this one closed.
-		f.l.flows.Remove(f.key, f)
+		f.l.flows.Remove(f)
 		if testHookFlowShutdown != nil {
 			testHookFlowShutdown(f)
 		}
@@ -428,10 +468,20 @@ func (f *FlowConn) shutdown(err error) {
 }
 
 // LocalAddr returns the flow's original destination.
-func (f *FlowConn) LocalAddr() net.Addr { return f.local }
+func (f *FlowConn) LocalAddr() net.Addr {
+	if f == nil {
+		return nil
+	}
+	return f.local
+}
 
 // RemoteAddr returns the flow's source.
-func (f *FlowConn) RemoteAddr() net.Addr { return f.remote }
+func (f *FlowConn) RemoteAddr() net.Addr {
+	if f == nil {
+		return nil
+	}
+	return f.remote
+}
 
 // SetDeadline sets the read and write deadlines.
 func (f *FlowConn) SetDeadline(t time.Time) error {
@@ -443,6 +493,9 @@ func (f *FlowConn) SetDeadline(t time.Time) error {
 
 // SetReadDeadline sets the deadline of pending and later Reads.
 func (f *FlowConn) SetReadDeadline(t time.Time) error {
+	if f == nil {
+		return net.ErrClosed
+	}
 	if f.q.Closed() {
 		return net.ErrClosed
 	}
@@ -452,6 +505,9 @@ func (f *FlowConn) SetReadDeadline(t time.Time) error {
 
 // SetWriteDeadline sets the deadline of later Writes.
 func (f *FlowConn) SetWriteDeadline(t time.Time) error {
+	if f == nil {
+		return net.ErrClosed
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.q.Closed() {

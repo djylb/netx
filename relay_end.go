@@ -41,7 +41,7 @@ type relaySource struct {
 }
 
 // datagramSource is a connection that hands its datagrams over in pooled
-// buffers, which the caller gives back with putBuf: a PacketListener
+// buffers, which the caller gives back with putBuf: a udpflow.PacketListener
 // connection or a connection of another package of this module, such as a
 // transparent.FlowConn, whose queue holds them so, or a FramedConn with
 // WithFramedDatagrams, which waits for a frame's header before it takes a
@@ -152,7 +152,7 @@ func (s *relaySource) init(r io.Reader) {
 
 // readsDatagrams reports whether each Read of the source returns one
 // datagram, which a buffer shorter than the datagram would truncate: a
-// FramedConn with WithFramedDatagrams, or a connection over a PacketListener
+// FramedConn with WithFramedDatagrams, or a connection over a udpflow.PacketListener
 // peer or a UDP, IP or Unix datagram socket, also beneath wrappers.
 func (s *relaySource) readsDatagrams() bool {
 	if !s.datagramSet {

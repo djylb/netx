@@ -11,16 +11,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/djylb/netx"
+	"github.com/djylb/netx/udpflow"
 )
 
-func newDatagramListener(t *testing.T, policy Policy, opts ...netx.PacketListenerOption) *Listener {
+func newDatagramListener(t *testing.T, policy Policy, opts ...udpflow.PacketListenerOption) *Listener {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pl := netx.NewPacketListener(pc, opts...)
+	pl := udpflow.NewPacketListener(pc, opts...)
 	t.Cleanup(func() { _ = pl.Close() })
 	return &Listener{
 		Listener: pl,
@@ -339,7 +339,7 @@ func (r *datagramRecorder) Write(p []byte) (int, error) {
 }
 
 func TestListenerDatagramWriteTo(t *testing.T) {
-	l := newDatagramListener(t, Required, netx.WithPacketIdleTimeout(200*time.Millisecond))
+	l := newDatagramListener(t, Required, udpflow.WithPacketIdleTimeout(200*time.Millisecond))
 	header := wireOf(V1, udp("192.0.2.1", 1), udp("192.0.2.2", 2))
 	server, _ := sendDatagrams(t, l, append(header, "a"...), []byte("bb"), []byte("ccc"))
 	var out datagramRecorder

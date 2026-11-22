@@ -17,7 +17,7 @@ func TestFromEnvironmentErrorHidesPassword(t *testing.T) {
 	} {
 		t.Setenv("all_proxy", "")
 		t.Setenv("ALL_PROXY", raw)
-		_, err := FromEnvironment(nil, nil)
+		_, err := FromEnvironment(nil)
 		if err == nil {
 			t.Fatalf("FromEnvironment(%q) succeeded", raw)
 		}

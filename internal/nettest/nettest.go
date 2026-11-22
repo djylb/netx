@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ServeEcho echoes each connection accepted from ln until the test ends,
@@ -51,4 +52,29 @@ func ServeEcho(t testing.TB, ln net.Listener) string {
 		}
 	})
 	return ln.Addr().String()
+}
+
+// AcceptWithin returns the next connection of l, failing the test if none
+// comes within 2s.
+func AcceptWithin(t testing.TB, l net.Listener) net.Conn {
+	t.Helper()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := l.Accept()
+		ch <- result{c, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("Accept() error = %v", r.err)
+		}
+		return r.c
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept() returned no connection within 2s")
+		return nil
+	}
 }

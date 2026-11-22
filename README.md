@@ -9,12 +9,13 @@ Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
 return an error matching `errors.ErrUnsupported` where they are not available.
 
 | Package                               | Contents                                                                          |
-|---------------------------------------|-----------------------------------------------------------------------------------|
-| `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory/UDP listeners, error helpers       |
+| ------------------------------------- | --------------------------------------------------------------------------------- |
+| `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory listeners, error helpers           |
 | `github.com/djylb/netx/duplex`        | a read half and a write half as one `net.Conn`, with half-closes and hot swaps    |
 | `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, certs, pins, uploaded-cert checks    |
 | `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
 | `github.com/djylb/netx/transparent`   | transparent-proxy listeners (TCP, Linux TPROXY UDP), original destinations        |
+| `github.com/djylb/netx/udpflow`       | packet sockets as datagram flow listeners, with UDP destination-aware replies     |
 | `github.com/djylb/netx/socks5`        | SOCKS5 and SOCKS4 codec, client dialer and a configurable server                  |
 | `github.com/djylb/netx/httpproxy`     | HTTP proxy server: CONNECT tunnels and request forwarding                         |
 | `github.com/djylb/netx/httphead`      | HTTP/1.x head reader and parser: fields, body framing, request targets            |
@@ -26,26 +27,26 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/safedial`      | dialing and UDP relaying limited by a destination policy, rebinding-safe          |
 | `github.com/djylb/netx/memnet`        | in-process network for tests: TCP-like streams, datagrams, faults per link        |
 
-Each package depends only on the standard library and timeshim, and links only
-what it uses.
-`crypto/tls` adds a large amount of code to a binary as soon as it is
-imported, so only `tlsconn`, `proxydial` (for `https` proxies), and
-`httprewrite` and `wsconn/wshttp` (through `net/http`, which programs that use
-them link anyway) import it; the root package, `duplex`, `proxyproto`,
-`transparent`, `socks5`, `httpproxy`, `httphead`, `forwarded`, `wsconn`,
-`safedial` and `memnet` stay small.
-Settings follow one rule across the packages: the zero value of a field
-selects its default, a safe bound for timeouts and limits unless the field
-says otherwise; a negative timeout means no timeout, as for
-`http.Server.IdleTimeout`; other negative values are an error unless the
-field gives them a meaning. Fields that share a name with one of the standard
-library, such as `MaxIdleConns`, say where they differ from it. The zero value
-is not a safe bound for `httpproxy.Server.ResponseHeaderTimeout` (no timeout,
-as for `http.Transport`), `socks5.DatagramRelay.IdleTimeout` (no timeout, as
-its caller bounds the relay), and `tlsconn.CertFiles`' `MaxEntries` and
-`IdleTimeout` (no bound, as the caller chooses the certificates);
-`tlsconn.CertStore`, whose `Load` caches names that clients send, keeps at
-most `DefaultMaxEntries` (1024) for `DefaultIdleTimeout` (24h).
+Each package depends on the standard library and timeshim. `tlsconn`
+imports `crypto/tls` directly, and `httprewrite` and `wsconn/wshttp` bring
+it in through `net/http`. Programs that use `proxydial` for cleartext
+proxies can omit TLS dependencies.
+
+Configure servers and dialers through struct fields. Use functional options
+to customize helper functions and constructors. Constructors take required
+inputs as ordinary arguments and use option structs for related settings that
+are shared across entry points, such as WebSocket handshakes and certificate
+verification. A zero field, omitted option or optional nil argument selects
+its documented default. For an explicit zero in an option or constructor,
+follow that parameter's documentation. A negative timeout disables it unless
+documented otherwise. Other negative values require a documented meaning.
+
+Defaults bound timeouts and limits unless documented otherwise. For
+example, `httpproxy.Server.ResponseHeaderTimeout` and
+`socks5.DatagramRelay.IdleTimeout` default to no timeout.
+`tlsconn.CertFiles.MaxEntries` defaults to no count limit, and
+`CertStore.MaxEntries` defaults to `DefaultMaxEntries` (1024). Both
+certificate caches default `IdleTimeout` to `DefaultIdleTimeout` (24h).
 `forwarded` does not import `net/http`: it takes a header as the
 `map[string][]string` that `http.Header` is.
 
@@ -207,8 +208,10 @@ func perHost() *tls.Config {
   its key, or that brings a certificate not valid now while the previous one
   is (an old pair copied back), keeps the previous certificate, goes to
   `OnError`, and is retried at the next check. `MaxEntries` and
-  `IdleTimeout`, unbounded at 0, bound the cache, without a background
-  goroutine. `Forget` drops one file pair and `Clear` drops all.
+  `IdleTimeout` bound the cache without a background goroutine. A zero
+  `MaxEntries` leaves the entry count unlimited. `IdleTimeout` uses
+  `DefaultIdleTimeout` (24h) at zero and keeps entries at negative values.
+  `Forget` drops one file pair and `Clear` drops all.
 - `CertStore` holds certificates by ID and picks one for each handshake, for
   `GetCertificate`. `Add`, `AddPEM` and `AddFiles` (kept in sync as in
   `CertFiles`, in the background as handshakes come, or at once with
@@ -777,15 +780,15 @@ func serveOne(c net.Conn, h http.Handler) error {
 
 ### UDP peers
 
-`PacketListener` splits a packet connection, such as a UDP socket, into one
+`udpflow.PacketListener` splits a packet connection, such as a UDP socket, into one
 `net.Conn` per flow, so a UDP server can be written like a TCP server.
 
 ```go
 func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
-	l := netx.NewPacketListener(pc,
-		netx.WithPacketIdleTimeout(2*time.Minute),
+	l := udpflow.NewPacketListener(pc,
+		udpflow.WithPacketIdleTimeout(2*time.Minute),
 		// Only datagrams that start like the protocol's first message.
-		netx.WithPacketAcceptFilter(func(peer net.Addr, first []byte) bool {
+		udpflow.WithPacketAcceptFilter(func(peer net.Addr, first []byte) bool {
 			return len(first) >= 4 && string(first[:4]) == "HELO"
 		}),
 	)
@@ -815,8 +818,8 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   it with `WithPacketIdleTimeout` and a filter that checks a token.
 - `l.Dial(peer)` makes a connection to a known peer from the same socket
   without `Accept`, as hole punching needs; it returns
-  `netx.ErrPacketPeerConnected` if the peer has one and
-  `netx.ErrPacketConnLimit` at the cap. With packet information enabled,
+  `udpflow.ErrPacketPeerConnected` if the peer has one and
+  `udpflow.ErrPacketConnLimit` at the cap. With packet information enabled,
   the first datagram from that peer with a unicast destination at the
   listener's port fixes the dialed connection's local destination and any
   link-local scope. Writes before then use the OS-selected source. The
@@ -838,10 +841,11 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   connections, one read loop each; `ListenUDPReusePort(ctx, lc, network,
   address, n)` opens `n` sockets on one address with `SO_REUSEPORT`, among
   which Linux and Android spread peers by source (elsewhere it returns
-  `netx.ErrReusePortUnsupported` for more than one). A connection replies
+  `udpflow.ErrReusePortUnsupported` for more than one). A connection replies
   from the socket its flow came through.
-- When every socket is a wildcard `*net.UDPConn` with packet information
-  enabled (Linux, Android, macOS, iOS and Windows), unicast flows are keyed
+- `l.DestinationAware()` reports whether every socket enabled packet
+  information at construction. This mode requires wildcard `*net.UDPConn`
+  sockets (Linux, Android, macOS, iOS and Windows). Unicast flows are keyed
   by remote address and local destination. Link-local destinations also
   include the incoming interface in the key. The connection's `LocalAddr`
   and reply source use the unicast destination. If that source is
@@ -854,7 +858,9 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   separate from that address's unicast flows. Datagrams missing packet
   information are dropped in this mode. If any socket cannot enable packet
   information, all sockets use remote-only flow keys and OS-selected reply
-  sources. `l.WriteTo` always uses the OS-selected source.
+  sources. `l.WriteTo` always uses the OS-selected source. Destination-aware
+  listeners share an IPv4 broadcast-address cache with a system-clock refresh;
+  the last such listener to close stops its worker.
 - `WithPacketReadBatch(n)` reads up to `n` datagrams per system call with
   `recvmmsg` on Linux and Android, holding `n` buffers of the
   `WithPacketMaxDatagram` size per read loop; elsewhere datagrams are read
@@ -1139,7 +1145,7 @@ func sniffed(raw net.Conn, cfg *tls.Config) (*tls.Conn, *proxyproto.Header, erro
 // udpBehindProxy reads the header from the first datagram of each UDP flow.
 func udpBehindProxy(pc net.PacketConn) net.Listener {
 	return &proxyproto.Listener{
-		Listener: netx.NewPacketListener(pc),
+		Listener: udpflow.NewPacketListener(pc),
 		Config:   proxyproto.Config{Datagram: proxyproto.DatagramFirst},
 	}
 }
@@ -1340,7 +1346,7 @@ unless `WithFlowDirect` is given; `FlowConn.Redirected` then tells them apart,
 and they are answered from the listener. `WithFlowIdleTimeout`,
 `WithFlowQueue`, `WithFlowAcceptBacklog` and `WithFlowMaxConns` bound idle
 flows, queued datagrams, flows waiting for `Accept` and flows held at once,
-as the `WithPacket` options of `netx.PacketListener` do; set an idle timeout
+as the `WithPacket` options of `udpflow.PacketListener` do; set an idle timeout
 and a cap for traffic from untrusted sources. As on a socket, an expired read
 deadline fails `Read` even while datagrams are queued. `netx.Relay` and
 `netx.Copy` take a flow's queued datagrams whole, copying each once. `NewFlowListener` builds one on a socket of your own
@@ -2084,9 +2090,8 @@ func dialTunnel(ctx context.Context, url string, forward netx.ContextDialer) (ne
 `github.com/djylb/netx/proxydial` dials TCP through an HTTP CONNECT or SOCKS5
 proxy. `FromURL`, `FromString` and `FromEnvironment` build the dialers from a URL; they are
 plain structs (`HTTPDialer`, `socks5.Dialer`) that can also be configured
-directly, for example with a private CA or extra request headers. A program
-that only talks to SOCKS5 proxies can use `socks5.Dialer` alone and avoid the
-`crypto/tls` that `https` proxies need.
+directly, for example with a private CA or extra request headers. To reach
+an encrypted proxy, supply a TLS transport such as `tlsconn.Dialer`.
 
 ```go
 func corporateProxy(ca *x509.CertPool) *proxydial.HTTPDialer {
@@ -2105,13 +2110,14 @@ func corporateProxy(ca *x509.CertPool) *proxydial.HTTPDialer {
 ```go
 func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 	forward := &net.Dialer{Timeout: 10 * time.Second}
+	tlsProxy := proxydial.WithTLS(tlsconn.ProxyTLS(nil))
 	var d netx.ContextDialer
 	var err error
 	if proxyURL != "" {
 		// ParseURL and FromURL; a bare host:port is an http proxy.
-		d, err = proxydial.FromString(proxyURL, forward, nil)
+		d, err = proxydial.FromString(proxyURL, forward, tlsProxy)
 	} else {
-		d, err = proxydial.FromEnvironment(forward, nil)
+		d, err = proxydial.FromEnvironment(forward, tlsProxy)
 	}
 	if err != nil {
 		return nil, err
@@ -2132,14 +2138,18 @@ func dialVia(ctx context.Context, proxyURL, target string) (net.Conn, error) {
   The SOCKS5 and SOCKS4a schemes let the proxy resolve host names; `socks4`
   resolves them locally. A dialer for one proxy can be the `Forward` dialer of
   another, which chains them.
-- `FromURL` and `FromEnvironment` take a `*tls.Config` for `https` and `+tls`
-  proxies, which they reach through a `*tlsconn.Dialer` as the dialer's
-  `Forward`: `nil` verifies the proxy's host name against the system roots,
-  and a config without `ServerName`, such as one carrying a private CA, is
-  used with the proxy's host filled in. `FromURL` returns an
-  `*proxydial.HTTPDialer` or a `*socks5.Dialer`; type-assert it to adjust
-  fields such as `Header`. Both dialers reach a TLS proxy the same way: set
-  `Forward` to a `tlsconn.Dialer`.
+- `FromURL`, `FromString` and `FromEnvironment` require `WithTLS` for
+  `https` and `+tls` URLs. Without it they return `proxydial.ErrNoTLSDialer`.
+  The factory wraps the dialer used to reach the proxy. It must honor the
+  dial context and verify the proxy's identity. When no server name is
+  configured, it derives the name from the proxy address passed to
+  `DialContext`. `tlsconn.ProxyTLS(nil)` verifies against the system roots.
+  Pass a `*tls.Config` to use private roots. The factory uses
+  `HandshakeTimeout: 0`, which honors the context deadline when set and
+  applies `tlsconn.DefaultHandshakeTimeout` when it has none.
+  `FromURL` returns an `*proxydial.HTTPDialer` or a `*socks5.Dialer`.
+  Type-assert it to adjust fields such as `Header`. When constructing either
+  dialer directly, set its `Forward` field to the TLS dialer.
 - `ParseURL` parses a proxy URL leniently: `proxy:3128` or `127.0.0.1:1080`
   without a scheme is an `http` proxy, and its errors never quote the
   password.

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"syscall"
 
 	"github.com/djylb/netx/internal/netutil"
@@ -109,7 +108,7 @@ func (s *streamSocket) wait(context.Context) (bool, error) {
 	}
 	s.n, s.err = 0, nil
 	if err := s.raw.Read(s.peek); err != nil {
-		return false, rawOpError(err, "read")
+		return false, netutil.RawOpError(err, "read")
 	}
 	if s.err != nil {
 		return false, sockOpError(s.conn, "read", "recvfrom", s.err)
@@ -130,7 +129,7 @@ func (s *streamSocket) waitReadable() error {
 	}
 	s.n, s.err, s.peeked = 0, nil, false
 	if err := s.raw.Read(s.peekOnce); err != nil {
-		return rawOpError(err, "read")
+		return netutil.RawOpError(err, "read")
 	}
 	if s.err != nil {
 		return sockOpError(s.conn, "read", "recvfrom", s.err)
@@ -174,23 +173,6 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 func sockOpError(c net.Conn, op, syscallName string, err error) error {
 	return &net.OpError{Op: op, Net: c.LocalAddr().Network(), Source: c.LocalAddr(),
 		Addr: c.RemoteAddr(), Err: os.NewSyscallError(syscallName, err)}
-}
-
-// rawOpError reports an error of syscall.RawConn's Read or Write, whose
-// operation is "raw-read" or "raw-write", as one of Read or Write, op.
-func rawOpError(err error, op string) error {
-	if err == nil {
-		return nil
-	}
-	if oe, ok := errors.AsType[*net.OpError](err); ok {
-		if rawOp, raw := strings.CutPrefix(oe.Op, "raw-"); !raw || rawOp != op {
-			return err
-		}
-		e := *oe
-		e.Op = op
-		return &e
-	}
-	return err
 }
 
 // socketReader reads a stream socket without waiting, failing with

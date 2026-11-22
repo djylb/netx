@@ -15,10 +15,10 @@ import (
 	"github.com/djylb/netx/tlsconn"
 )
 
-// Dial through the proxy that ALL_PROXY names, unless NO_PROXY lists the
-// target, and directly when ALL_PROXY is unset.
+// Dial through the cleartext proxy that ALL_PROXY names, unless NO_PROXY
+// lists the target, and directly when ALL_PROXY is unset.
 func ExampleFromEnvironment() {
-	d, err := proxydial.FromEnvironment(nil, nil)
+	d, err := proxydial.FromEnvironment(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -57,7 +57,26 @@ func ExampleFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	d, err := proxydial.FromURL(u, &net.Dialer{Timeout: 10 * time.Second}, nil)
+	d, err := proxydial.FromURL(u, &net.Dialer{Timeout: 10 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, err := d.DialContext(ctx, "tcp", "example.com:443")
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+}
+
+// Use the system roots to verify the HTTPS proxy's certificate. The dial
+// context bounds TLS and CONNECT as well as the TCP connection.
+func ExampleWithTLS() {
+	forward := &net.Dialer{Timeout: 10 * time.Second}
+	d, err := proxydial.FromString("https://proxy.example", forward,
+		proxydial.WithTLS(tlsconn.ProxyTLS(nil)))
 	if err != nil {
 		log.Fatal(err)
 	}

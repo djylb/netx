@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/djylb/netx/internal/dgram"
+	"github.com/djylb/netx/internal/bufpool"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -111,14 +111,14 @@ func setCmsg(oob []byte, level, typ, n int) []byte {
 }
 
 // readDatagram waits until raw is readable, holding no buffer meanwhile, and
-// reads one datagram into a buffer from dgram.Large, which the caller puts
+// reads one datagram into a buffer from bufpool.Large, which the caller puts
 // back.
 func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 	var bp *[]byte
 	var n int
 	var opErr error
 	err := raw.Read(func(fd uintptr) bool {
-		bp = dgram.Large.Get()
+		bp = bufpool.Large.Get()
 		for {
 			n, opErr = syscall.Read(int(fd), *bp)
 			if opErr != syscall.EINTR {
@@ -126,7 +126,7 @@ func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 			}
 		}
 		if opErr == syscall.EAGAIN {
-			dgram.Large.Put(bp)
+			bufpool.Large.Put(bp)
 			bp = nil
 			return false
 		}
@@ -137,7 +137,7 @@ func readDatagram(raw syscall.RawConn) (*[]byte, int, error) {
 	}
 	if err != nil {
 		if bp != nil {
-			dgram.Large.Put(bp)
+			bufpool.Large.Put(bp)
 		}
 		return nil, 0, err
 	}
