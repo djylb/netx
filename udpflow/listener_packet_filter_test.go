@@ -91,7 +91,7 @@ func TestPacketListenerCloseWhileAnotherFilterRuns(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		release()
-		<-closed
-		t.Fatal("Close waited for a filter that was still running on the other socket")
+		err := <-closed
+		t.Fatalf("Close waited for a filter that was still running on the other socket (Close error %v)", err)
 	}
 }

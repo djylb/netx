@@ -46,8 +46,8 @@ func TestPacketListenerReplySourceErrorRecovery(t *testing.T) {
 		permanent bool
 	}{
 		{"temporary address error", "2001:db8::1", netutil.AddrNotAvailableErrnos[0], nil, []string{"fixed", "routed", "fixed"}, false},
-		{"ambiguous invalid argument", "198.51.100.2", pktinfoInvalidArgument, pktinfoInvalidArgument, []string{"fixed", "fixed"}, false},
-		{"broadcast invalid argument", "255.255.255.255", pktinfoInvalidArgument, nil, []string{"fixed", "routed", "routed"}, true},
+		{"ambiguous invalid argument", "198.51.100.2", errPktinfoInvalidArgument, errPktinfoInvalidArgument, []string{"fixed", "fixed"}, false},
+		{"broadcast invalid argument", "255.255.255.255", errPktinfoInvalidArgument, nil, []string{"fixed", "routed", "routed"}, true},
 		{"multicast address error", "ff02::1", netutil.AddrNotAvailableErrnos[0], nil, []string{"fixed", "routed", "routed"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

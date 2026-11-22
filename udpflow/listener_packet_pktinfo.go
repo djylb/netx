@@ -14,7 +14,7 @@ import (
 // A broadcast or multicast source can cause EINVAL even with a correctly
 // formatted control message. Address classification is separate.
 func isPacketSourceInvalidArgument(err error) bool {
-	return errors.Is(err, pktinfoInvalidArgument)
+	return errors.Is(err, errPktinfoInvalidArgument)
 }
 
 // A UDP socket bound to a wildcard address sends from the address that

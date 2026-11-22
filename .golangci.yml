@@ -107,13 +107,13 @@ linters:
           - gosec
         text: G103
       # So does the batch read of a PacketListener, through recvmmsg.
-      - path: ^listener_packet_batch_linux\.go$
+      - path: ^udpflow/listener_packet_batch_linux\.go$
         linters:
           - gosec
         text: G103
       # And its packet information codec, which reads and writes struct
       # cmsghdr in the platform's layout.
-      - path: ^listener_packet_pktinfo\.go$
+      - path: ^udpflow/listener_packet_pktinfo\.go$
         linters:
           - gosec
         text: G103

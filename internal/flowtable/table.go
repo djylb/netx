@@ -187,6 +187,7 @@ func (t *Table[K, P, S]) Room() bool {
 // Result is the outcome of adding a flow.
 type Result uint8
 
+// The results of adding a flow.
 const (
 	Added  Result = iota // the flow was added
 	Exists               // an existing flow took precedence

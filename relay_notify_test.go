@@ -565,10 +565,9 @@ func startIdleRelay(t *testing.T, s *fakeStream, a, b io.ReadWriteCloser) <-chan
 	t.Helper()
 	// The relay and the tasks it starts inherit this label.
 	const label = "netx.relay-test"
-	var done <-chan error
-	pprof.Do(t.Context(), pprof.Labels(label, t.Name()), func(context.Context) {
-		done = startRelay(a, b)
-	})
+	pprof.SetGoroutineLabels(pprof.WithLabels(t.Context(), pprof.Labels(label, t.Name())))
+	done := startRelay(a, b)
+	pprof.SetGoroutineLabels(context.Background())
 	waitFor(t, "registration", s.pending)
 	labelLine := fmt.Sprintf("# labels: {%q:%q}\n", label, t.Name())
 	waitFor(t, "one relay goroutine", func() bool {
