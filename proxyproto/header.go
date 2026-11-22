@@ -31,9 +31,8 @@ var (
 	// ErrNoHeader is returned by Decode for data that does not start with a
 	// PROXY protocol header, and by a Conn whose policy requires one.
 	ErrNoHeader = errors.New("proxyproto: no PROXY protocol header")
-	// ErrMalformed reports a header that starts with a PROXY protocol
-	// signature but cannot be decoded even leniently: a version 1 TCP or UDP
-	// line whose addresses do not parse, or one longer than 256 bytes.
+	// ErrMalformed reports an invalid header that starts with a PROXY
+	// protocol signature.
 	ErrMalformed = errors.New("proxyproto: malformed PROXY protocol header")
 	// ErrChecksum reports a version 2 header whose CRC32C field does not
 	// match its checksum, or that has more than one CRC32C field or one

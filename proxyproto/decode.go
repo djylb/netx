@@ -23,7 +23,7 @@ import (
 // ErrMalformed for a header that cannot be decoded. To read the header of a
 // connection, use NewConn, which keeps the bytes that follow it.
 func Decode(b []byte) (*Header, int, error) {
-	h, n, _, err := decode(b)
+	h, n, _, err := decode(b, 0)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -32,7 +32,7 @@ func Decode(b []byte) (*Header, int, error) {
 
 // decode is Decode that also returns, for an incomplete header, the number of
 // bytes needed before it can make progress.
-func decode(b []byte) (h *Header, n, need int, err error) {
+func decode(b []byte, datagram DatagramMode) (h *Header, n, need int, err error) {
 	if len(b) == 0 {
 		return nil, 0, 1, io.ErrUnexpectedEOF
 	}
@@ -47,7 +47,7 @@ func decode(b []byte) (h *Header, n, need int, err error) {
 		return nil, 0, len(b) + 1, io.ErrUnexpectedEOF
 	}
 	if sig == v2Signature {
-		return decodeV2(b)
+		return decodeV2(b, datagram)
 	}
 	return decodeV1(b)
 }
@@ -118,13 +118,15 @@ func parseV1Addr(ip, port string) (netip.AddrPort, bool) {
 	return netip.AddrPortFrom(addr, uint16(p)), true
 }
 
-// decodeV2 ignores the version nibble and, so that the connection's own
-// addresses apply, treats commands other than PROXY as LOCAL and leaves the
-// addresses unset for unknown families and transports and for an address
-// block too short for its family. TLVs end at the first truncated one, and
-// NOOP padding is dropped. A CRC32C field is verified, and one that does
-// not match fails the header.
-func decodeV2(b []byte) (*Header, int, int, error) {
+// decodeV2 treats commands other than PROXY as LOCAL and leaves addresses
+// unset for unknown families and transports. Datagram PROXY address blocks
+// must be whole. DatagramEach and DatagramAuto require whole blocks for
+// other commands and whole TLVs as well. NOOP padding is dropped, and a
+// CRC32C mismatch fails the header.
+func decodeV2(b []byte, datagram DatagramMode) (*Header, int, int, error) {
+	if len(b) > len(v2Signature) && b[len(v2Signature)]>>4 != byte(V2) {
+		return nil, 0, 0, malformed("invalid version in binary header")
+	}
 	if len(b) < v2HeadLen {
 		return nil, 0, v2HeadLen, io.ErrUnexpectedEOF
 	}
@@ -140,9 +142,15 @@ func decodeV2(b []byte) (*Header, int, int, error) {
 	}
 	addrLen := [...]int{0, 12, 36, 2 * unixPathLen}[af]
 	if len(payload) < addrLen {
+		if datagram.perDatagram() || (datagram != 0 && !h.Local) {
+			return nil, n, 0, ErrMalformed
+		}
 		return h, n, 0, nil
 	}
 	tlvs := TLVs(payload[addrLen:])
+	if datagram.perDatagram() && !tlvs.wellFormed() {
+		return nil, n, 0, ErrMalformed
+	}
 	// A receiver that supports the checksum must verify it (section 2.2.3).
 	if off, ok := tlvs.crc32cField(); !ok {
 		return nil, n, 0, fmt.Errorf("%w: CRC32C field not a single 4-byte value", ErrChecksum)

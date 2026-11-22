@@ -2,8 +2,16 @@
 // which carry the original client and destination addresses of a proxied
 // connection to the backend, and provides a Conn that reports those
 // addresses for a connection whose peer sends one, with a Listener that
-// wraps the connections it accepts. Both serve streams and UDP flows whose
-// first datagram carries the header.
+// wraps the connections it accepts.
+//
+// Config.Datagram is zero for streams. DatagramFirst looks only at the first
+// datagram. If it has no header, Required rejects the connection and Optional
+// passes the flow through unchanged. DatagramEach skips datagrams with
+// missing, truncated or malformed headers. DatagramAuto passes datagrams
+// without a complete v1 or v2 signature through unchanged and skips those
+// with a complete signature and a truncated or malformed header. In both
+// per-datagram modes, ReadDatagram returns the header with its payload and
+// DroppedDatagrams counts skips. Ignore passes all traffic through unchanged.
 //
 // A header lets its sender choose the reported client address, so accept
 // one only from trusted peers, such as with TrustPrefixes:
@@ -14,18 +22,21 @@
 //	}
 //
 // To send a header, build it with NewHeader or HeaderFromConn and encode it
-// with Header.AppendBinary. HeaderOf finds the header of a Conn beneath
-// other wrappers.
+// with Header.AppendBinary. HeaderOf finds a connection-wide header of a
+// Conn beneath other wrappers. In DatagramEach and DatagramAuto it returns
+// nil without reading, and the connection reports the transport addresses.
 //
 // Decoding is lenient towards non-standard senders wherever that cannot
 // change who a connection is attributed to: version 1 lines may end in a bare
 // LF, use runs of spaces, any letter case, UDP4 and UDP6 tokens, address
-// families that differ from the token, and padded ports; version 2 headers
-// may carry any version nibble. Unknown commands, protocols and families,
-// short address blocks and truncated TLVs make the connection's own
-// addresses, or the whole TLVs, apply instead of failing. Decoded headers
-// drop NOOP padding and keep every other TLV in no more memory than the
-// header took. The package depends only on the standard library.
+// families that differ from the token, and padded ports. Binary headers
+// must carry version 2. Unknown commands, protocols and families fall back
+// to the connection's own addresses. In a datagram, a v2 PROXY command
+// must declare enough room for its address family. DatagramEach and
+// DatagramAuto also drop packets with truncated TLVs. Other reads keep
+// the whole TLVs that precede a truncation. Decoded headers drop NOOP
+// padding and keep every other TLV in no more memory than the header took.
+// The package depends only on the standard library.
 //
 // Settings: the zero value of a field selects its default, stated in the
 // field's documentation; for timeouts and limits it is a safe bound unless

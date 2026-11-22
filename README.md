@@ -1126,7 +1126,7 @@ func sniffed(raw net.Conn, cfg *tls.Config) (*tls.Conn, *proxyproto.Header, erro
 func udpBehindProxy(pc net.PacketConn) net.Listener {
 	return &proxyproto.Listener{
 		Listener: netx.NewPacketListener(pc),
-		Config:   proxyproto.Config{Datagram: true},
+		Config:   proxyproto.Config{Datagram: proxyproto.DatagramFirst},
 	}
 }
 ```
@@ -1159,14 +1159,14 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
 - Decoding accepts non-standard senders wherever that cannot misattribute a
   connection: v1 lines ending in a bare LF, with runs of spaces, any letter
   case, `UDP4`/`UDP6` tokens, families that differ from the token or padded
-  ports; any v2 version nibble. Unknown commands, protocols and families,
-  short address blocks and truncated TLVs fall back to the connection's own
-  addresses, or to the whole TLVs, instead of failing.
-- `Listener` reads the header lazily, on the first read or address query, with
-  a timeout (`DefaultHeaderTimeout`), so a slow peer cannot stall `Accept`. The
-  read that reaches the timeout returns it; later ones return an error matching
-  `ErrNoHeader` that is not a timeout, so loops that retry timeouts do not
-  spin. Its `Config` (`Policy`, `HeaderTimeout`, `Datagram`) applies to every
+  ports. Binary headers must carry version 2. Unknown commands, protocols
+  and families fall back to the connection's own addresses. A v2 PROXY
+  command in a datagram must declare enough room for its address family.
+- For streams and `DatagramFirst`, `Listener` reads the header lazily on
+  the first read or address query, with a timeout (`DefaultHeaderTimeout`),
+  so a slow peer cannot stall `Accept`. The read that reaches the timeout
+  returns it. Later reads return a non-timeout error matching `ErrNoHeader`,
+  so loops that retry timeouts do not spin. Its `Config` (`Policy`, `HeaderTimeout`, `Datagram`) applies to every
   accepted connection; `Config.Policy` is `Required` (the default),
   `Optional` or `Ignore`, and `PolicyFor`, when set, picks the policy per
   peer instead. Only trusted peers should be allowed to send a header:
@@ -1174,18 +1174,26 @@ func udpBehindProxy(pc net.PacketConn) net.Listener {
   given networks and ignores the rest. `NewConn` does the same for one
   connection accepted elsewhere, such as a multiplexed stream, and `HeaderOf`
   finds the header beneath wrappers with a `NetConn` method.
-- Writes do not wait for the header: under `Required` and `Optional`, a
-  server that speaks first, or one that answers a bad request (an HTTP
-  server's 400), writes to a peer that may have sent no header or a malformed
-  one. When that matters, call `Header()` (or read) first and write only
-  once it succeeds.
-- With `Config.Datagram` set, for listeners such as `netx.PacketListener` whose reads
-  return one datagram, the header is taken from the first datagram of each
-  flow, alone or followed by payload; later datagrams are passed through
-  untouched. Addresses are reported as `*net.UDPAddr`, since UDP senders use
-  the v1 `TCP4`/`TCP6` tokens or a v2 `STREAM` transport; `Header.UDPAddrs`
-  does the same conversion for other callers. Leave it unset for stream
-  protocols over UDP such as KCP or QUIC.
+- For streams and `DatagramFirst`, writes do not wait for the header.
+  Under `Required` and `Optional`, a server that speaks first, or one that
+  answers a bad request, writes to a peer that may have sent no header or a
+  malformed one. When that matters, call `Header()` (or read) first and
+  write only once it succeeds.
+- Set `Config.Datagram` for connections that return one datagram per read.
+  `DatagramFirst` reads a header only from the first datagram. If it is
+  absent, `Required` rejects the flow and `Optional` passes the entire flow
+  through. Malformed headers and terminal first-read I/O errors fail the
+  flow under either policy. `DatagramEach` skips datagrams without a
+  header. `DatagramAuto` passes through datagrams without a complete v1 or
+  v2 signature. Both
+  per-datagram modes skip truncated or malformed headers and count skipped
+  packets in `Conn.DroppedDatagrams()`. Use `Conn.ReadDatagram` to get the
+  payload and its header together. These modes use the connection's read
+  deadline, report the transport addresses, and return a nil connection
+  header from `Conn.Header` and `HeaderOf`. `Ignore` always passes traffic
+  through unchanged. Datagram modes convert TCP header addresses to
+  `*net.UDPAddr`, as `Header.UDPAddrs` does. Leave `Config.Datagram` at
+  zero for stream connections.
 - A nil or unspecified target is sent as `0.0.0.0` or `::`, matching the
   client's address family. An IPv4/IPv6 pair is sent as `TCP6`
   (v1) or `AF_INET6` (v2), with the IPv4 side in its IPv4-mapped form

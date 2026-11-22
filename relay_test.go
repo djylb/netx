@@ -349,7 +349,7 @@ func TestRelayKeepsLargeProxyprotoDatagram(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := &datagramConn{msgs: [][]byte{header, make([]byte, size), make([]byte, 7)}}
-	ln := &proxyproto.Listener{Listener: &oneConnListener{c: raw, done: make(chan struct{})}, Config: proxyproto.Config{Datagram: true}}
+	ln := &proxyproto.Listener{Listener: &oneConnListener{c: raw, done: make(chan struct{})}, Config: proxyproto.Config{Datagram: proxyproto.DatagramFirst}}
 	defer func() { _ = ln.Close() }()
 	c, err := ln.Accept()
 	if err != nil {

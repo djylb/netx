@@ -147,6 +147,8 @@ func TestDecodeErrors(t *testing.T) {
 		{name: "v1 port sign", in: []byte("PROXY TCP4 1.1.1.1 2.2.2.2 +1 2\r\n"), want: ErrMalformed},
 		{name: "v1 port range", in: []byte("PROXY UDP4 1.1.1.1 2.2.2.2 65536 2\r\n"), want: ErrMalformed},
 		{name: "v1 too long", in: []byte("PROXY TCP4 " + strings.Repeat("1", 300)), want: ErrMalformed},
+		{name: "v2 invalid version", in: v2Wire(0x31, 0), want: ErrMalformed},
+		{name: "v2 invalid version before length", in: append([]byte(v2Signature), 0x31), want: ErrMalformed},
 	}
 	for _, tt := range tests {
 		if h, n, err := Decode(tt.in); !errors.Is(err, tt.want) || h != nil || n != 0 {
@@ -191,7 +193,6 @@ func TestDecodeLenient(t *testing.T) {
 		{name: "v1 padded line", in: []byte("PROXY TCP6 1.1.1.1 2.2.2.2 1 2" + strings.Repeat(" ", 150) + "\r\n"), src: "1.1.1.1:1", dst: "2.2.2.2:2", local: false, udp: false, tlvs: 0},
 		{name: "v1 unknown protocol", in: []byte("PROXY SCTP4 1.1.1.1 2.2.2.2 1 2\r\n"), src: "", dst: "", local: true, udp: false, tlvs: 0},
 		{name: "v1 no protocol", in: []byte("PROXY \r\n"), src: "", dst: "", local: true, udp: false, tlvs: 0},
-		{name: "v2 version", in: v2Wire(0x11, 0x11, addrs...), src: "192.0.2.1:5000", dst: "198.51.100.1:443", local: false, udp: false, tlvs: 0},
 		{name: "v2 command", in: v2Wire(0x22, 0x11, append(addrs, tlv...)...), src: "", dst: "", local: true, udp: false, tlvs: 1},
 		{name: "v2 family", in: v2Wire(0x21, 0x41, addrs...), src: "", dst: "", local: false, udp: false, tlvs: 0},
 		{name: "v2 transport", in: v2Wire(0x21, 0x13, append(addrs, tlv...)...), src: "", dst: "", local: false, udp: false, tlvs: 1},

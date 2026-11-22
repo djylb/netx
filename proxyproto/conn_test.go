@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -39,6 +40,8 @@ func TestNewConn(t *testing.T) {
 		{name: "required without header", cfg: Config{}, data: []byte("hello"), remote: "pipe", payload: "", err: ErrNoHeader},
 		{name: "optional", cfg: Config{Policy: Optional}, data: append(header, "hello"...), remote: "203.0.113.7:40000", payload: "hello", err: nil},
 		{name: "optional without header", cfg: Config{Policy: Optional}, data: []byte("hello"), remote: "pipe", payload: "hello", err: nil},
+		{name: "required with invalid v2 version", data: append(v2Wire(0x31, 0), "hello"...), remote: "pipe", err: ErrMalformed},
+		{name: "optional with invalid v2 version", cfg: Config{Policy: Optional}, data: append(v2Wire(0x31, 0), "hello"...), remote: "pipe", err: ErrMalformed},
 		{name: "ignore", cfg: Config{Policy: Ignore}, data: append(header, "hello"...), remote: "pipe", payload: string(header) + "hello", err: nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,7 +82,7 @@ func TestNewConnDatagram(t *testing.T) {
 		append(wireOf(V1, udp("203.0.113.7", 40000), udp("198.51.100.1", 53)), "q1"...),
 		[]byte("q2"),
 	}}
-	c := NewConn(raw, Config{Datagram: true})
+	c := NewConn(raw, Config{Datagram: DatagramFirst})
 	buf := make([]byte, 16)
 	for _, want := range []string{"q1", "q2"} {
 		n, err := c.Read(buf)
@@ -108,6 +111,117 @@ func (c *datagramScript) Read(b []byte) (int, error) {
 }
 
 func (*datagramScript) SetReadDeadline(time.Time) error { return nil }
+
+type datagramReadError struct {
+	datagramScript
+	err error
+}
+
+func (c *datagramReadError) Read(b []byte) (int, error) {
+	if c.err != nil {
+		err := c.err
+		c.err = nil
+		return 0, err
+	}
+	return c.datagramScript.Read(b)
+}
+
+func TestOptionalDatagramFirstReadError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"timeout", os.ErrDeadlineExceeded},
+		{"closed", net.ErrClosed},
+		{"EOF", io.EOF},
+		{"read failure", io.ErrNoProgress},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, readFirst := range []bool{false, true} {
+				raw := &datagramReadError{err: tc.err}
+				raw.msgs = [][]byte{[]byte("next")}
+				c := NewConn(raw, Config{Datagram: DatagramFirst, Policy: Optional})
+				buf := make([]byte, 16)
+				header := func() error {
+					h, err := c.Header()
+					if h != nil {
+						t.Fatalf("Header() = %v, want nil", h)
+					}
+					return err
+				}
+				read := func() error {
+					n, err := c.Read(buf)
+					if n != 0 {
+						t.Fatalf("Read() delivered %q", buf[:n])
+					}
+					return err
+				}
+				first, second := header, read
+				if readFirst {
+					first, second = read, header
+				}
+				if err := first(); !errors.Is(err, tc.err) || isTimeout(err) != isTimeout(tc.err) {
+					t.Fatalf("first call (Read first = %v) returned %v, want %v", readFirst, err, tc.err)
+				}
+				if err := second(); !errors.Is(err, tc.err) || isTimeout(err) {
+					t.Fatalf("second call (Read first = %v) returned %v, want terminal %v", readFirst, err, tc.err)
+				}
+				if len(raw.msgs) != 1 {
+					t.Fatal("a terminal header error consumed a later datagram")
+				}
+			}
+		})
+	}
+}
+
+func TestOptionalDatagramFirstReadDeadlineCanResume(t *testing.T) {
+	raw := &datagramReadError{err: os.ErrDeadlineExceeded}
+	raw.msgs = [][]byte{[]byte("PROXY UNKNOWN\r\npayload")}
+	c := NewConn(raw, Config{Datagram: DatagramFirst, Policy: Optional})
+	if err := c.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	if n, err := c.Read(buf); n != 0 || !isTimeout(err) {
+		t.Fatalf("Read() = %d, %v; want caller deadline", n, err)
+	}
+	if err := c.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := c.Header(); err != nil || h == nil || !h.Local {
+		t.Fatalf("Header() after clearing the deadline = %v, %v; want PROXY UNKNOWN", h, err)
+	}
+	if n, err := c.Read(buf); string(buf[:n]) != "payload" || err != nil {
+		t.Fatalf("Read() after clearing the deadline = %q, %v; want payload", buf[:n], err)
+	}
+}
+
+func TestReadDatagramIgnore(t *testing.T) {
+	wire := []byte("PROXY UNKNOWN\r\npayload")
+	for _, mode := range []DatagramMode{DatagramFirst, DatagramEach, DatagramAuto} {
+		c := NewConn(&datagramScript{msgs: [][]byte{wire}}, Config{Datagram: mode, Policy: Ignore})
+		buf := make([]byte, len(wire))
+		n, h, err := c.ReadDatagram(buf)
+		if err != nil || h != nil || string(buf[:n]) != string(wire) {
+			t.Fatalf("mode %d: ReadDatagram() = %q, %v, %v; want unchanged payload and no header", mode, buf[:n], h, err)
+		}
+		if got := c.DroppedDatagrams(); got != 0 {
+			t.Fatalf("mode %d: DroppedDatagrams() = %d, want 0", mode, got)
+		}
+	}
+}
+
+func TestReadDatagramClosedAndStream(t *testing.T) {
+	for _, c := range []*Conn{nil, NewConn(nil, Config{Datagram: DatagramAuto})} {
+		if n, h, err := c.ReadDatagram(nil); n != 0 || h != nil || !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("ReadDatagram() = %d, %v, %v; want net.ErrClosed", n, h, err)
+		}
+	}
+	c := NewConn(&datagramScript{}, Config{})
+	if n, h, err := c.ReadDatagram(nil); n != 0 || h != nil || !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("ReadDatagram() = %d, %v, %v; want errors.ErrUnsupported", n, h, err)
+	}
+}
 
 // The Conn owns what it wraps, and writes and the write deadline reach it
 // without waiting for the header.
@@ -257,7 +371,11 @@ func TestListenerTrustPrefixes(t *testing.T) {
 func TestNewConnNil(t *testing.T) {
 	for _, inner := range []net.Conn{nil, (*net.TCPConn)(nil)} {
 		for _, policy := range []Policy{Required, Optional, Ignore} {
-			c := NewConn(inner, Config{Policy: policy, Datagram: policy == Optional})
+			cfg := Config{Policy: policy}
+			if policy == Optional {
+				cfg.Datagram = DatagramFirst
+			}
+			c := NewConn(inner, cfg)
 			if _, err := c.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
 				t.Fatalf("Read() = %v", err)
 			}
