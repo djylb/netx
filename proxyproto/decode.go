@@ -142,7 +142,7 @@ func decodeV2(b []byte, datagram DatagramMode) (*Header, int, int, error) {
 	}
 	addrLen := [...]int{0, 12, 36, 2 * unixPathLen}[af]
 	if len(payload) < addrLen {
-		if datagram.perDatagram() || (datagram != 0 && !h.Local) {
+		if datagram.perDatagram() || (datagram == DatagramFirst && !h.Local) {
 			return nil, n, 0, ErrMalformed
 		}
 		return h, n, 0, nil

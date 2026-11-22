@@ -520,10 +520,10 @@ func (c *Conn) readDatagramHeader() error {
 		if size < n {
 			c.pending = bytes.Clone(buf[size:n])
 		}
-	case err == io.ErrUnexpectedEOF:
+	case errors.Is(err, io.ErrUnexpectedEOF):
 		// A whole signature, in a datagram too short for its header.
 		c.err = malformed("header cut short by the end of a %d-byte datagram", n)
-	case err == ErrNoHeader && c.policy == Optional:
+	case errors.Is(err, ErrNoHeader) && c.policy == Optional:
 		// No header, or a datagram as short as the start of a signature. It
 		// is passed on even when empty: a datagram is a message.
 		c.pending = append(make([]byte, 0, n), buf[:n]...)
@@ -537,7 +537,7 @@ func (c *Conn) readDatagramHeader() error {
 // signature is payload, even if it would be incomplete on a stream.
 func decodeDatagram(b []byte, mode DatagramMode) (*Header, int, error) {
 	h, n, _, err := decode(b, mode)
-	if err == io.ErrUnexpectedEOF && signaturePrefix(b) {
+	if errors.Is(err, io.ErrUnexpectedEOF) && signaturePrefix(b) {
 		return nil, 0, ErrNoHeader
 	}
 	if err == nil {
@@ -593,7 +593,7 @@ func (c *Conn) readEachDatagram(b []byte) (int, *Header, error) {
 			return 0, nil, err
 		}
 		h, size, decodeErr := decodeDatagram(buf[:n], c.datagram)
-		if decodeErr == nil || (decodeErr == ErrNoHeader && c.datagram == DatagramAuto) {
+		if decodeErr == nil || (errors.Is(decodeErr, ErrNoHeader) && c.datagram == DatagramAuto) {
 			return copy(b, buf[size:n]), h, err
 		}
 		c.dropped.Add(1)
