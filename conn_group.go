@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -33,8 +34,19 @@ type groupMember struct {
 // Add adds c and returns a function that removes it again, which the owner
 // of c calls once it is done with c, closed or not; calling it more than once
 // is harmless. On a group that Close closed, Add returns ErrGroupClosed and
-// leaves c to its owner.
+// leaves c to its owner. Add rejects nil members, including typed nils.
 func (g *ConnGroup) Add(c io.Closer) (remove func(), err error) {
+	switch v := reflect.ValueOf(c); v.Kind() {
+	case reflect.Invalid:
+		return func() {}, errNilConn
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+		if v.IsNil() {
+			return func() {}, errNilConn
+		}
+	default:
+		// Other dynamic values cannot be nil.
+	}
+
 	m := &groupMember{c: c}
 	g.mu.Lock()
 	if g.closed {
@@ -92,11 +104,13 @@ func (c *trackedConn) inner() net.Conn {
 
 // Close closes the connection and removes it from its group.
 func (c *trackedConn) Close() error {
-	if c == nil {
-		return nil
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
 	}
 	err := c.inner().Close()
-	c.remove()
+	if c.remove != nil {
+		c.remove()
+	}
 	return err
 }
 
@@ -167,3 +181,6 @@ func (g *ConnGroup) closeAll(cause error, final bool) error {
 	}
 	return errors.Join(errs...)
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *trackedConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

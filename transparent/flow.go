@@ -35,6 +35,7 @@ import (
 // WithFlowIdleTimeout or read deadlines. The zero FlowListener owns no
 // socket and its Accept waits until Close.
 type FlowListener struct {
+	gate *dgram.WriteGate
 	// closeErr is the error of closing c, set once.
 	closeErr  error
 	c         *net.UDPConn
@@ -173,7 +174,7 @@ func newFlowListener(c *net.UDPConn, opts []FlowOption) *FlowListener {
 	}
 	cfg.queue = max(cfg.queue, 1)
 	cfg.backlog = max(cfg.backlog, 1)
-	l := &FlowListener{c: c, opts: cfg, epoch: clock.NewEpoch(cfg.clock)}
+	l := &FlowListener{gate: dgram.NewWriteGate(c), c: c, opts: cfg, epoch: clock.NewEpoch(cfg.clock)}
 	l.flows.Init(flowtable.TableOptions[flowKey, struct{}, *FlowConn]{
 		Queue: (*FlowConn).queue, Shutdown: (*FlowConn).shutdown,
 		Membership: func(f *FlowConn) *flowtable.Membership[flowKey, struct{}] { return &f.membership },
@@ -290,6 +291,9 @@ func (l *FlowListener) newFlow(key flowKey, redirected bool) *FlowConn {
 		local:      net.UDPAddrFromAddrPort(key.dst),
 		remote:     net.UDPAddrFromAddrPort(key.src),
 	}
+	if !redirected {
+		f.writer = dgram.NewWriter()
+	}
 	f.q.Init(l.opts.queue, l.epoch)
 	f.datagramSource = dgram.NewSource(f, &f.q)
 	return f
@@ -307,6 +311,7 @@ func (l *FlowListener) newFlow(key flowKey, redirected bool) *FlowConn {
 // listening socket, from the address the source sent to.
 type FlowConn struct {
 	datagramSource
+	writer        dgram.Writer
 	writeDeadline time.Time
 	local         net.Addr
 	remote        net.Addr
@@ -336,7 +341,7 @@ func (f *FlowConn) Redirected() bool { return f != nil && f.redirected }
 // queued. It returns io.EOF once an idle timeout closed f, and net.ErrClosed
 // once f or the listener is closed.
 func (f *FlowConn) Read(b []byte) (int, error) {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return 0, net.ErrClosed
 	}
 	return f.q.Read(b)
@@ -344,20 +349,11 @@ func (f *FlowConn) Read(b []byte) (int, error) {
 
 // Write sends b to the source as one datagram from the original destination.
 func (f *FlowConn) Write(b []byte) (int, error) {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return 0, net.ErrClosed
 	}
 	if !f.redirected {
-		f.mu.Lock()
-		dl := f.writeDeadline
-		f.mu.Unlock()
-		if f.q.Closed() {
-			return 0, net.ErrClosed
-		}
-		if !dl.IsZero() && !time.Now().Before(dl) {
-			return 0, os.ErrDeadlineExceeded
-		}
-		n, err := writeFrom(f.l.c, b, f.key.dst, f.key.src)
+		n, err := f.l.gate.Write(&f.writer, f.q.Done(), func() (int, error) { return writeFrom(f.l.c, b, f.key.dst, f.key.src) })
 		if err == nil {
 			f.q.Touch()
 		}
@@ -414,16 +410,21 @@ func (f *FlowConn) replySocket() (*net.UDPConn, error) {
 func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 	raw, err := reply.SyscallConn()
 	if err != nil {
+		f.shutdown(err)
 		return
 	}
 	for {
 		bp, n, err := readDatagram(raw)
 		if err != nil {
-			if f.q.Closed() || errors.Is(err, net.ErrClosed) {
+			if f.q.Closed() {
 				return
 			}
-			// ICMP errors, such as a refused port, concern earlier writes.
-			continue
+			// Only a datagram-specific ICMP failure permits another read.
+			if retryReply(err) {
+				continue
+			}
+			f.shutdown(err)
+			return
 		}
 		f.q.Enqueue((*bp)[:n])
 		bufpool.Large.Put(bp)
@@ -434,7 +435,7 @@ func (f *FlowConn) replyLoop(reply *net.UDPConn) {
 // Reads and Writes return net.ErrClosed, and the next datagram of the flow
 // starts a new connection.
 func (f *FlowConn) Close() error {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return net.ErrClosed
 	}
 	if f.q.Closed() {
@@ -465,11 +466,14 @@ func (f *FlowConn) shutdown(err error) {
 			_ = reply.Close()
 		}
 	})
+	if !f.redirected {
+		f.writer.Close()
+	}
 }
 
 // LocalAddr returns the flow's original destination.
 func (f *FlowConn) LocalAddr() net.Addr {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return nil
 	}
 	return f.local
@@ -477,7 +481,7 @@ func (f *FlowConn) LocalAddr() net.Addr {
 
 // RemoteAddr returns the flow's source.
 func (f *FlowConn) RemoteAddr() net.Addr {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return nil
 	}
 	return f.remote
@@ -493,7 +497,7 @@ func (f *FlowConn) SetDeadline(t time.Time) error {
 
 // SetReadDeadline sets the deadline of pending and later Reads.
 func (f *FlowConn) SetReadDeadline(t time.Time) error {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return net.ErrClosed
 	}
 	if f.q.Closed() {
@@ -503,10 +507,13 @@ func (f *FlowConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// SetWriteDeadline sets the deadline of later Writes.
+// SetWriteDeadline sets the deadline of pending and later Writes.
 func (f *FlowConn) SetWriteDeadline(t time.Time) error {
-	if f == nil {
+	if f == nil || f.l == nil {
 		return net.ErrClosed
+	}
+	if !f.redirected {
+		return f.writer.SetDeadline(t)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -836,8 +836,14 @@ func (c *Conn) CloseWrite() error {
 // NetConn returns the connection beneath, as *tls.Conn's NetConn does, for
 // unwrapping helpers. Reading it directly bypasses the header handling.
 func (c *Conn) NetConn() net.Conn {
+	if c == nil {
+		return nil
+	}
 	return c.conn
 }
+
+// NetxOwned describes the transport closed by Close.
+func (c *Conn) NetxOwned() netutil.Owned { return netutil.BuiltinOwned(c, c.NetConn(), nil) }
 
 // Write writes to the connection. Writes do not wait for the header.
 func (c *Conn) Write(b []byte) (int, error) {

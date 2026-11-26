@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/djylb/netx"
@@ -154,7 +153,10 @@ type datagramRelay struct {
 	idle     *clock.Idle // nil without an idle timeout
 	// icmpCredit counts the datagrams sent, up to maxICMPCredit, that a
 	// reported ICMP error can stand for; see replies.
-	icmpCredit atomic.Int32
+	creditMu   sync.Mutex
+	icmpCredit int
+	sending    bool
+	creditWait chan bool
 	// reportInvalid passes the datagrams dropped as invalid to onError,
 	// which a Server does not.
 	reportInvalid bool
@@ -181,50 +183,65 @@ func (d *datagramRelay) requests() error {
 	buf := *bp
 	for {
 		n, err := d.stream.Read(buf)
+		if n > 0 || err == nil {
+			if sendErr := d.sendRequest(buf, n); sendErr != nil {
+				return relayReadError(sendErr)
+			}
+		}
 		if err != nil {
-			if errors.Is(err, io.EOF) || netx.IsClosed(err) {
-				return nil
-			}
-			return err
-		}
-		if n == len(buf) {
-			// Valid datagrams, header included, are shorter: this one may
-			// have been cut short.
-			if d.reportInvalid {
-				d.report(ErrDatagramTooLarge)
-			}
-			continue
-		}
-		dst, h, err := DecodeDatagram(buf[:n])
-		if err != nil {
-			if d.reportInvalid && d.onError != nil {
-				d.onError(fmt.Errorf("socks5: udp datagram dropped: %w", err))
-			}
-			continue
-		}
-		if d.allow != nil && !d.allow(dst) {
-			continue
-		}
-		// Only datagrams that are relayed count as activity, so that
-		// invalid or refused ones do not keep an idle relay going.
-		d.touch()
-		m, err := d.out.WriteTo(buf[h:n], dst)
-		if err != nil {
-			if netx.IsClosed(err) {
-				return nil
-			}
-			if d.onError != nil {
-				d.onError(fmt.Errorf("socks5: udp send to %v: %w", dst, err))
-			}
-			continue
-		}
-		if c := d.icmpCredit.Load(); c < maxICMPCredit {
-			d.icmpCredit.Store(c + 1) // only requests adds
-		}
-		if d.sent != nil {
-			d.sent(dst, m)
+			return relayReadError(err)
 		}
 	}
+}
+
+func relayReadError(err error) error {
+	if errors.Is(err, io.EOF) || netx.IsClosed(err) {
+		return nil
+	}
+	return err
+}
+
+func (d *datagramRelay) sendRequest(buf []byte, n int) error {
+	if n == len(buf) {
+		// Valid datagrams, header included, are shorter: this one may
+		// have been cut short.
+		if d.reportInvalid {
+			d.report(ErrDatagramTooLarge)
+		}
+		return nil
+	}
+	dst, h, err := DecodeDatagram(buf[:n])
+	if err != nil {
+		if d.reportInvalid && d.onError != nil {
+			d.onError(fmt.Errorf("socks5: udp datagram dropped: %w", err))
+		}
+		return nil
+	}
+	if d.allow != nil && !d.allow(dst) {
+		return nil
+	}
+	// Only datagrams that are relayed count as activity, so that
+	// invalid or refused ones do not keep an idle relay going.
+	d.touch()
+	d.creditMu.Lock()
+	d.sending = true
+	d.creditMu.Unlock()
+	m, err := d.out.WriteTo(buf[h:n], dst)
+	d.finishSend(err == nil)
+	if err != nil {
+		if netx.IsClosed(err) {
+			return err
+		}
+		if d.onError != nil {
+			d.onError(fmt.Errorf("socks5: udp send to %v: %w", dst, err))
+		}
+		return nil
+	}
+
+	if d.sent != nil {
+		d.sent(dst, m)
+	}
+	return nil
 }
 
 // replies writes the replies that out receives, from any source, to the
@@ -240,6 +257,11 @@ func (d *datagramRelay) replies() error {
 	var hdr [MaxDatagramHeaderLen]byte
 	for {
 		n, src, err := d.out.ReadFrom(payload)
+		if n > 0 || err == nil {
+			if writeErr := d.sendReply(packet, n, src, hdr[:0]); writeErr != nil {
+				return relayReadError(writeErr)
+			}
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, io.EOF) || netx.IsClosed(err):
@@ -255,32 +277,36 @@ func (d *datagramRelay) replies() error {
 			}
 			return fmt.Errorf("socks5: udp receive: %w", err)
 		}
-		d.touch()
-		h, err := AppendDatagram(hdr[:0], src, nil)
-		if err != nil {
-			d.report(err)
-			continue
-		}
-		start := MaxDatagramHeaderLen - len(h)
-		copy(packet[start:], h)
-		if _, err := d.stream.Write(packet[start : MaxDatagramHeaderLen+n]); err != nil {
-			if netx.IsClosed(err) {
-				return nil
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, netx.ErrFrameDesync) {
-				return err
-			}
-			// One undeliverable reply, such as one too large once wrapped,
-			// does not end the relay.
-			if d.onError != nil {
-				d.onError(fmt.Errorf("socks5: udp reply from %v: %w", src, err))
-			}
-			continue
-		}
-		if d.received != nil {
-			d.received(src, n)
-		}
 	}
+}
+
+func (d *datagramRelay) sendReply(packet []byte, n int, src netx.Addr, hdr []byte) error {
+	d.touch()
+	h, err := AppendDatagram(hdr[:0], src, nil)
+	if err != nil {
+		d.report(err)
+		return nil
+	}
+	start := MaxDatagramHeaderLen - len(h)
+	copy(packet[start:], h)
+	if _, err := d.stream.Write(packet[start : MaxDatagramHeaderLen+n]); err != nil {
+		if netx.IsClosed(err) {
+			return err
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, netx.ErrFrameDesync) {
+			return err
+		}
+		// One undeliverable reply, such as one too large once wrapped,
+		// does not end the relay.
+		if d.onError != nil {
+			d.onError(fmt.Errorf("socks5: udp reply from %v: %w", src, err))
+		}
+		return nil
+	}
+	if d.received != nil {
+		d.received(src, n)
+	}
+	return nil
 }
 
 // takeICMPCredit reports whether a datagram was sent that an ICMP error may
@@ -288,14 +314,33 @@ func (d *datagramRelay) replies() error {
 // one, so a PacketConn that returns the same error again is not read in a
 // loop.
 func (d *datagramRelay) takeICMPCredit() bool {
-	for {
-		c := d.icmpCredit.Load()
-		if c <= 0 {
-			return false
-		}
-		if d.icmpCredit.CompareAndSwap(c, c-1) {
-			return true
-		}
+	d.creditMu.Lock()
+	if d.icmpCredit > 0 {
+		d.icmpCredit--
+		d.creditMu.Unlock()
+		return true
+	}
+	if !d.sending {
+		d.creditMu.Unlock()
+		return false
+	}
+	// Only the receive loop waits. Attribute this report to this send
+	// once WriteTo has returned its result.
+	wait := make(chan bool, 1)
+	d.creditWait = wait
+	d.creditMu.Unlock()
+	return <-wait
+}
+
+func (d *datagramRelay) finishSend(sent bool) {
+	d.creditMu.Lock()
+	defer d.creditMu.Unlock()
+	d.sending = false
+	if d.creditWait != nil {
+		d.creditWait <- sent
+		d.creditWait = nil
+	} else if sent && d.icmpCredit < maxICMPCredit {
+		d.icmpCredit++
 	}
 }
 

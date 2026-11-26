@@ -133,6 +133,8 @@ func (c *reqConn) markUsed() {
 // NetConn returns the client's connection; see netx.InnermostConn.
 func (c *reqConn) NetConn() net.Conn { return c.Conn }
 
+func (c *reqConn) NetxOwned() netx.OwnedLayers { return netutil.BuiltinOwned(c, c.Conn, nil) }
+
 // Server is an HTTP/1.x proxy server. It serves CONNECT requests with a
 // tunnel to their destination, and forwards requests whose target is an
 // absolute http URI, such as "GET http://example.com/ HTTP/1.1", to their
@@ -316,11 +318,7 @@ func (s *Server) ListenAndServe(addr string) error {
 //
 // Settings that Validate reports fail it, closing l.
 func (s *Server) Serve(l net.Listener) error {
-	if err := s.Validate(); err != nil {
-		_ = l.Close()
-		return err
-	}
-	return s.life.Serve(l, ErrServerClosed, netx.Accept, s.serveConn, s.onError)
+	return s.life.Serve(l, s.Validate(), ErrServerClosed, netx.Accept, s.serveConn, s.onError)
 }
 
 // ServeConn serves the requests of one client connection, which may be any
@@ -331,16 +329,7 @@ func (s *Server) Serve(l net.Listener) error {
 // was ended. The connection counts in ActiveConns until ServeConn returns.
 // Settings that Validate reports fail it, closing c.
 func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
-	if err := s.Validate(); err != nil {
-		_ = c.Close()
-		return err
-	}
-	if !s.life.TrackConn(&c, true) {
-		_ = c.Close()
-		return ErrServerClosed
-	}
-	defer s.life.TrackConn(&c, false)
-	return s.serveConn(ctx, c, func() bool { return s.life.HandOff(&c) })
+	return s.life.ServeConn(ctx, c, s.Validate(), ErrServerClosed, s.serveConn)
 }
 
 // Validate reports a negative setting other than MaxIdleConns, whose
@@ -445,7 +434,8 @@ type serverConn struct {
 	// written to the target or a reply, the response head read and the
 	// response head written to the client.
 	headBuf, outBuf, respBuf, respOut []byte
-	x                                 exchange
+	respFields, outFields             httphead.Header
+	reqTrailer, respTrailer           []byte
 	// linger is set when the connection is closed after a reply with
 	// request bytes perhaps unread, which closing at once could turn into a
 	// reset that destroys the reply.
@@ -461,7 +451,7 @@ type serverConn struct {
 const maxKeptBuf = 16 << 10
 
 func (sc *serverConn) trimBuffers() {
-	for _, b := range [...]*[]byte{&sc.headBuf, &sc.outBuf, &sc.respBuf, &sc.respOut, &sc.x.reqStream.trailer, &sc.x.respStream.trailer} {
+	for _, b := range [...]*[]byte{&sc.headBuf, &sc.outBuf, &sc.respBuf, &sc.respOut, &sc.reqTrailer, &sc.respTrailer} {
 		if cap(*b) > maxKeptBuf {
 			*b = nil
 		}
@@ -528,7 +518,8 @@ func (sc *serverConn) lingerClose() {
 	if closeWrite(sc.c) != nil {
 		return
 	}
-	_ = sc.c.SetReadDeadline(time.Now().Add(lingerTimeout))
+	stop := boundRead(sc.c, lingerTimeout)
+	defer stop()
 	var r io.Reader = sc.c
 	if sc.br != nil {
 		r = sc.br
@@ -547,13 +538,14 @@ func (sc *serverConn) readRequest(first bool) (*Request, error) {
 	if !first {
 		// Idle: Shutdown ends the wait, which the client of a kept-alive
 		// connection is ready for.
-		stop := sc.readDeadline(netutil.Timeout(s.IdleTimeout, DefaultIdleTimeout))
-		drained := context.AfterFunc(s.life.DrainContext(), func() { _ = sc.c.SetReadDeadline(time.Unix(1, 0)) })
+		stop := boundRead(sc.c, netutil.Timeout(s.IdleTimeout, DefaultIdleTimeout))
+		drained := context.AfterFunc(s.life.DrainContext(), func() { _ = sc.c.Close() })
 		_, err := sc.br.Peek(1)
-		if !drained() {
+		idle := !drained()
+		stop()
+		if idle {
 			return nil, errIdleEnd
 		}
-		stop()
 		if err != nil {
 			if err == io.EOF || netx.IsTimeout(err) || isClosedRead(err) {
 				return nil, errIdleEnd
@@ -561,10 +553,12 @@ func (sc *serverConn) readRequest(first bool) (*Request, error) {
 			return nil, err
 		}
 	}
-	stop := sc.readDeadline(netutil.Timeout(s.HandshakeTimeout, DefaultHandshakeTimeout))
+	stop := boundRead(sc.c, netutil.Timeout(s.HandshakeTimeout, DefaultHandshakeTimeout))
 	var err error
 	sc.headBuf, err = httphead.Read(sc.br, sc.headBuf, positive(s.MaxHeaderBytes, DefaultMaxHeaderBytes))
-	stop()
+	if stop() {
+		err = os.ErrDeadlineExceeded
+	}
 	if err != nil {
 		switch {
 		case err == io.EOF:
@@ -587,15 +581,22 @@ func (sc *serverConn) readRequest(first bool) (*Request, error) {
 	return req, nil
 }
 
-// readDeadline bounds the reads of the connection for d, and returns a
+// boundRead bounds the reads of the connection for d, and returns a
 // function that lifts the bound. A connection without deadlines is closed
 // instead when d passes.
-func (sc *serverConn) readDeadline(d time.Duration) func() {
-	if err := sc.c.SetReadDeadline(time.Now().Add(d)); err == nil {
-		return func() { _ = sc.c.SetReadDeadline(time.Time{}) }
+func boundRead(c net.Conn, d time.Duration) func() bool {
+	if err := c.SetReadDeadline(time.Now().Add(d)); err == nil {
+		return func() bool { _ = c.SetReadDeadline(time.Time{}); return false }
 	}
-	t := time.AfterFunc(d, func() { _ = sc.c.Close() })
-	return func() { t.Stop() }
+	done := make(chan struct{})
+	t := time.AfterFunc(d, func() { defer close(done); _ = c.Close() })
+	return func() bool {
+		if t.Stop() {
+			return false
+		}
+		<-done
+		return true
+	}
 }
 
 // serveRequest serves req and reports whether the connection serves

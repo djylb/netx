@@ -30,8 +30,9 @@
 // between its frames. Automatic pongs never wait for a write in progress:
 // they are queued and sent by the writer that holds the connection, so a
 // stalled writer cannot stall the reader. With no write in progress the
-// reader writes the pong itself, bounded by the close timeout and the read
-// deadline, and drops it if it does not go out in time, so that a peer
+// reader writes the pong after OnPing returns, bounded by the close timeout
+// and the read deadline. It drops a pong if the bound cannot be set or the
+// write times out, so that a peer
 // that pings but never reads cannot hold the reader. Such a peer stalls
 // the writers, though: servers need write deadlines as well as read
 // deadlines.
@@ -189,9 +190,9 @@ const minReadBufferSize = 256
 type Options struct {
 	// OnPing and OnPong, if set, are called by the reader with the payload
 	// of each ping and pong, which is valid only during the call; a ping
-	// is answered with a pong all the same. They run on the reader's
-	// goroutine, as when extending a read deadline, and must not read;
-	// a Close from them waits the whole close timeout.
+	// queues an automatic pong before OnPing runs. They run on the reader's
+	// goroutine after it releases read ownership. They may close the connection.
+	// A read reentered while a fragmented message is in progress fails immediately.
 	OnPing func(c *Conn, data []byte)
 	OnPong func(c *Conn, data []byte)
 	// Compression, if set, offers or accepts permessage-deflate.
@@ -239,7 +240,10 @@ func (o *Options) Validate() error {
 }
 
 // validateHandshake reports a negative MaxHeaderBytes.
-func validateHandshake(maxHeader int) error {
+func (o *Options) validateHandshake(maxHeader int) error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
 	if maxHeader < 0 {
 		return fmt.Errorf("wsconn: negative MaxHeaderBytes %d", maxHeader)
 	}

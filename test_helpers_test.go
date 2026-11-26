@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/netx/memnet"
 	"github.com/djylb/netx/udpflow"
 	"github.com/djylb/timeshim"
@@ -61,8 +62,12 @@ func assertClosedConnState(t *testing.T, label string, c connStateProbe) {
 	if err := c.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("%s SetWriteDeadline() error = %v, want %v", label, err, net.ErrClosed)
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("%s Close() error = %v, want nil", label, err)
+	var wantClose error
+	if netutil.IsNilPointer(c) {
+		wantClose = net.ErrClosed
+	}
+	if err := c.Close(); !errors.Is(err, wantClose) {
+		t.Fatalf("%s Close() error = %v, want %v", label, err, wantClose)
 	}
 	if got := c.LocalAddr(); got != nil {
 		t.Fatalf("%s LocalAddr() = %v, want nil", label, got)

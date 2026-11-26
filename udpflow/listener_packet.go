@@ -356,11 +356,21 @@ func (l *PacketListener) Addr() net.Addr {
 // remote-only flow keys. The result is fixed for the listener's lifetime.
 func (l *PacketListener) DestinationAware() bool { return l != nil && l.pktinfo }
 
+var errInvalidPeer = errors.New("udpflow: invalid peer address")
+
 // errNoPacketConn is returned by the zero PacketListener's Dial and WriteTo.
 var errNoPacketConn = errors.New("udpflow: PacketListener without a packet connection")
 
+func validPeer(peer net.Addr) bool {
+	if ua, ok := peer.(*net.UDPAddr); ok {
+		return ua != nil && netutil.ValidPort(ua.Port)
+	}
+	return peer != nil && !netutil.IsNilPointer(peer)
+}
+
 // WriteTo sends p to addr from the packet connection, outside any
-// connection of the listener, such as a reply that the accept filter sends
+// connection of the listener. Ordinary sends work on sockets without deadline support.
+// WriteTo can send a reply that the accept filter sends
 // to a peer it does not accept yet.
 func (l *PacketListener) WriteTo(p []byte, addr net.Addr) (int, error) {
 	switch {
@@ -370,11 +380,15 @@ func (l *PacketListener) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, errNoPacketConn
 	case clock.IsClosed(l.conns.Done()):
 		return 0, net.ErrClosed
+	case !validPeer(addr):
+		return 0, errInvalidPeer
 	}
-	if ua, ok := addr.(*net.UDPAddr); ok && ua != nil && l.sock.udp != nil {
-		return l.sock.udp.WriteToUDPAddrPort(p, ua.AddrPort())
-	}
-	return l.sock.pc.WriteTo(p, addr)
+	return l.sock.gate.Write(nil, l.conns.Done(), func() (int, error) {
+		if ua, ok := addr.(*net.UDPAddr); ok && l.sock.udp != nil {
+			return l.sock.udp.WriteToUDPAddrPort(p, ua.AddrPort())
+		}
+		return l.sock.pc.WriteTo(p, addr)
+	})
 }
 
 // RejectPeer drops the datagrams of new flows from peer, before the
@@ -384,7 +398,7 @@ func (l *PacketListener) WriteTo(p []byte, addr net.Addr) (int, error) {
 // that a datagram merely claims, as a spoofed source would lock the real
 // peer out; the accept filter may call it for a peer it rejects.
 func (l *PacketListener) RejectPeer(peer net.Addr) {
-	if l == nil || l.reject == nil || peer == nil || netutil.IsNilPointer(peer) {
+	if l == nil || l.reject == nil || !validPeer(peer) {
 		return
 	}
 	l.reject.add(peerKeyOf(peer))
@@ -419,7 +433,10 @@ var ErrPacketConnLimit = errors.New("udpflow: packet listener connection limit r
 // waiting for Accept or one carrying broadcast or multicast traffic.
 // It returns ErrPacketConnLimit at the limit of WithPacketMaxConns, and net.ErrClosed
 // once the listener is closed. The idle timeout of the connection starts at
-// Dial. With packet information enabled, peer must be a *net.UDPAddr
+// Dial. Flow deadlines also bound waiting to send. A socket that rejects a
+// requested deadline reports its error on an active or subsequent write. Closing
+// a flow interrupts an active send only when its socket supports deadlines.
+// Closing the listener closes the shared socket. With packet information enabled, peer must be a *net.UDPAddr
 // with a valid IP address. Writes use the OS-selected source until the
 // first datagram from peer with a unicast destination at the
 // listener's port fixes the local destination and any link-local scope.
@@ -430,14 +447,14 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	switch {
 	case l == nil:
 		return nil, net.ErrClosed
-	case peer == nil || netutil.IsNilPointer(peer):
-		return nil, errors.New("udpflow: nil peer address")
+	case !validPeer(peer):
+		return nil, errInvalidPeer
 	case l.sock.pc == nil:
 		return nil, errNoPacketConn
 	}
 	if l.pktinfo {
 		addr, ok := peer.(*net.UDPAddr)
-		if !ok || !addr.AddrPort().IsValid() || addr.Port < 0 || addr.Port > 65535 {
+		if !ok || !addr.AddrPort().IsValid() {
 			return nil, errors.New("udpflow: destination-aware Dial requires a valid *net.UDPAddr")
 		}
 	}
@@ -467,8 +484,9 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 
 // packetSocket is a packet connection that a PacketListener reads.
 type packetSocket struct {
-	pc  net.PacketConn
-	udp *net.UDPConn // pc, when it is one: alloc-free reads and writes
+	gate *dgram.WriteGate
+	pc   net.PacketConn
+	udp  *net.UDPConn // pc, when it is one: alloc-free reads and writes
 	// pktinfo: udp is bound to a wildcard address and reports the
 	// destination of each datagram (listener_packet_pktinfo.go).
 	pktinfo bool
@@ -476,7 +494,7 @@ type packetSocket struct {
 }
 
 func newPacketSocket(pc net.PacketConn) packetSocket {
-	sock := packetSocket{pc: pc}
+	sock := packetSocket{pc: pc, gate: dgram.NewWriteGate(pc)}
 	sock.udp, _ = pc.(*net.UDPConn)
 	sock.pktinfo = enablePacketInfo(sock.udp)
 	if sock.pktinfo {
@@ -542,6 +560,9 @@ func (l *PacketListener) readLoop(sock *packetSocket) {
 			n, ap, err = sock.udp.ReadFromUDPAddrPort(buf)
 		default:
 			n, addr, err = sock.pc.ReadFrom(buf)
+			if err == nil && !validPeer(addr) {
+				continue
+			}
 			if ua, ok := addr.(*net.UDPAddr); ok && ua != nil {
 				ap = ua.AddrPort()
 				addr = nil // reported from ap
@@ -645,7 +666,7 @@ func (l *PacketListener) newConn(p []byte, k packetFlow, addr net.Addr, sock *pa
 
 // makeConn returns a connection to peer under k, which writes from sock.
 func (l *PacketListener) makeConn(k packetFlow, peer net.Addr, sock *packetSocket) *packetConn {
-	c := &packetConn{l: l, peerKey: k.peer, peer: peer, sock: sock, writeDeadline: clock.MakeDeadline()}
+	c := &packetConn{l: l, peerKey: k.peer, peer: peer, sock: sock, writer: dgram.NewWriter()}
 	if k.local.ap.IsValid() {
 		c.setReplySource(k.local)
 	}

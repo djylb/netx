@@ -1,51 +1,28 @@
 package wsconn
 
 import (
-	"bytes"
+	"errors"
 	"net"
+	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
-func TestPongDoesNotHoldReaderTCP(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	cl, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cl.Close() }()
-	_ = cl.(*net.TCPConn).SetReadBuffer(4096)
-	sc, err := ln.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = sc.(*net.TCPConn).SetWriteBuffer(4096)
-	srv := newTestConn(sc, nil, false, nil)
-	defer func() { _ = sc.Close() }()
-	ping := frame(finBit|opPing, true, bytes.Repeat([]byte("x"), 125))
-	go func() {
-		for range 500000 {
-			if _, err := cl.Write(ping); err != nil {
-				return
-			}
+// A peer that sends a ping but never reads cannot hold the reader past
+// its read deadline. net.Pipe blocks on the very first pong.
+func TestPongHonorsReadDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc, peer := net.Pipe()
+		defer func() { _ = sc.Close(); _ = peer.Close() }()
+		srv := newTestConn(sc, nil, false, nil)
+		deadline := time.Now().Add(time.Second)
+		if err := srv.SetReadDeadline(deadline); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	done := make(chan error, 1)
-	go func() {
-		_ = srv.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		_, _, err := srv.ReadMessage()
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("read succeeded")
+		go func() { _, _ = peer.Write(frame(finBit|opPing, true, []byte("x"))) }()
+		if _, _, err := srv.ReadMessage(); !errors.Is(err, os.ErrDeadlineExceeded) || !time.Now().Equal(deadline) {
+			t.Fatalf("ReadMessage = %v at %v, want timeout at %v", err, time.Now(), deadline)
 		}
-	case <-time.After(6 * time.Second):
-		t.Errorf("server reader stuck in a pong write after its read deadline")
-	}
+	})
 }

@@ -380,10 +380,12 @@ func (fc *FramedConn) Write(p []byte) (int, error) {
 	written := 0
 	for {
 		n := min(len(p)-written, MaxFramePayload)
-		if err := fc.writeFrameLocked(p[written : written+n]); err != nil {
+		sent, err := fc.writeFrameLocked(p[written : written+n])
+		written += sent
+		if err != nil {
 			return written, err
 		}
-		if written += n; written == len(p) {
+		if written == len(p) {
 			return written, nil
 		}
 	}
@@ -400,7 +402,8 @@ func (fc *FramedConn) WriteFrame(p []byte) error {
 	fc.wmu.Lock()
 	defer fc.wmu.Unlock()
 
-	return fc.writeFrameLocked(p)
+	_, err := fc.writeFrameLocked(p)
+	return err
 }
 
 // SetDeadline implements net.Conn.
@@ -410,8 +413,11 @@ func (fc *FramedConn) SetDeadline(t time.Time) error {
 	}
 	// Counted once set, so that a Read that times out at the old deadline
 	// before it does not keep that timeout.
-	defer fc.rdeadlines.Add(1)
-	return fc.conn.SetDeadline(t)
+	if err := fc.conn.SetDeadline(t); err != nil {
+		return err
+	}
+	fc.rdeadlines.Add(1)
+	return nil
 }
 
 // SetReadDeadline implements net.Conn.
@@ -419,8 +425,11 @@ func (fc *FramedConn) SetReadDeadline(t time.Time) error {
 	if fc == nil || fc.conn == nil {
 		return net.ErrClosed
 	}
-	defer fc.rdeadlines.Add(1) // as in SetDeadline
-	return fc.conn.SetReadDeadline(t)
+	if err := fc.conn.SetReadDeadline(t); err != nil {
+		return err
+	}
+	fc.rdeadlines.Add(1)
+	return nil
 }
 
 // inner returns the wrapped connection, or noConn.
@@ -441,7 +450,12 @@ func (fc *FramedConn) LocalAddr() net.Addr { return fc.inner().LocalAddr() }
 func (fc *FramedConn) RemoteAddr() net.Addr { return fc.inner().RemoteAddr() }
 
 // Close implements net.Conn.
-func (fc *FramedConn) Close() error { return fc.inner().Close() }
+func (fc *FramedConn) Close() error {
+	if fc == nil {
+		return net.ErrClosed
+	}
+	return fc.inner().Close()
+}
 
 // CloseWrite shuts down the writing side of the wrapped connection after the
 // frames written so far; see TimeoutConn.CloseWrite.
@@ -477,12 +491,9 @@ func (fc *FramedConn) netxLayer() layerInfo {
 	return info
 }
 
-func (fc *FramedConn) writeFrameLocked(p []byte) error {
-	if fc == nil || fc.conn == nil {
-		return net.ErrClosed
-	}
+func (fc *FramedConn) writeFrameLocked(p []byte) (int, error) {
 	if fc.werr != nil {
-		return fc.werr
+		return 0, fc.werr
 	}
 	var (
 		written int64
@@ -511,9 +522,12 @@ func (fc *FramedConn) writeFrameLocked(p []byte) error {
 	}
 	if err != nil && written > 0 && written < int64(2+len(p)) {
 		fc.werr = &frameDesyncError{cause: err}
-		return fc.werr
+		return 0, fc.werr
 	}
-	return err
+	if written == int64(2+len(p)) {
+		return len(p), err
+	}
+	return 0, err
 }
 
 // frameDesyncError matches ErrFrameDesync and, unless it is a timeout, its cause.
@@ -535,3 +549,6 @@ func (e *frameDesyncError) Unwrap() []error {
 
 func (e *frameDesyncError) Timeout() bool   { return false }
 func (e *frameDesyncError) Temporary() bool { return false }
+
+// NetxOwned describes the children closed with this layer.
+func (fc *FramedConn) NetxOwned() OwnedLayers { return fc.netxLayer().owned() }

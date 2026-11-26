@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/djylb/netx/httphead"
@@ -51,24 +51,24 @@ func TestAcceptStreamCanceledContext(t *testing.T) {
 
 // Replacing a deadline before it expires keeps the stream.
 func TestClientDeadlineReplaced(t *testing.T) {
-	pr, pw := io.Pipe()
-	defer func() { _ = pr.Close() }()
-	var resets int
-	var mu sync.Mutex
-	c := &clientConn{pw: pw, body: io.NopCloser(strings.NewReader("")), cancel: func() {
-		mu.Lock()
-		resets++
-		mu.Unlock()
-	}}
-	for range 100 {
-		_ = c.SetDeadline(time.Now().Add(5 * time.Millisecond))
-		_ = c.SetDeadline(time.Now().Add(time.Hour))
-	}
-	_ = c.SetDeadline(time.Time{})
-	time.Sleep(30 * time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
-	if resets != 0 || c.isExpired() {
-		t.Fatalf("%d resets", resets)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		pr, pw := io.Pipe()
+		defer func() { _ = pr.Close() }()
+		resets := 0
+		c := &clientConn{pw: pw, body: io.NopCloser(strings.NewReader("")), cancel: func() { resets++ }}
+		defer func() { _ = c.Close() }()
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		old := c.rd
+		_ = c.SetReadDeadline(time.Now().Add(time.Hour))
+		time.Sleep(2 * time.Second)
+		c.expire(&c.rd, old)
+		if resets != 0 || c.isExpired() {
+			t.Fatal("superseded read deadline expired")
+		}
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if resets != 1 || !c.isExpired() {
+			t.Fatal("replacement deadline did not expire")
+		}
+	})
 }

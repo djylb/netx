@@ -211,3 +211,54 @@ func TestPeekDatagram(t *testing.T) {
 		t.Fatalf("replayed datagram = %d bytes, %v; want %d", n, err, len(big))
 	}
 }
+
+func TestPeekPacketReplayBoundaries(t *testing.T) {
+	framed := NewFramedConn(new(byteBufferConn), WithFramedDatagrams())
+	for _, data := range []string{"", "first", "next"} {
+		if err := framed.WriteFrame([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var c net.Conn = framed
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	c, p, err := Peek(ctx, c, 2)
+	if err != nil || len(p) != 0 {
+		t.Fatalf("empty first packet = %q, %v", p, err)
+	}
+	buf := make([]byte, 8)
+	if n, err := c.Read(buf); n != 0 || err != nil {
+		t.Fatalf("empty replay = %d, %v", n, err)
+	}
+	c, p, err = Peek(ctx, c, 2)
+	if err != nil || string(p) != "fi" {
+		t.Fatalf("peek = %q, %v", p, err)
+	}
+	if n, err := c.Read(buf[:1]); n != 1 || err != nil {
+		t.Fatalf("short replay = %d, %v", n, err)
+	}
+	if n, err := c.Read(buf); string(buf[:n]) != "next" || err != nil {
+		t.Fatalf("next packet = %q, %v", buf[:n], err)
+	}
+}
+
+func TestReleaseInReadCallback(t *testing.T) {
+	base := &teeTestConn{readBuf: bytes.NewBufferString("a")}
+	var recorded *RecordingConn
+	called := false
+	observed := ObserveConn(base, func(int64) error {
+		called = true
+		if c, p := recorded.Release(); c != nil || p != nil {
+			t.Fatal("transferred an active read")
+		}
+		return nil
+	}, nil)
+	recorded = NewRecordingConn(observed, 8)
+	defer func() { _ = observed.Close() }()
+	if n, err := recorded.Read(make([]byte, 1)); !called || n != 1 || err != nil {
+		t.Fatalf("Read = %d, %v, callback = %t", n, err, called)
+	}
+	if c, data := recorded.Release(); c != observed || string(data) != "a" {
+		t.Fatalf("Release = %T, %q", c, data)
+	}
+}

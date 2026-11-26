@@ -29,12 +29,14 @@ import (
 // Read may be called concurrently with Append, End, SetReadDeadline and
 // Close, and does not allocate.
 type Reader struct {
-	deadline time.Time // under mu
-	changed  waiter    // under mu
-	parts    []*part   // parts[0] is read; under mu
+	deadline    time.Time // under mu
+	deadlineErr error     // inherited deadline rejected by the current stream
+	changed     waiter    // under mu
+	parts       []*part   // parts[0] is read; under mu
 	// gen counts the changes of deadline and of the current stream, so
 	// that applyDeadline, which runs unlocked, sets the latest deadline on
 	// the latest stream. Under mu.
+	readMu sync.Mutex
 	gen    uint64
 	mu     sync.Mutex
 	ended  bool // under mu
@@ -47,6 +49,7 @@ type part struct {
 }
 
 var (
+	errPrepare = errors.New("duplex: interrupted read deadline installation")
 	errEnded   = errors.New("duplex: Append after End")
 	errNilPart = errors.New("duplex: Append of a nil stream")
 )
@@ -55,7 +58,9 @@ var (
 // returns a channel that is closed once the Reader has finished r and
 // closed it, or closed it with Close: an HTTP handler that appends its
 // request body waits on it before it returns. When the Reader is closed or
-// ended, Append returns an error and leaves r with the caller.
+// ended, or the stream rejects the inherited deadline, Append returns an error
+// and leaves r with the caller. If a queued stream rejects its deadline when it
+// becomes current, Read and WriteTo return that error until a deadline succeeds.
 func (rd *Reader) Append(r io.Reader) (<-chan struct{}, error) {
 	if rd == nil {
 		return nil, net.ErrClosed
@@ -64,25 +69,39 @@ func (rd *Reader) Append(r io.Reader) (<-chan struct{}, error) {
 		return nil, errNilPart
 	}
 	rd.mu.Lock()
-	switch {
-	case rd.closed:
+	for {
+		switch {
+		case rd.closed:
+			rd.mu.Unlock()
+			return nil, net.ErrClosed
+		case rd.ended:
+			rd.mu.Unlock()
+			return nil, errEnded
+		}
+		if len(rd.parts) > 0 && rd.deadline.IsZero() {
+			break
+		}
+		deadline, gen := rd.deadline, rd.gen
 		rd.mu.Unlock()
-		return nil, net.ErrClosed
-	case rd.ended:
-		rd.mu.Unlock()
-		return nil, errEnded
+		err := setStreamReadDeadline(r, deadline)
+		rd.mu.Lock()
+		if gen != rd.gen || rd.closed || rd.ended {
+			continue
+		}
+		if err != nil {
+			rd.mu.Unlock()
+			return nil, err
+		}
+		break
 	}
 	p := &part{r: r, done: make(chan struct{})}
 	rd.parts = append(rd.parts, p)
-	current := len(rd.parts) == 1
-	if current {
+	if len(rd.parts) == 1 {
 		rd.gen++
+		rd.deadlineErr = nil
 		rd.changed.broadcast()
 	}
 	rd.mu.Unlock()
-	if current {
-		_ = rd.applyDeadline()
-	}
 	return p.done, nil
 }
 
@@ -117,7 +136,7 @@ func (rd *Reader) current() (*part, error) {
 	case len(rd.parts) == 0:
 		return nil, io.EOF
 	}
-	return rd.parts[0], nil
+	return rd.parts[0], rd.deadlineErr
 }
 
 // finish moves on from p, at its end, and closes it.
@@ -131,13 +150,17 @@ func (rd *Reader) finish(p *part) {
 	rd.parts = rd.parts[1:]
 	next := len(rd.parts) > 0
 	if next {
+		// readMu keeps other reads off the new stream during installation.
+		rd.deadlineErr = errPrepare
 		rd.gen++
 	}
 	rd.mu.Unlock()
-	if cl, ok := p.r.(io.Closer); ok {
-		_ = cl.Close()
-	}
-	close(p.done)
+	func() {
+		defer close(p.done)
+		if cl, ok := p.r.(io.Closer); ok {
+			_ = cl.Close()
+		}
+	}()
 	if next {
 		_ = rd.applyDeadline()
 	}
@@ -148,6 +171,8 @@ func (rd *Reader) Read(b []byte) (int, error) {
 	if rd == nil {
 		return 0, net.ErrClosed
 	}
+	rd.readMu.Lock()
+	defer rd.readMu.Unlock()
 	for {
 		p, err := rd.current()
 		if err != nil {
@@ -171,6 +196,8 @@ func (rd *Reader) WriteTo(w io.Writer) (int64, error) {
 	if rd == nil {
 		return 0, net.ErrClosed
 	}
+	rd.readMu.Lock()
+	defer rd.readMu.Unlock()
 	var total int64
 	for {
 		p, err := rd.current()
@@ -180,7 +207,7 @@ func (rd *Reader) WriteTo(w io.Writer) (int64, error) {
 		if err != nil {
 			return total, err
 		}
-		n, err := copyTo(w, p.r, p.r)
+		n, err := copyTo(w, p.r)
 		total += n
 		if err != nil {
 			return total, err
@@ -227,19 +254,24 @@ func (rd *Reader) applyDeadline() error {
 		}
 		p, t, gen := rd.parts[0], rd.deadline, rd.gen
 		rd.mu.Unlock()
-		var err error
-		if d, ok := p.r.(readDeadliner); ok {
-			err = d.SetReadDeadline(t)
-		} else {
-			err = noDeadline(t, errNoReadDeadline)
-		}
+		err := setStreamReadDeadline(p.r, t)
 		rd.mu.Lock()
 		latest := rd.gen == gen
+		if latest {
+			rd.deadlineErr = err
+		}
 		rd.mu.Unlock()
 		if latest {
 			return err
 		}
 	}
+}
+
+func setStreamReadDeadline(r io.Reader, t time.Time) error {
+	if d, ok := r.(readDeadliner); ok {
+		return d.SetReadDeadline(t)
+	}
+	return noDeadline(t, errNoReadDeadline)
 }
 
 // Close closes the streams that are left and ends the reads that wait.

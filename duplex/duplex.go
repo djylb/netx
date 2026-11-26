@@ -42,9 +42,9 @@
 //	// receiver, as each channel arrives
 //	done, err := in.Append(channel)
 //
-// WriteTo and ReadFrom hand copies to the halves, so io.Copy and relays
-// keep the halves' own fast paths, such as splice and sendfile between
-// sockets and files.
+// WriteTo and ReadFrom keep kernel copy paths between sockets and files.
+// With other peers they serialize individual reads and writes, so concurrent
+// copies do not hold one connection while waiting for another.
 //
 // Read, Write, the deadline methods and the Close methods may be called
 // concurrently, and Read and Write do not allocate. The methods of a nil
@@ -56,18 +56,23 @@ import (
 	"io"
 	"net"
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // Conn is a net.Conn made of a read half and a write half. A Conn owns its
 // halves: its Close methods close them.
 type Conn struct {
-	r      io.Reader
-	w      io.Writer
-	shared bool // r and w are the same value
+	r           io.Reader
+	w           io.Writer
+	serializeRW bool // shared half without a concurrent I/O contract
+	shared      bool // r and w are the same value
 
+	rMu, wMu         sync.Mutex // serialize access to each half, including bulk copies
 	rClosed, wClosed atomic.Bool
 
 	mu        sync.Mutex
@@ -77,8 +82,16 @@ type Conn struct {
 }
 
 // Join returns a connection that reads r and writes w. Either may be nil.
+// Identical halves serialize reads with writes unless they are a net.Conn
+// or *os.File, which support concurrent I/O. Two non-comparable halves of
+// the same type also take turns because their identities cannot be compared.
 func Join(r io.Reader, w io.Writer) *Conn {
-	return &Conn{r: r, w: w, shared: same(r, w)}
+	shared := netutil.Same(r, w)
+	_, conn := r.(net.Conn)
+	_, file := r.(*os.File)
+	sameType := r != nil && reflect.TypeOf(r) == reflect.TypeOf(w)
+	mayAlias := shared || sameType && (!reflect.ValueOf(r).Comparable() || !reflect.ValueOf(w).Comparable())
+	return &Conn{r: r, w: w, shared: shared, serializeRW: mayAlias && !conn && !file}
 }
 
 var (
@@ -101,7 +114,16 @@ var (
 
 // Read reads the read half.
 func (c *Conn) Read(p []byte) (int, error) {
-	if c == nil || c.rClosed.Load() {
+	if c == nil {
+		return 0, net.ErrClosed
+	}
+	c.rMu.Lock()
+	defer c.rMu.Unlock()
+	return c.read(p)
+}
+
+func (c *Conn) read(p []byte) (int, error) {
+	if c.rClosed.Load() {
 		return 0, net.ErrClosed
 	}
 	if c.r == nil {
@@ -112,7 +134,24 @@ func (c *Conn) Read(p []byte) (int, error) {
 
 // Write writes the write half.
 func (c *Conn) Write(p []byte) (int, error) {
-	if c == nil || c.wClosed.Load() {
+	if c == nil {
+		return 0, net.ErrClosed
+	}
+	mu := c.writeMutex()
+	mu.Lock()
+	defer mu.Unlock()
+	return c.write(p)
+}
+
+func (c *Conn) writeMutex() *sync.Mutex {
+	if c.serializeRW {
+		return &c.rMu
+	}
+	return &c.wMu
+}
+
+func (c *Conn) write(p []byte) (int, error) {
+	if c.wClosed.Load() {
 		return 0, net.ErrClosed
 	}
 	if c.w == nil {
@@ -136,36 +175,69 @@ func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 	if c.r == nil {
 		return 0, nil
 	}
-	return copyTo(w, c.r, reader{c})
+	if copyEndpoint(c.r) {
+		// Sockets and files already serialize their actual reads.
+		return copyTo(w, c.r)
+	}
+	if !copyEndpoint(w) {
+		return io.Copy(w, reader{c})
+	}
+	c.rMu.Lock()
+	defer c.rMu.Unlock()
+	if c.rClosed.Load() {
+		return 0, net.ErrClosed
+	}
+	return copyTo(w, c.r)
+}
+
+// copyEndpoint identifies standalone transports that cannot call back into another
+// copy. Keep kernel copy paths for these and lock individual I/O everywhere else.
+func copyEndpoint(v any) bool {
+	switch v.(type) {
+	case *os.File, *net.TCPConn, *net.UnixConn:
+		return true
+	default:
+		return false
+	}
 }
 
 // copyTo copies r to w, through the copy methods that keep their fast
 // paths: w's ReadFrom of r when r is a socket, whose own WriteTo copies
 // through a buffer to anything but a Unix socket, else r's WriteTo, else
-// w's ReadFrom of plain, which reads what r does, else a buffer.
-func copyTo(w io.Writer, r io.Reader, plain io.Reader) (int64, error) {
+// w's ReadFrom, else a buffer.
+func copyTo(w io.Writer, r io.Reader) (int64, error) {
 	switch r.(type) {
 	case *net.TCPConn, *net.UnixConn:
 		if rf, ok := w.(io.ReaderFrom); ok {
 			return rf.ReadFrom(r)
 		}
 	}
-	if wt, ok := r.(io.WriterTo); ok {
-		return wt.WriteTo(w)
-	}
-	return io.Copy(w, plain)
+	return io.Copy(w, r)
 }
 
 // ReadFrom copies src to the write half until io.EOF, through the write
-// half's ReadFrom when it has one.
+// half's ReadFrom when the source is a standalone file or socket. Other
+// sources copy through Write when the write half needs serialization.
 func (c *Conn) ReadFrom(src io.Reader) (int64, error) {
 	if c == nil || c.wClosed.Load() {
+		return 0, net.ErrClosed
+	}
+	if copyEndpoint(c.w) {
+		return copyTo(c.w, src)
+	}
+	if c.w == nil || !copyEndpoint(src) {
+		return io.Copy(writer{c}, src)
+	}
+	mu := c.writeMutex()
+	mu.Lock()
+	defer mu.Unlock()
+	if c.wClosed.Load() {
 		return 0, net.ErrClosed
 	}
 	if rf, ok := c.w.(io.ReaderFrom); ok {
 		return rf.ReadFrom(src)
 	}
-	return io.Copy(writer{c}, src)
+	return io.Copy(c.w, src)
 }
 
 // CloseRead stops the read half: it calls the half's CloseRead method, or
@@ -308,20 +380,6 @@ func halfClose(h any, read bool) error {
 		return cw.CloseWrite()
 	}
 	return nil
-}
-
-// same reports whether a and b are the same non-nil value. Values of a type
-// that is not comparable are never the same.
-func same(a, b any) (eq bool) {
-	if a == nil || b == nil {
-		return false
-	}
-	defer func() {
-		if recover() != nil {
-			eq = false
-		}
-	}()
-	return a == b
 }
 
 type readDeadliner interface{ SetReadDeadline(t time.Time) error }

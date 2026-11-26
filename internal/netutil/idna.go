@@ -32,18 +32,26 @@ func ToASCII(name string) (string, bool) {
 		}
 		first = false
 		if IsASCII(label) {
+			if len(label) > MaxLabelLen {
+				return "", false
+			}
 			b.WriteString(label)
 			continue
 		}
 		if utf8.RuneCountInString(label) > MaxLabelLen {
 			return "", false
 		}
+		encoded := Punycode(label)
+		if len(encoded)+4 > MaxLabelLen {
+			return "", false
+		}
 		b.WriteString("xn--")
-		b.WriteString(Punycode(label))
+		b.WriteString(encoded)
 	}
 	return b.String(), true
 }
 
+// Standalone copies track this encoder and TestPunycodeRFC3492 together.
 // Punycode parameters of RFC 3492.
 const (
 	pcBase        = 36

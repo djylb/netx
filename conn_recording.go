@@ -17,6 +17,8 @@ const DefaultRecordingLimit = 64 * 1024
 type RecordingConn struct {
 	underlying  net.Conn
 	buf         []byte
+	idle        *sync.Cond // allocated only when reads contend
+	reading     bool
 	mu          sync.Mutex
 	detached    bool
 	truncated   bool
@@ -37,17 +39,40 @@ func NewRecordingConn(c net.Conn, limit int) *RecordingConn {
 }
 
 func (c *RecordingConn) Read(p []byte) (n int, err error) {
-	conn := c.conn()
-	if conn == nil {
+	if c == nil {
 		return 0, net.ErrClosed
 	}
-	n, err = conn.Read(p)
-	if n > 0 {
-		c.mu.Lock()
-		c.captureLocked(p[:n])
+	c.mu.Lock()
+	c.waitForRead()
+	conn := c.underlying
+	if conn == nil {
 		c.mu.Unlock()
+		return 0, net.ErrClosed
 	}
-	return n, err
+	c.reading = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if n > 0 {
+			c.captureLocked(p[:n])
+		}
+		c.reading = false
+		if c.idle != nil {
+			c.idle.Broadcast()
+		}
+		c.mu.Unlock()
+	}()
+	return conn.Read(p)
+}
+
+// waitForRead waits under mu until all bytes from the current read are recorded.
+func (c *RecordingConn) waitForRead() {
+	for c.reading {
+		if c.idle == nil {
+			c.idle = sync.NewCond(&c.mu)
+		}
+		c.idle.Wait()
+	}
 }
 
 // inner returns the connection that c records, or noConn after Close or
@@ -106,7 +131,7 @@ func (c *RecordingConn) stop(discard bool) {
 // Close implements net.Conn.
 func (c *RecordingConn) Close() error {
 	if c == nil {
-		return nil
+		return net.ErrClosed
 	}
 	c.mu.Lock()
 	conn := c.underlying
@@ -142,7 +167,9 @@ func (c *RecordingConn) Truncated() bool {
 }
 
 // Release detaches the underlying connection and returns it with a copy of
-// the buffered bytes. The caller then owns the connection: the RecordingConn reports
+// the buffered bytes. During an active Read it returns (nil, nil) and keeps
+// ownership, so a read callback can try Release without blocking. Retry once
+// the Read returns to include its bytes. After a transfer the RecordingConn reports
 // net.ErrClosed from Read, Write and the deadline methods, and its Close does
 // not close the returned connection.
 func (c *RecordingConn) Release() (net.Conn, []byte) {
@@ -151,6 +178,9 @@ func (c *RecordingConn) Release() (net.Conn, []byte) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.reading {
+		return nil, nil
+	}
 	conn := c.underlying
 	c.underlying = nil
 	c.detached = true
@@ -186,3 +216,6 @@ func (c *RecordingConn) captureLocked(p []byte) {
 	}
 	c.buf = append(c.buf, p...)
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *RecordingConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

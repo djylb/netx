@@ -126,6 +126,25 @@ func (r *rawClosingRWC) NetConn() net.Conn {
 	return r.raw
 }
 
+func (r *rawClosingRWC) NetxOwned() OwnedLayers { return OwnedLayers{Self: r, First: r.raw} }
+
+type borrowingWrapper struct {
+	countedCloseConn
+	raw net.Conn
+}
+
+func (c *borrowingWrapper) NetConn() net.Conn { return c.raw }
+func TestExternalBorrowedParent(t *testing.T) {
+	parent := new(abortCountingConn)
+	Abort(&borrowingWrapper{raw: parent}, nil)
+	if parent.Calls() != 0 {
+		t.Fatal("aborted borrowed connection")
+	}
+	if err := WrapConn(&borrowingWrapper{raw: parent}, parent, WithWrapParentClose()).Close(); err != nil || parent.Calls() != 1 {
+		t.Fatalf("explicit parent Close = %v, calls = %d", err, parent.Calls())
+	}
+}
+
 type rawProviderOnly struct {
 	raw net.Conn
 }
@@ -307,5 +326,43 @@ func TestInnermostConnHandlesUncomparableValues(t *testing.T) {
 	w := WrapConn(c, c, WithWrapParentClose())
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+type abortCountingConn struct{ countedCloseConn }
+
+func (c *abortCountingConn) Abort(error) { _ = c.Close() }
+
+func TestBorrowedWrapOwnership(t *testing.T) {
+	parent := new(abortCountingConn)
+	Abort(WrapConn(new(countedCloseConn), parent), nil)
+	if parent.Calls() != 0 {
+		t.Fatal("aborted borrowed parent")
+	}
+	inner := WrapConn(new(countedCloseConn), parent)
+	outer := WrapConn(inner, parent, WithWrapParentClose())
+	if err := outer.Close(); err != nil || parent.Calls() != 1 {
+		t.Fatalf("explicit parent close = %d, %v", parent.Calls(), err)
+	}
+}
+
+func TestDeepOwnedAbort(t *testing.T) {
+	raw := new(abortCountingConn)
+	var c net.Conn = raw
+	for range 2 * maxUnwrapDepth {
+		c = NewPrefixConn(c, nil)
+	}
+	Abort(c, nil)
+	if raw.Calls() != 2 {
+		t.Errorf("Close count = %v, want Abort and Close", raw.Calls())
+	}
+}
+
+func TestTypedNilWrapParent(t *testing.T) {
+	raw := new(countedCloseConn)
+	c := WrapConn(raw, (*net.TCPConn)(nil))
+	defer func() { _ = c.Close() }()
+	if c.LocalAddr() != raw.LocalAddr() || c.SetDeadline(time.Time{}) != nil {
+		t.Fatal("typed nil parent did not select the I/O connection")
 	}
 }

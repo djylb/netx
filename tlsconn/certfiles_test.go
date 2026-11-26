@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"os"
 	"path/filepath"
@@ -66,6 +67,7 @@ func TestCertFilesChangeDetection(t *testing.T) {
 	if err := os.Chmod(certFile, 0); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(certFile, 0o600) })
 	if _, err := os.ReadFile(certFile); err == nil {
 		t.Log("file permissions not enforced here; skipping the unread check")
 	} else {
@@ -145,6 +147,7 @@ func TestCertFilesHalfWrittenPair(t *testing.T) {
 	if err := os.Chmod(certFile, 0); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(certFile, 0o600) })
 	if _, err := os.ReadFile(certFile); err == nil {
 		t.Skip("file permissions not enforced here")
 	}
@@ -295,11 +298,9 @@ func TestCertFilesExpiredUnchangedStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	syncStore := func() {
-		s.checkMu.Lock() // also waits for a check that a handshake started
-		defer s.checkMu.Unlock()
-		s.syncFiles(fake.Now(), false)
-	}
+	// This test drives the schedule explicitly, including checks that are not due.
+	s.nextCheck.Store(1<<63 - 1)
+	syncStore := func() { s.syncFiles(fake.Now(), false) }
 	storeCert := func() *tls.Certificate {
 		got, _ := s.forName(context.Background(), "a.example")
 		return got
@@ -346,23 +347,10 @@ func TestCertFilesConcurrentChecks(t *testing.T) {
 	}
 	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
 	write := func(i int) {
-		// Each file is replaced at once, so a read sees a whole file, if
-		// perhaps not a matching pair.
+		// A renewal may expose a truncated or mismatched pair while it
+		// writes. Readers keep the previous usable certificate in that case.
 		for file, data := range map[string][]byte{certFile: certs[i][0], keyFile: certs[i][1]} {
-			if err := os.WriteFile(file+".tmp", data, 0o600); err != nil {
-				t.Error(err)
-				return
-			}
-			// Windows refuses to replace a file that a reader has open
-			// for a moment; a renewal tool would retry too.
-			var err error
-			for range 100 {
-				if err = os.Rename(file+".tmp", file); err == nil || runtime.GOOS != "windows" {
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if err != nil {
+			if err := os.WriteFile(file, data, 0o600); err != nil {
 				t.Error(err)
 				return
 			}
@@ -687,7 +675,7 @@ func TestCertFilesInFlightLoadDoesNotEvict(t *testing.T) {
 	}
 }
 
-// OnError runs without checkMu held, so it may check the files itself, in
+// OnError runs after the active check, so it may check the files itself, in
 // CheckFiles and in the background check that a handshake starts.
 func TestCertStoreOnErrorChecksFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -726,7 +714,7 @@ func TestCertStoreOnErrorChecksFiles(t *testing.T) {
 	<-reports
 	<-reports
 
-	// The background check releases checkMu before it reports, so the hook
+	// The background check finishes before it reports, so the hook
 	// may call CheckFiles and later checks still run.
 	calls.Store(0)
 	s.OnError = func(*CertError) {
@@ -854,6 +842,26 @@ func TestNegativeCertSettings(t *testing.T) {
 	for _, o := range []ChallengerOptions{{TTL: -1}, {MaxUsed: -1}} {
 		if _, err := NewChallenger(o); err == nil {
 			t.Errorf("NewChallenger %+v", o)
+		}
+	}
+}
+
+func TestCertValidityAtHandoff(t *testing.T) {
+	start := time.Now()
+	for _, expires := range []bool{true, false} {
+		fake := timeshim.NewFake(start)
+		c := &CertFiles{Clock: fake}
+		leaf := &x509.Certificate{NotBefore: start.Add(time.Second), NotAfter: start.Add(time.Minute)}
+		if expires {
+			leaf.NotBefore = start
+			leaf.NotAfter = start.Add(time.Second)
+		}
+		got, err := c.get("pair", "", "", func() (*tls.Certificate, error) {
+			fake.Advance(2 * time.Second)
+			return &tls.Certificate{Leaf: leaf}, nil
+		})
+		if expires && (!errors.Is(err, ErrNotValidNow) || got != nil) || !expires && (err != nil || got == nil) {
+			t.Fatalf("expires=%v: certificate=%v, err=%v", expires, got, err)
 		}
 	}
 }

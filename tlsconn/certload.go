@@ -18,7 +18,7 @@ import (
 // storeEntry is what Load brought for a name: a certificate, or an error or
 // none until retryAt, or a first load still running until ready is closed.
 type storeEntry struct {
-	notAfter   time.Time
+	leaf       *x509.Certificate
 	refreshAt  time.Time // of a certificate
 	retryAt    time.Time // of a failed load or of none
 	lastUsed   time.Time
@@ -98,14 +98,17 @@ func (s *CertStore) loaded(ctx context.Context, name string, now time.Time) (*tl
 		}
 		s.mu.Lock()
 	}
-	cert, err := e.cert, e.err
+	cert, leaf, err := e.cert, e.leaf, e.err
 	// Not for an entry that Forget, Add or an eviction dropped meanwhile.
 	if cert != nil && !e.refreshing && !now.Before(e.refreshAt) && s.current(e) {
 		e.refreshing = true
 		go s.load(e, true) //nolint:contextcheck // a refresh outlives the call that started it
 	}
 	s.mu.Unlock()
-	return cert, err
+	if cert != nil {
+		return deliverCertificate(cert, leaf, s.now())
+	}
+	return nil, err
 }
 
 // current reports whether e is the entry for its name.
@@ -123,7 +126,7 @@ func (e *storeEntry) stale(now time.Time) bool {
 	if e.cert == nil {
 		return !now.Before(e.retryAt)
 	}
-	return !now.Before(e.notAfter)
+	return !now.Before(e.leaf.NotAfter)
 }
 
 // dropLoaded drops what Load brought for the names that an added
@@ -152,12 +155,12 @@ func (s *CertStore) dropLoaded(names []string) {
 func (s *CertStore) load(e *storeEntry, refresh bool) {
 	cert, err := s.runLoad(e.name)
 	now := s.now()
-	var notBefore, notAfter time.Time
+	var leaf *x509.Certificate
 	if err != nil {
 		cert = nil
 	} else if cert != nil {
-		notBefore, notAfter, err = validity(cert)
-		if err == nil && (!now.Before(notAfter) || now.Before(notBefore)) {
+		leaf, err = leafOf(cert)
+		if err == nil && !validAt(leaf, now) {
 			// Expired, or not valid yet, as with a skewed issuer clock: a
 			// first load fails, to be tried again after RetryAfter, and a
 			// refresh leaves the old one serving.
@@ -172,7 +175,7 @@ func (s *CertStore) load(e *storeEntry, refresh bool) {
 	switch {
 	case cert != nil:
 		same := refresh && e.cert != nil && bytes.Equal(e.cert.Certificate[0], cert.Certificate[0])
-		s.setCertLocked(e, cert, notBefore, notAfter, now, same)
+		s.setCertLocked(e, cert, leaf, now, same)
 	case refresh && err != nil:
 		// The certificate serves on until it expires; try again later.
 		e.refreshAt = retryAt
@@ -227,8 +230,9 @@ func (s *CertStore) runLoad(name string) (*tls.Certificate, error) {
 // its lifetime before notAfter, whichever is shorter, but no sooner than
 // RetryAfter from now, or a quarter of its remaining life when a refresh
 // brought the same certificate again.
-func (s *CertStore) setCertLocked(e *storeEntry, cert *tls.Certificate, notBefore, notAfter, now time.Time, same bool) {
-	e.cert, e.notAfter, e.err = cert, notAfter, nil
+func (s *CertStore) setCertLocked(e *storeEntry, cert *tls.Certificate, leaf *x509.Certificate, now time.Time, same bool) {
+	e.cert, e.leaf, e.err = cert, leaf, nil
+	notBefore, notAfter := leaf.NotBefore, leaf.NotAfter
 	e.refreshAt = notAfter.Add(-min(positive(s.RefreshBefore, DefaultRefreshBefore), notAfter.Sub(notBefore)/3))
 	wait := positive(s.RetryAfter, DefaultRetryAfter)
 	if same {
@@ -267,15 +271,6 @@ func (s *CertStore) sweepLocked(now time.Time) {
 	for el := s.lru.Back(); el != nil && el.Value.(*storeEntry).lastUsed.Before(cutoff); el = s.lru.Back() {
 		s.removeLocked(el)
 	}
-}
-
-// validity returns the validity period of cert's leaf.
-func validity(cert *tls.Certificate) (notBefore, notAfter time.Time, err error) {
-	leaf, err := leafOf(cert)
-	if err != nil {
-		return time.Time{}, time.Time{}, err
-	}
-	return leaf.NotBefore, leaf.NotAfter, nil
 }
 
 // leafOf returns cert's leaf, parsing it if Leaf is not set.
@@ -322,3 +317,18 @@ var (
 	// does not hold.
 	ErrUnknownID = errors.New("tlsconn: no certificate with that ID")
 )
+
+// deliverCertificate checks the leaf after a shared load has completed.
+func deliverCertificate(cert *tls.Certificate, leaf *x509.Certificate, now time.Time) (*tls.Certificate, error) {
+	if leaf == nil {
+		var err error
+		leaf, err = leafOf(cert)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !validAt(leaf, now) {
+		return nil, ErrNotValidNow
+	}
+	return cert, nil
+}

@@ -323,11 +323,7 @@ func (s *Server) ListenAndServe(addr string) error {
 // Accept errors for which netx.IsAcceptRetryable reports true, such as
 // running out of file descriptors, are retried as netx.Accept does.
 func (s *Server) Serve(l net.Listener) error {
-	if err := s.Validate(); err != nil {
-		_ = l.Close()
-		return err
-	}
-	return s.life.Serve(l, ErrServerClosed, netx.Accept, s.serveConn, s.onError)
+	return s.life.Serve(l, s.Validate(), ErrServerClosed, netx.Accept, s.serveConn, s.onError)
 }
 
 // ServeConn serves one client connection, as Handshake and ServeRequest do,
@@ -335,16 +331,7 @@ func (s *Server) Serve(l net.Listener) error {
 // the error that ended the exchange, if any. The connection counts in
 // ActiveConns until ServeConn returns.
 func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
-	if err := s.Validate(); err != nil {
-		_ = c.Close()
-		return err
-	}
-	if !s.life.TrackConn(&c, true) {
-		_ = c.Close()
-		return ErrServerClosed
-	}
-	defer s.life.TrackConn(&c, false)
-	return s.serveConn(ctx, c, func() bool { return s.life.HandOff(&c) })
+	return s.life.ServeConn(ctx, c, s.Validate(), ErrServerClosed, s.serveConn)
 }
 
 // serveConn serves a tracked connection and closes it.

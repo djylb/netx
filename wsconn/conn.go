@@ -58,19 +58,20 @@ type Conn struct {
 	zbuf        []byte
 	// The buffers of WriteMessages, under msgMu: the encoded frames, the
 	// compressed payload of a message, and the segments of a writev.
-	batch        []byte
-	rutf         utf8State
-	closeTimeout time.Duration
-	rpos         int
-	pongLen      int   // under pongMu
-	rlimit       int64 // bound of the current message; negative for none
-	rlen         int64 // bytes of the message delivered
-	rtail        int   // bytes of deflateTail handed to the inflater
-	readLimit    int64
-	rseq         uint64
-	closeBy      atomic.Int64 // Close's deadline, in Unix nanoseconds
-	rremain      int64        // payload bytes left in the current frame
-	closeOnce    sync.Once
+	batch           []byte
+	rutf            utf8State
+	closeTimeout    time.Duration
+	rpos            int
+	pongLen         int   // under pongMu
+	rlimit          int64 // bound of the current message; negative for none
+	rlen            int64 // bytes of the message delivered
+	rtail           int   // bytes of deflateTail handed to the inflater
+	readLimit       int64
+	callbackPartial bool // a control callback interrupted a fragmented message
+	rseq            uint64
+	closeBy         atomic.Int64 // Close's deadline, in Unix nanoseconds
+	rremain         int64        // payload bytes left in the current frame
+	closeOnce       sync.Once
 	// msgMu and frameMu are described above; wdMu guards wd and pongBound,
 	// and pongMu pongLen and pongData.
 	msgMu       sync.Mutex
@@ -152,28 +153,66 @@ func newConn(conn net.Conn, br *bufio.Reader, client bool, o *Options, dc *defla
 }
 
 // Subprotocol returns the negotiated subprotocol, or "" for none.
-func (c *Conn) Subprotocol() string { return c.subprotocol }
+func (c *Conn) Subprotocol() string {
+	if c == nil || c.conn == nil {
+		return ""
+	}
+	return c.subprotocol
+}
 
 // Compressed reports whether permessage-deflate was negotiated.
-func (c *Conn) Compressed() bool { return c.deflate != nil }
+func (c *Conn) Compressed() bool {
+	if c == nil || c.conn == nil {
+		return false
+	}
+	return c.deflate != nil
+}
 
 // Request returns the handshake request of a server connection, nil for a
 // client or a connection from NewConn.
-func (c *Conn) Request() *httphead.Request { return c.request }
+func (c *Conn) Request() *httphead.Request {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.request
+}
 
 // Response returns the handshake response of a client connection, nil for
 // a server or a connection from NewConn.
-func (c *Conn) Response() *httphead.Response { return c.response }
+func (c *Conn) Response() *httphead.Response {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.response
+}
 
 // NetConn returns the connection beneath, as *tls.Conn's NetConn does. It
 // carries frames: reading or writing it corrupts the WebSocket connection.
-func (c *Conn) NetConn() net.Conn { return c.conn }
+func (c *Conn) NetConn() net.Conn {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn
+}
+
+// NetxOwned describes the transport closed by Close.
+func (c *Conn) NetxOwned() netutil.Owned { return netutil.BuiltinOwned(c, c.NetConn(), nil) }
 
 // LocalAddr returns the local address of the connection beneath.
-func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+func (c *Conn) LocalAddr() net.Addr {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.LocalAddr()
+}
 
 // RemoteAddr returns the remote address of the connection beneath.
-func (c *Conn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
+func (c *Conn) RemoteAddr() net.Addr {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.RemoteAddr()
+}
 
 // SetDeadline sets the read and write deadlines of the connection beneath.
 // A read or write that a deadline cuts short leaves the connection usable,
@@ -189,16 +228,30 @@ func (c *Conn) SetDeadline(t time.Time) error {
 // SetReadDeadline sets the read deadline of the connection beneath. It
 // also bounds the automatic pongs that the reader writes.
 func (c *Conn) SetReadDeadline(t time.Time) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	c.wdMu.Lock()
+	defer c.wdMu.Unlock()
+	if err := c.conn.SetReadDeadline(t); err != nil {
+		return err
+	}
 	c.rd = t
-	c.wdMu.Unlock()
-	return c.conn.SetReadDeadline(t)
+	if !c.pongBound.IsZero() {
+		return c.conn.SetWriteDeadline(c.effectiveWD())
+	}
+	return nil
 }
 
 // SetWriteDeadline sets the write deadline of the connection beneath.
 // While the reader writes an automatic pong, which it bounds by the close
 // timeout and the read deadline, the earlier of the two applies.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	c.wdMu.Lock()
 	defer c.wdMu.Unlock()
 	c.wd = t
@@ -208,8 +261,12 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 // effectiveWD returns the write deadline in effect: the user's, or the
 // earlier pong bound of the reader. wdMu is held.
 func (c *Conn) effectiveWD() time.Time {
-	if !c.pongBound.IsZero() && (c.wd.IsZero() || c.pongBound.Before(c.wd)) {
-		return c.pongBound
+	bound := c.pongBound
+	if !bound.IsZero() && !c.rd.IsZero() && c.rd.Before(bound) {
+		bound = c.rd
+	}
+	if !bound.IsZero() && (c.wd.IsZero() || bound.Before(c.wd)) {
+		return bound
 	}
 	return c.wd
 }
@@ -226,6 +283,10 @@ var errCloseSent = fmt.Errorf("wsconn: close frame sent: %w", net.ErrClosed)
 // of NextReader, ReadMessage or AppendMessage, which discards what is left
 // of it. After the peer's close frame it returns a *CloseError.
 func (c *Conn) NextReader() (MessageType, io.Reader, error) {
+	if c == nil || c.conn == nil {
+		return 0, nil, net.ErrClosed
+	}
+
 	c.rsem <- struct{}{}
 	defer func() { <-c.rsem }()
 	typ, err := c.beginMessage(c.readLimit)
@@ -244,6 +305,10 @@ func (c *Conn) ReadMessage() (MessageType, []byte, error) {
 // returns the extended slice, so that a reused b reads messages without
 // allocating.
 func (c *Conn) AppendMessage(b []byte) (MessageType, []byte, error) {
+	if c == nil || c.conn == nil {
+		return 0, b, net.ErrClosed
+	}
+
 	return c.appendMessage(b, c.readLimit)
 }
 
@@ -252,6 +317,10 @@ func (c *Conn) AppendMessage(b []byte) (MessageType, []byte, error) {
 // decompression, is read no further and fails the connection with
 // ErrMessageTooLarge and status 1009. A negative limit adds no bound.
 func (c *Conn) ReadMessageLimit(limit int64) (MessageType, []byte, error) {
+	if c == nil || c.conn == nil {
+		return 0, nil, net.ErrClosed
+	}
+
 	if limit < 0 || (c.readLimit >= 0 && c.readLimit < limit) {
 		limit = c.readLimit
 	}
@@ -298,7 +367,7 @@ func (r *messageReader) Read(p []byte) (int, error) {
 	c := r.c
 	c.rsem <- struct{}{}
 	defer func() { <-c.rsem }()
-	if r.seq != c.rseq {
+	if c.callbackPartial || r.seq != c.rseq {
 		return 0, errStaleReader
 	}
 	if len(p) == 0 {
@@ -309,6 +378,9 @@ func (r *messageReader) Read(p []byte) (int, error) {
 
 // readEntry returns the error that reads return before reading anything.
 func (c *Conn) readEntry() error {
+	if c.callbackPartial {
+		return errStaleReader
+	}
 	if c.rerr != nil {
 		return c.rerr
 	}
@@ -565,17 +637,41 @@ func (c *Conn) nextDataFrame() error {
 func (c *Conn) control(op byte, payload []byte) error {
 	switch op {
 	case opPing:
-		if c.onPing != nil {
-			c.onPing(c, payload)
-		}
 		c.queuePong(payload)
-	case opPong:
-		if c.onPong != nil {
-			c.onPong(c, payload)
+		if err := c.callControl(c.onPing, payload); err != nil {
+			return err
 		}
+		c.sendPendingPong()
+		return nil
+	case opPong:
+		return c.callControl(c.onPong, payload)
 	case opClose:
 		return c.peerClose(payload)
 	}
+	return nil
+}
+
+// callControl hands the reader to the callback at a frame boundary. An
+// interrupted fragmented read still owns its decoder until it unwinds.
+func (c *Conn) callControl(fn func(*Conn, []byte), payload []byte) error {
+	if fn == nil {
+		return nil
+	}
+	data := slices.Clone(payload)
+	partial, limit, seq := c.callbackPartial, c.rlimit, c.rseq
+	c.callbackPartial = c.rmsg != 0 || partial
+	func() {
+		<-c.rsem
+		defer func() { c.rsem <- struct{}{}; c.callbackPartial = partial }()
+		fn(c, data)
+	}()
+	if err := c.readEntry(); err != nil {
+		return err
+	}
+	if c.rseq != seq && c.rmsg != 0 {
+		return errStaleReader
+	}
+	c.rlimit = limit
 	return nil
 }
 
@@ -610,8 +706,7 @@ func (c *Conn) peerClose(p []byte) error {
 // closes the connection beneath first (RFC 6455, section 7.1.1); the client
 // waits for that, within the close timeout.
 func (c *Conn) finish() {
-	if c.client && !c.skipClose {
-		_ = c.conn.SetReadDeadline(c.closeDeadline())
+	if c.client && !c.skipClose && c.conn.SetReadDeadline(c.closeDeadline()) == nil {
 		_, _ = io.Copy(io.Discard, c.br)
 	}
 	c.closeConn()
@@ -645,14 +740,17 @@ func (c *Conn) closeConn() {
 
 // Close sends a close frame with StatusNormalClosure, waits for the peer's
 // and closes the connection beneath, all within the close timeout, also
-// when a write is blocked, which then fails. Called from Options.OnPing or
-// OnPong, which hold the reader, it waits the whole close timeout. A
+// when a write is blocked, which then fails. A
 // second Close returns an error matching net.ErrClosed.
 func (c *Conn) Close() error { return c.CloseWithStatus(StatusNormalClosure, "") }
 
 // CloseWithStatus is Close with a status code, which must be Sendable, and
 // a reason of at most 123 bytes of UTF-8, which may be empty.
 func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	if !code.Sendable() {
 		return fmt.Errorf("wsconn: close code %d cannot be sent", code)
 	}
@@ -677,16 +775,16 @@ func (c *Conn) CloseWithStatus(code StatusCode, reason string) error {
 // Abort ends the connection at once without the closing handshake, so
 // that the peer sees a cut, not a close frame: the connection beneath is
 // aborted if it has an Abort(error) method, or else closed with RST where
-// it is TCP, beneath wrappers with NetConn methods. Reads and writes in
+// it is TCP, beneath wrappers that declare ownership. Reads and writes in
 // progress fail. A Close afterwards returns an error matching
 // net.ErrClosed. cause is passed to the Abort beneath.
 func (c *Conn) Abort(cause error) {
-	c.closing.Store(true)
-	if a, ok := c.conn.(interface{ Abort(cause error) }); ok {
-		a.Abort(cause)
-	} else {
-		netutil.ResetOnClose(c.conn)
+	if c == nil || c.conn == nil {
+		return
 	}
+
+	c.closing.Store(true)
+	netutil.AbortBeneath(c.conn, cause)
 	c.closeConn()
 }
 
@@ -698,6 +796,10 @@ func (c *Conn) Abort(cause error) {
 // bounds the write, also one in progress; with DisableCloseHandshake it
 // fails. A close frame sent before makes it return nil.
 func (c *Conn) CloseWrite() error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	if c.closing.Load() {
 		return fmt.Errorf("wsconn: close write: %w", net.ErrClosed)
 	}
@@ -711,16 +813,21 @@ func (c *Conn) CloseWrite() error {
 // the reader to get the peer's close frame, or, while no read is in
 // progress, it reads itself, discarding messages.
 func (c *Conn) awaitPeer(deadline time.Time) {
-	_ = c.conn.SetReadDeadline(deadline)
+	if c.conn.SetReadDeadline(deadline) != nil {
+		return
+	}
 	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
 	select {
 	case c.rsem <- struct{}{}:
 		for c.rerr == nil && !c.closed.Load() {
 			if c.rmsg != 0 {
-				if c.skipMessage() != nil {
+				if c.discardRaw() != nil {
 					break
 				}
+				// Close may be draining on behalf of a control callback
+				// with an inflater still on the interrupted reader's stack.
+				c.rmsg = 0
 				continue
 			}
 			c.rlimit = -1
@@ -743,7 +850,9 @@ func (c *Conn) sendClose(code StatusCode, reason string, deadline time.Time) err
 		c.closeSent.Store(true)
 		return errCloseSent
 	}
-	c.boundWrites(deadline)
+	if err := c.boundWrites(deadline); err != nil {
+		return err
+	}
 	c.frameMu.Lock()
 	defer c.unlockFrame()
 	if c.closeSent.Load() {
@@ -764,13 +873,13 @@ func (c *Conn) sendClose(code StatusCode, reason string, deadline time.Time) err
 
 // boundWrites brings the write deadline forward to deadline, for the
 // closing handshake.
-func (c *Conn) boundWrites(deadline time.Time) {
+func (c *Conn) boundWrites(deadline time.Time) error {
 	c.wdMu.Lock()
 	defer c.wdMu.Unlock()
 	if c.wd.IsZero() || deadline.Before(c.wd) {
 		c.wd = deadline
 	}
-	_ = c.conn.SetWriteDeadline(c.effectiveWD())
+	return c.conn.SetWriteDeadline(c.effectiveWD())
 }
 
 // Ping sends a ping with data, at most 125 bytes. The peer's pong reaches
@@ -782,6 +891,10 @@ func (c *Conn) Ping(data []byte) error { return c.writeControl(opPing, data) }
 func (c *Conn) Pong(data []byte) error { return c.writeControl(opPong, data) }
 
 func (c *Conn) writeControl(op byte, data []byte) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	if len(data) > maxControlPayload {
 		return errors.New("wsconn: control frame payload over 125 bytes")
 	}
@@ -803,8 +916,11 @@ func (c *Conn) writeControl(op byte, data []byte) error {
 func (c *Conn) queuePong(data []byte) {
 	c.pongMu.Lock()
 	c.pongLen = copy(c.pongData[:], data)
-	c.pongMu.Unlock()
 	c.pongPending.Store(true)
+	c.pongMu.Unlock()
+}
+
+func (c *Conn) sendPendingPong() {
 	for c.pongPending.Load() && c.frameMu.TryLock() {
 		d := c.closeTimeout
 		if d == netutil.NoTimeout {
@@ -812,12 +928,13 @@ func (c *Conn) queuePong(data []byte) {
 		}
 		c.wdMu.Lock()
 		c.pongBound = time.Now().Add(d)
-		if !c.rd.IsZero() && c.rd.Before(c.pongBound) {
-			c.pongBound = c.rd
-		}
-		_ = c.conn.SetWriteDeadline(c.effectiveWD())
+		err := c.conn.SetWriteDeadline(c.effectiveWD())
 		c.wdMu.Unlock()
-		c.flushPongLocked()
+		if err == nil {
+			c.flushPongLocked()
+		} else {
+			c.pongPending.Store(false)
+		}
 		c.wdMu.Lock()
 		c.pongBound = time.Time{}
 		_ = c.conn.SetWriteDeadline(c.wd)
@@ -829,9 +946,12 @@ func (c *Conn) queuePong(data []byte) {
 // flushPongLocked sends the queued pong.
 func (c *Conn) flushPongLocked() {
 	c.pongMu.Lock()
+	if !c.pongPending.Swap(false) {
+		c.pongMu.Unlock()
+		return
+	}
 	var p [maxControlPayload]byte
 	n := copy(p[:], c.pongData[:c.pongLen])
-	c.pongPending.Store(false)
 	c.pongMu.Unlock()
 	if c.writableLocked() == nil {
 		_ = c.writeControlLocked(opPong, p[:n])
@@ -976,6 +1096,10 @@ func (c *Conn) writeBufferedLocked(first byte, buf []byte, n int) error {
 // header with the first 32 KiB and then the rest. A client masks p into
 // the write buffer, 32 KiB at a time.
 func (c *Conn) WriteMessage(typ MessageType, p []byte) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	if typ != Text && typ != Binary {
 		return fmt.Errorf("wsconn: cannot write a message of type %v", typ)
 	}
@@ -1009,6 +1133,10 @@ func (c *Conn) WriteMessage(typ MessageType, p []byte) error {
 // does, since the peer cannot know which messages it got; a write deadline
 // that passes before anything went out leaves the connection usable.
 func (c *Conn) WriteMessages(typ MessageType, msgs [][]byte) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+
 	if typ != Text && typ != Binary {
 		return fmt.Errorf("wsconn: cannot write a message of type %v", typ)
 	}
@@ -1137,6 +1265,10 @@ func (s *batchSink) Write(p []byte) (int, error) {
 // out between its frames. When permessage-deflate was negotiated, the
 // message is compressed.
 func (c *Conn) NextWriter(typ MessageType) (io.WriteCloser, error) {
+	if c == nil || c.conn == nil {
+		return nil, net.ErrClosed
+	}
+
 	if typ != Text && typ != Binary {
 		return nil, fmt.Errorf("wsconn: cannot write a message of type %v", typ)
 	}

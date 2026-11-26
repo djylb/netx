@@ -222,11 +222,11 @@ func (s *stream) readTrailer() error {
 		if len(line) == 0 {
 			break
 		}
-		fields, err := httphead.ParseHeader(string(line)+"\n", nil)
+		f, err := httphead.ParseField(string(line))
 		if err != nil {
 			return err
 		}
-		if f := fields[0]; s.out && !forbiddenTrailer(f.Name) {
+		if s.out && !forbiddenTrailer(f.Name) {
 			t = append(t, f.Name...)
 			t = append(t, ": "...)
 			t = append(t, f.Value...)

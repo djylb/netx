@@ -35,10 +35,14 @@ type Tracker struct {
 // connection's HandOff, and passes the errors that end them to onError. It
 // returns closedErr after Shutdown or Close, which close l, or the error
 // that ended accepting.
-func (t *Tracker) Serve(l net.Listener, closedErr error,
+func (t *Tracker) Serve(l net.Listener, validation, closedErr error,
 	accept func(context.Context, net.Listener) (net.Conn, error),
 	serve func(ctx context.Context, c net.Conn, handOff func() bool) error,
 	onError func(net.Conn, error)) error {
+	if validation != nil {
+		_ = l.Close()
+		return validation
+	}
 	if !t.track(&l, true) {
 		_ = l.Close()
 		return closedErr
@@ -57,17 +61,42 @@ func (t *Tracker) Serve(l net.Listener, closedErr error,
 		// sees no connections, cannot miss one being started. One accepted
 		// just before Shutdown or Close closed the listener is refused,
 		// which is no failure.
-		if !t.TrackConn(&c, true) {
-			_ = c.Close()
+		if !t.admit(&c) {
 			continue
 		}
 		go func() {
-			defer t.TrackConn(&c, false)
-			if err := serve(ctx, c, func() bool { return t.HandOff(&c) }); err != nil {
-				onError(c, err)
-			}
+			_ = t.serveTracked(ctx, &c, serve, onError)
 		}()
 	}
+}
+
+// ServeConn validates and tracks a single connection through handoff.
+func (t *Tracker) ServeConn(ctx context.Context, c net.Conn, validation, closedErr error, serve func(context.Context, net.Conn, func() bool) error) error {
+	if validation != nil {
+		_ = c.Close()
+		return validation
+	}
+	if !t.admit(&c) {
+		return closedErr
+	}
+	return t.serveTracked(ctx, &c, serve, nil)
+}
+
+func (t *Tracker) admit(c *net.Conn) bool {
+	if t.TrackConn(c, true) {
+		return true
+	}
+	_ = (*c).Close()
+	return false
+}
+
+func (t *Tracker) serveTracked(ctx context.Context, c *net.Conn, serve func(context.Context, net.Conn, func() bool) error, onError func(net.Conn, error)) error {
+	defer t.TrackConn(c, false)
+	err := serve(ctx, *c, func() bool { return t.HandOff(c) })
+	if err != nil && onError != nil {
+		onError(*c, err)
+	}
+	return err
 }
 
 // Context returns the context that Close cancels.

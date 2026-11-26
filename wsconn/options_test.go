@@ -98,6 +98,7 @@ func TestPongBoundWithoutCloseTimeout(t *testing.T) {
 	start := time.Now()
 	go func() {
 		c.queuePong([]byte("p"))
+		c.sendPendingPong()
 		close(done)
 	}()
 	select {

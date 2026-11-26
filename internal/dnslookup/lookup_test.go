@@ -226,3 +226,24 @@ func TestLookupsRouteAllocs(t *testing.T) {
 		t.Fatalf("%v allocations", n)
 	}
 }
+
+func TestHeldDuringSendAndClose(t *testing.T) {
+	sending, release := make(chan struct{}), make(chan struct{})
+	l := NewLookups(time.Minute, errTestBusy, func(context.Context, string) (int, error) { return 1, nil },
+		func([]byte, string, int, uint16) { close(sending); <-release })
+	defer func() { l.Close(); close(release); waitRunning(t, l) }()
+	if _, held, err := l.Route(make([]byte, MaxLookupHeld), t.Name(), 1); !held || err != nil {
+		t.Fatalf("Route = %v, %v", held, err)
+	}
+	<-sending
+	if l.Held() != MaxLookupHeld {
+		t.Fatalf("held during send = %d", l.Held())
+	}
+	if _, _, err := l.Route([]byte("x"), t.Name(), 1); !errors.Is(err, errTestBusy) {
+		t.Fatalf("over limit = %v", err)
+	}
+	l.Close()
+	if _, held, err := l.Route(nil, t.Name(), 1); held || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed Route = %v, %v", held, err)
+	}
+}

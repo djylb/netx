@@ -45,7 +45,7 @@ type Lookups[V any] struct {
 	ctx     context.Context //nolint:containedctx // owned by the Lookups, canceled by Close, ending lookups
 	cancel  context.CancelFunc
 	names   map[string]lookupEntry[V]
-	queues  map[string][]heldDatagram // by name, while it is looked up
+	queues  map[string]*lookupQueue // by name, while it is looked up
 	timeout time.Duration
 	mu      sync.Mutex
 	held    int // bytes of the datagrams in queues
@@ -55,6 +55,11 @@ type lookupEntry[V any] struct {
 	expires time.Time
 	err     error
 	v       V
+}
+
+type lookupQueue struct {
+	packets []heldDatagram
+	count   int // includes packets in the send callback
 }
 
 // heldDatagram is a copy of a datagram to a name being looked up.
@@ -71,7 +76,7 @@ func NewLookups[V any](timeout time.Duration, busy error, resolve func(ctx conte
 	return &Lookups[V]{
 		resolve: resolve, send: send, busy: busy, ctx: ctx, cancel: cancel,
 		names:   make(map[string]lookupEntry[V]),
-		queues:  make(map[string][]heldDatagram),
+		queues:  make(map[string]*lookupQueue),
 		timeout: timeout,
 	}
 }
@@ -86,22 +91,22 @@ func (l *Lookups[V]) Route(p []byte, name string, port uint16) (v V, held bool, 
 	defer l.mu.Unlock()
 	// A running lookup takes the datagram even if the name has a fresh
 	// entry, so that it is not sent before the datagrams held.
+	if l.ctx.Err() != nil {
+		return v, false, net.ErrClosed
+	}
 	queue, running := l.queues[name]
 	if !running {
 		if entry, ok := l.names[name]; ok && time.Now().Before(entry.expires) {
 			return entry.v, false, entry.err
 		}
-		if l.ctx.Err() != nil {
-			return v, false, net.ErrClosed
-		}
-		if len(l.queues) >= MaxLookups {
-			return v, false, l.busy
-		}
-		l.queues[name] = nil
-		go l.lookupAndSend(name)
 	}
-	if len(queue) >= MaxLookupQueue || l.held+len(p) > MaxLookupHeld {
+	if len(p) > MaxLookupHeld-l.held || running && queue.count >= MaxLookupQueue || !running && len(l.queues) >= MaxLookups {
 		return v, false, l.busy
+	}
+	if !running {
+		queue = new(lookupQueue)
+		l.queues[name] = queue
+		go l.lookupAndSend(name)
 	}
 	var bp *[]byte
 	if len(p) <= bufpool.SmallSize {
@@ -111,7 +116,8 @@ func (l *Lookups[V]) Route(p []byte, name string, port uint16) (v V, held bool, 
 		bp = bufpool.NewBuf(len(p))
 	}
 	copy(*bp, p)
-	l.queues[name] = append(queue, heldDatagram{bp: bp, port: port})
+	queue.count++
+	queue.packets = append(queue.packets, heldDatagram{bp: bp, port: port})
 	l.held += len(p)
 	return v, true, nil
 }
@@ -154,28 +160,31 @@ func (l *Lookups[V]) lookupAndSend(name string) {
 	var batch []heldDatagram
 	for {
 		l.mu.Lock()
-		batch, l.queues[name] = l.queues[name], batch[:0]
+		queue := l.queues[name]
+		batch, queue.packets = queue.packets, batch[:0]
 		if len(batch) == 0 {
 			delete(l.queues, name)
 			l.mu.Unlock()
 			return
-		}
-		for _, d := range batch {
-			l.held -= len(*d.bp)
 		}
 		l.mu.Unlock()
 		for i, d := range batch {
 			if err == nil && l.ctx.Err() == nil {
 				l.send(*d.bp, name, v, d.port)
 			}
+			size := len(*d.bp)
 			bufpool.Release(d.bp)
+			l.mu.Lock()
+			l.held -= size
+			queue.count--
+			l.mu.Unlock()
 			batch[i] = heldDatagram{}
 		}
 	}
 }
 
 // Close cancels the lookups, which then drop their datagrams; Route fails
-// from now on for names that are not cached.
+// from now on for every name.
 func (l *Lookups[V]) Close() { l.cancel() }
 
 // Running returns how many lookups run.
@@ -185,7 +194,7 @@ func (l *Lookups[V]) Running() int {
 	return len(l.queues)
 }
 
-// Held returns how many bytes of datagrams the lookups hold.
+// Held includes queued payloads and payloads still in the send callback.
 func (l *Lookups[V]) Held() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

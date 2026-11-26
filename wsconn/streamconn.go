@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // StreamConn is a net.Conn that carries a byte stream over the binary
@@ -25,14 +27,25 @@ func NewStreamConn(c *Conn) *StreamConn { return &StreamConn{c: c} }
 
 // Conn returns the WebSocket connection, for its message API, pings and
 // close codes.
-func (s *StreamConn) Conn() *Conn { return s.c }
+func (s *StreamConn) Conn() *Conn {
+	if s == nil {
+		return nil
+	}
+	return s.c
+}
 
 // NetConn returns the connection beneath the WebSocket connection, as
 // Conn.NetConn does.
-func (s *StreamConn) NetConn() net.Conn { return s.c.conn }
+func (s *StreamConn) NetConn() net.Conn { return s.Conn().NetConn() }
+
+// NetxOwned describes the WebSocket connection closed by Close.
+func (s *StreamConn) NetxOwned() netutil.Owned { return netutil.BuiltinOwned(s, s.Conn(), nil) }
 
 // Read reads the payload of the stream's messages.
 func (s *StreamConn) Read(p []byte) (int, error) {
+	if s.Conn().NetConn() == nil {
+		return 0, net.ErrClosed
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -70,6 +83,9 @@ func streamErr(err error) error {
 
 // Write sends p as one binary message.
 func (s *StreamConn) Write(p []byte) (int, error) {
+	if s.Conn().NetConn() == nil {
+		return 0, net.ErrClosed
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -80,24 +96,24 @@ func (s *StreamConn) Write(p []byte) (int, error) {
 }
 
 // Close closes the WebSocket connection as Conn.Close does.
-func (s *StreamConn) Close() error { return s.c.Close() }
+func (s *StreamConn) Close() error { return s.Conn().Close() }
 
 // Abort ends the stream at once without the closing handshake; see
 // Conn.Abort.
-func (s *StreamConn) Abort(cause error) { s.c.Abort(cause) }
+func (s *StreamConn) Abort(cause error) { s.Conn().Abort(cause) }
 
 // LocalAddr returns the local address of the connection beneath.
-func (s *StreamConn) LocalAddr() net.Addr { return s.c.conn.LocalAddr() }
+func (s *StreamConn) LocalAddr() net.Addr { return s.Conn().LocalAddr() }
 
 // RemoteAddr returns the remote address of the connection beneath, with
 // its port.
-func (s *StreamConn) RemoteAddr() net.Addr { return s.c.conn.RemoteAddr() }
+func (s *StreamConn) RemoteAddr() net.Addr { return s.Conn().RemoteAddr() }
 
 // SetDeadline sets the deadlines of the connection beneath.
-func (s *StreamConn) SetDeadline(t time.Time) error { return s.c.SetDeadline(t) }
+func (s *StreamConn) SetDeadline(t time.Time) error { return s.Conn().SetDeadline(t) }
 
 // SetReadDeadline sets the read deadline of the connection beneath.
-func (s *StreamConn) SetReadDeadline(t time.Time) error { return s.c.SetReadDeadline(t) }
+func (s *StreamConn) SetReadDeadline(t time.Time) error { return s.Conn().SetReadDeadline(t) }
 
 // SetWriteDeadline sets the write deadline of the connection beneath.
-func (s *StreamConn) SetWriteDeadline(t time.Time) error { return s.c.SetWriteDeadline(t) }
+func (s *StreamConn) SetWriteDeadline(t time.Time) error { return s.Conn().SetWriteDeadline(t) }

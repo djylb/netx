@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,10 +39,11 @@ type exchange struct {
 	// cutMu guards the cut-off of a request that the final response
 	// ended before: cutTimer, which cuts it once its grace has passed, and
 	// finished, set once the relay has returned, after which nothing is cut.
-	cutTimer *time.Timer
-	aborted  chan struct{} // closed when the relay stops early
-	reqHead  headPart
-	respHead headPart
+	cutTimer                      *time.Timer
+	aborted                       chan struct{} // closed when the relay stops early
+	reqBodyReader, respBodyReader io.LimitedReader
+	reqHead                       headPart
+	respHead                      headPart
 	// For the new protocol after an upgrade, the bytes the client sent
 	// with or after the request.
 	rawHead headPart
@@ -57,7 +59,8 @@ type exchange struct {
 	// headMu guards the response header timeout, with headSeen: set by the
 	// request's direction once the request is sent, cleared by the
 	// response's.
-	headMu sync.Mutex
+	stopHeader func() bool
+	headMu     sync.Mutex
 	// reqDone and respDone are set when the request, or the final response,
 	// has been read to its end, by the goroutine of its direction.
 	reqDone, respDone atomic.Bool
@@ -146,17 +149,16 @@ func (sc *serverConn) forward(ctx context.Context, req *Request) (bool, error) {
 // exchange forwards req over up and reports whether the client's
 // connection serves another request.
 func (sc *serverConn) exchange(ctx context.Context, req *Request, up *upConn, pooled bool) (bool, error) {
-	x := &sc.x
+	x := &exchange{sc: sc, req: req, up: up, pooled: pooled}
 	// The buffers of the previous exchange are reused.
-	respFields, outFields := x.respFields[:0], x.outFields[:0]
-	reqTrailer, respTrailer := x.reqStream.trailer, x.respStream.trailer
-	*x = exchange{sc: sc, req: req, up: up, pooled: pooled, respFields: respFields, outFields: outFields}
-	x.reqStream.trailer, x.respStream.trailer = reqTrailer, respTrailer
+	x.respFields, x.outFields = sc.respFields[:0], sc.outFields[:0]
+	x.reqStream.trailer, x.respStream.trailer = sc.reqTrailer, sc.respTrailer
 	if req.upgrade {
 		x.decided, x.aborted = make(chan struct{}), make(chan struct{})
 	}
 	defer func() {
-		x.req, x.up = nil, nil
+		sc.respFields, sc.outFields = x.respFields, x.outFields
+		sc.reqTrailer, sc.respTrailer = x.reqStream.trailer, x.respStream.trailer
 		// What is kept for the next exchange holds no strings of this one.
 		clear(x.respFields[:cap(x.respFields)])
 		clear(x.outFields[:cap(x.outFields)])
@@ -191,6 +193,7 @@ func (sc *serverConn) exchange(ctx context.Context, req *Request, up *upConn, po
 		CloseFunc:      x.closeTarget,
 	}
 	toTarget, toClient, err := netx.Relay(ctx, client, target, opts...)
+	x.finishHeader()
 	x.cutMu.Lock()
 	x.finished = true
 	if x.cutTimer != nil {
@@ -254,20 +257,22 @@ func hopByHop(name string) bool {
 }
 
 // copyFields appends the fields of h that are passed on to out: not for
-// one connection only and not listed in Connection; keepTrailer and
-// keepLength keep Trailer and Content-Length.
-func copyFields(out, h httphead.Header, keepTrailer, keepLength bool) httphead.Header {
-	listed := h.Has("Connection")
-	for _, f := range h {
-		if hopByHop(f.Name) {
-			switch {
-			case keepTrailer && strings.EqualFold(f.Name, "Trailer"):
-			case keepLength && strings.EqualFold(f.Name, "Content-Length"):
-			default:
-				continue
-			}
+// one connection only and not listed in Connection. keepTrailer keeps Trailer.
+func copyFields(out, h httphead.Header, keepTrailer bool) httphead.Header {
+	var listed map[string]bool
+	for _, v := range h.Values("Connection") {
+		if listed == nil {
+			listed = make(map[string]bool)
 		}
-		if listed && h.HasToken("Connection", f.Name) {
+		for name := range httphead.Tokens(v) {
+			listed[strings.ToLower(name)] = true
+		}
+	}
+	for _, f := range h {
+		if hopByHop(f.Name) && (!keepTrailer || !strings.EqualFold(f.Name, "Trailer")) {
+			continue
+		}
+		if len(listed) > 0 && listed[strings.ToLower(f.Name)] {
 			continue
 		}
 		out = append(out, f)
@@ -283,7 +288,7 @@ func (x *exchange) requestHead() ([]byte, error) {
 	req, sc := x.req, x.sc
 	// Built in x.outFields itself, which the hook gets a pointer to without
 	// a header of its own escaping for each request.
-	x.outFields = copyFields(x.outFields[:0], req.Header, req.body == httphead.Chunked, false)
+	x.outFields = copyFields(x.outFields[:0], req.Header, req.body == httphead.Chunked)
 	if sc.s.Via != "" {
 		x.outFields = appendVia(x.outFields, req.minor, sc.s.Via)
 	}
@@ -333,6 +338,43 @@ func (x *exchange) requestHead() ([]byte, error) {
 	return b, nil
 }
 
+// validUpgrade checks every selected protocol against the offer. Protocol
+// names are case insensitive and protocol versions are case sensitive.
+func validUpgrade(offer, reply httphead.Header) bool {
+	if !reply.HasToken("Connection", "upgrade") {
+		return false
+	}
+	offered := make(map[string]bool)
+	key := func(s string) (string, bool) {
+		name, version, hasVersion := strings.Cut(httphead.TrimOWS(s), "/")
+		if !httphead.ValidFieldName(name) || hasVersion && !httphead.ValidFieldName(version) {
+			return "", false
+		}
+		return strings.ToLower(name) + "/" + version, true
+	}
+	for _, v := range offer.Values("Upgrade") {
+		for item := range strings.SplitSeq(v, ",") {
+			k, ok := key(item)
+			if !ok {
+				return false
+			}
+			offered[k] = true
+		}
+	}
+	selected := false
+	for _, v := range reply.Values("Upgrade") {
+		for item := range strings.SplitSeq(v, ",") {
+			k, ok := key(item)
+			if !ok || !offered[k] {
+				return false
+			}
+			delete(offered, k)
+			selected = true
+		}
+	}
+	return selected
+}
+
 // appendVia adds this server to the Via field.
 func appendVia(h httphead.Header, minor int, via string) httphead.Header {
 	v := "1." + strconv.Itoa(minor) + " " + via
@@ -370,7 +412,8 @@ func (x *exchange) nextRequestPart() (io.Reader, error) {
 				if left := req.length - x.reqHead.drained; left > 0 {
 					// Beneath the buffer, which the head part drained, so
 					// that the relay splices it.
-					return &io.LimitedReader{R: sc.c, N: left}, nil
+					x.reqBodyReader = io.LimitedReader{R: sc.c, N: left}
+					return &x.reqBodyReader, nil
 				}
 			case httphead.Chunked:
 				x.reqStream.reset(sc.br, httphead.Chunked, true, positive(sc.s.MaxHeaderBytes, DefaultMaxHeaderBytes))
@@ -379,6 +422,9 @@ func (x *exchange) nextRequestPart() (io.Reader, error) {
 				// No body; a request body is never read until close.
 			}
 		case reqUpgradePart:
+			if x.reqBodyReader.N != 0 {
+				return nil, io.ErrUnexpectedEOF
+			}
 			x.reqDone.Store(true)
 			x.requestDone()
 			if x.decided == nil {
@@ -412,9 +458,21 @@ func (x *exchange) requestDone() {
 	}
 	x.headMu.Lock()
 	if !x.headSeen {
-		_ = x.up.c.SetReadDeadline(time.Now().Add(d))
+		x.stopHeader = boundRead(x.up.c, d)
 	}
 	x.headMu.Unlock()
+}
+
+func (x *exchange) finishHeader() bool {
+	x.headMu.Lock()
+	defer x.headMu.Unlock()
+	x.headSeen = true
+	if x.stopHeader == nil {
+		return false
+	}
+	expired := x.stopHeader()
+	x.stopHeader = nil
+	return expired
 }
 
 // nextResponsePart returns the next part of the responses as they go to the
@@ -434,6 +492,9 @@ func (x *exchange) nextResponsePart() (io.Reader, error) {
 				return part, nil
 			}
 		default:
+			if x.respBodyReader.N != 0 {
+				return nil, io.ErrUnexpectedEOF
+			}
 			x.respDone.Store(true)
 			return nil, nil
 		}
@@ -458,8 +519,11 @@ func (x *exchange) responseHead() (io.Reader, error) {
 			x.respFields = resp.Header
 		}
 	}
-	if err == nil && resp.Code == 101 && !req.upgrade {
-		err = errors.New("switching protocols without an upgrade request")
+	if (err != nil || resp.Code >= 200 || resp.Code == 101) && x.finishHeader() {
+		err = os.ErrDeadlineExceeded
+	}
+	if err == nil && resp.Code == 101 && (!req.upgrade || !validUpgrade(req.Header, resp.Header)) {
+		err = errors.New("invalid upgrade selection")
 	}
 	if err != nil {
 		switch {
@@ -472,14 +536,6 @@ func (x *exchange) responseHead() (io.Reader, error) {
 			return nil, err
 		}
 		return x.badGateway(err), nil
-	}
-	if resp.Code >= 200 || resp.Code == 101 {
-		x.headMu.Lock()
-		x.headSeen = true
-		if sc.s.ResponseHeaderTimeout > 0 {
-			_ = up.c.SetReadDeadline(time.Time{})
-		}
-		x.headMu.Unlock()
 	}
 	interim := resp.Code < 200 && resp.Code != 101
 	if interim && req.minor == 0 {
@@ -496,13 +552,24 @@ func (x *exchange) responseHead() (io.Reader, error) {
 	if resp.Code == 101 {
 		framing = httphead.NoBody
 	}
-	noBody := framing == httphead.NoBody
+	keepLength := false
+	if framing == httphead.NoBody && resp.Code >= 200 && resp.Code != 204 && (req.Method != "CONNECT" || resp.Code/100 != 2) {
+		if req.Method != "HEAD" && resp.Code != 304 {
+			// A regular empty response needs a fresh downstream delimiter.
+			keepLength = true
+		} else if !resp.Header.Has("Transfer-Encoding") && !resp.Header.HasToken("Connection", "Content-Length") {
+			length, keepLength, err = httphead.ContentLength(resp.Header)
+			if err != nil {
+				return x.badGateway(err), nil
+			}
+		}
+	}
 	// Re-chunked for HTTP/1.1 clients, so that a body read until close
 	// keeps the client connection; HTTP/1.0 clients get it as it is.
 	out := (framing == httphead.Chunked || framing == httphead.UntilClose) && req.minor == 1
 	keep := !interim && resp.Code != 101 && req.keepAlive &&
 		(framing == httphead.NoBody || framing == httphead.Length || out)
-	x.outFields = copyFields(x.outFields[:0], resp.Header, out && framing == httphead.Chunked, noBody)
+	x.outFields = copyFields(x.outFields[:0], resp.Header, out && framing == httphead.Chunked)
 	if sc.s.Via != "" && !interim {
 		x.outFields = appendVia(x.outFields, resp.Minor, sc.s.Via)
 	}
@@ -538,7 +605,7 @@ func (x *exchange) responseHead() (io.Reader, error) {
 		b = append(b, ", chunked\r\n"...)
 	case out:
 		b = append(b, "Transfer-Encoding: chunked\r\n"...)
-	case framing == httphead.Length:
+	case framing == httphead.Length || keepLength:
 		b = append(b, "Content-Length: "...)
 		b = strconv.AppendInt(b, length, 10)
 		b = append(b, "\r\n"...)
@@ -592,7 +659,8 @@ func (x *exchange) responseBody() io.Reader {
 	switch x.respFraming {
 	case httphead.Length:
 		if left := x.respLength - x.respHead.drained; left > 0 {
-			return &io.LimitedReader{R: x.up.c, N: left}
+			x.respBodyReader = io.LimitedReader{R: x.up.c, N: left}
+			return &x.respBodyReader
 		}
 		return nil
 	case httphead.UntilClose, httphead.Chunked:
@@ -690,8 +758,12 @@ func (x *exchange) cut() {
 		return
 	}
 	x.interrupted.Store(true)
-	_ = x.sc.c.SetReadDeadline(time.Unix(1, 0))
-	_ = x.up.c.SetWriteDeadline(time.Unix(1, 0))
+	if x.sc.c.SetReadDeadline(time.Unix(1, 0)) != nil {
+		_ = x.sc.c.Close()
+	}
+	if x.up.c.SetWriteDeadline(time.Unix(1, 0)) != nil {
+		_ = x.up.c.Close()
+	}
 }
 
 // requestSent is called when the request has been sent; the target's side

@@ -34,3 +34,5 @@ func readDatagram(syscall.RawConn) (*[]byte, int, error) {
 func writeFrom(c *net.UDPConn, b []byte, _, to netip.AddrPort) (int, error) {
 	return c.WriteToUDPAddrPort(b, to)
 }
+
+func retryReply(error) bool { return false }

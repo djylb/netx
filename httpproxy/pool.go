@@ -71,11 +71,14 @@ func (p *pool) get(key string) *upConn {
 		p.mu.Unlock()
 		// Stop the watcher: its Peek returns at once, and what it returned
 		// tells whether the connection is still good.
-		_ = u.c.SetReadDeadline(time.Unix(1, 0))
+		wakeErr := u.c.SetReadDeadline(time.Unix(1, 0))
+		if wakeErr != nil {
+			_ = u.c.Close()
+		}
 		<-u.watchDone
 		// A timeout is the wake-up above, unless the idle timeout passed
 		// just before it.
-		if ne, ok := errors.AsType[net.Error](u.peekErr); !ok || !ne.Timeout() || u.br.Buffered() > 0 || time.Since(u.idleSince) >= p.timeout {
+		if ne, ok := errors.AsType[net.Error](u.peekErr); wakeErr != nil || !ok || !ne.Timeout() || u.br.Buffered() > 0 || time.Since(u.idleSince) >= p.timeout {
 			u.close() // closed, failed, sent something unasked or idle too long
 			continue
 		}

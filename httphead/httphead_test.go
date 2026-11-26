@@ -44,6 +44,7 @@ func TestParseRequestRejects(t *testing.T) {
 		{head: "GET / HTTP/1.1\r\nX : a\r\n\r\n", err: httphead.ErrMalformed},
 		{head: "GET / HTTP/1.1\r\nX: a\rb\r\n\r\n", err: httphead.ErrMalformed},
 		{head: "GET / HTTP/1.1\r\nX: a\x00\r\n\r\n", err: httphead.ErrMalformed},
+		{head: "GET / HTTP/1.1\r\nX: a\r\n", err: httphead.ErrMalformed},
 		{head: "GET /a b HTTP/1.1\r\n\r\n", err: httphead.ErrMalformed},
 		{head: "GET / HTTP/2.0\r\n\r\n", err: httphead.ErrVersion},
 		{head: "GET / http/1.1\r\n\r\n", err: httphead.ErrMalformed},
@@ -74,6 +75,8 @@ func TestBodies(t *testing.T) {
 		{h: h("Content-Length", "5, 5", "Content-Length", "5"), minor: 1, framed: httphead.Length, n: 5, err: nil},
 		{h: h("Content-Length", "0"), minor: 1, framed: httphead.NoBody, n: 0, err: nil},
 		{h: h("Content-Length", "5, 6"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
+		{h: h("Content-Length", "0000000000000000000000000000001"), minor: 1, framed: httphead.Length, n: 1, err: nil},
+		{h: h("Content-Length", "9223372036854775807"), minor: 1, framed: httphead.Length, n: 1<<63 - 1, err: nil},
 		{h: h("Content-Length", "-1"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
 		{h: h("Transfer-Encoding", "Chunked"), minor: 1, framed: httphead.Chunked, n: 0, err: nil},
 		{h: h("Transfer-Encoding", "chunked", "Content-Length", "3"), minor: 1, framed: 0, n: 0, err: httphead.ErrMalformed},
@@ -95,6 +98,7 @@ func TestBodies(t *testing.T) {
 		{method: "GET", code: 200, h: h("Transfer-Encoding", "gzip, chunked", "Content-Length", "9"), framed: httphead.Chunked, codings: "gzip"},
 		{method: "GET", code: 200, h: h("Transfer-Encoding", "gzip"), framed: httphead.UntilClose, codings: "gzip"},
 		{method: "GET", code: 200, h: nil, framed: httphead.UntilClose, codings: ""},
+		{method: "CONNECT", code: 200, h: h("Content-Length", "9"), framed: httphead.NoBody, codings: ""},
 		{method: "HEAD", code: 200, h: h("Content-Length", "9"), framed: httphead.NoBody, codings: ""},
 		{method: "GET", code: 304, h: h("Content-Length", "9"), framed: httphead.NoBody, codings: ""},
 		{method: "GET", code: 103, h: nil, framed: httphead.NoBody, codings: ""},
@@ -196,4 +200,32 @@ func Example() {
 	_, _ = io.ReadFull(br, body) // the body stays in br
 	fmt.Println(req.Method, target.Host, target.Path, framing, n, string(body), req.Header.HasToken("Connection", "Keep-Alive"))
 	// Output: POST example.com /form length 5 hello true
+}
+
+func TestResponseRejectsEmptyTransferEncoding(t *testing.T) {
+	h := httphead.Header{{Name: "Transfer-Encoding", Value: ""}, {Name: "Transfer-Encoding", Value: "chunked"}}
+	if _, _, _, err := httphead.ResponseBody("GET", 200, h); !errors.Is(err, httphead.ErrMalformed) {
+		t.Fatalf("ResponseBody = %v, want malformed encoding", err)
+	}
+}
+
+func TestQuotedTransferCodings(t *testing.T) {
+	for _, value := range []string{"test; p=\"x,,\\\",chunked,y\"", "test; p=\"a\\\\,b\""} {
+		for _, chunked := range []bool{false, true} {
+			te, want := value, httphead.UntilClose
+			if chunked {
+				te += ", chunked"
+				want = httphead.Chunked
+			}
+			got, _, other, err := httphead.ResponseBody("GET", 200, httphead.Header{{Name: "Transfer-Encoding", Value: te}})
+			if got != want || other != value || err != nil {
+				t.Errorf("%q: %v, %q, %v", te, got, other, err)
+			}
+		}
+	}
+	for _, value := range []string{"chunked; a=b", "chunked; a=b, gzip", "two words", "test; =q", "test; q", "test; q=", "test; q=\"a\\\r\"", "test; q=\"q\"x", "gzip,,chunked", "test; p=\"unterminated", "chunked, test; p=\"x,y\""} {
+		if _, _, _, err := httphead.ResponseBody("GET", 200, httphead.Header{{Name: "Transfer-Encoding", Value: value}}); err == nil {
+			t.Errorf("accepted %q", value)
+		}
+	}
 }

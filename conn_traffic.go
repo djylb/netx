@@ -2,6 +2,7 @@ package netx
 
 import (
 	"errors"
+
 	"io"
 	"net"
 )
@@ -63,7 +64,12 @@ func observe(fn func(int64) error, n int, err error) (int, error) {
 	return n, err
 }
 
-func (c *observedReadWriteCloser) Close() error      { return c.inner().Close() }
+func (c *observedReadWriteCloser) Close() error {
+	if c == nil {
+		return net.ErrClosed
+	}
+	return c.inner().Close()
+}
 func (c *observedReadWriteCloser) CloseWrite() error { return closeWrite(c.inner()) }
 
 // NetConn returns the connection that c wraps, if it is one.
@@ -82,3 +88,6 @@ func (c *observedReadWriteCloser) netxLayer() layerInfo {
 	}
 	return info
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *observedReadWriteCloser) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

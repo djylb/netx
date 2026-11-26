@@ -1,8 +1,11 @@
 package memnet
 
 import (
+	"math"
+	"math/bits"
 	"math/rand/v2"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -82,24 +85,23 @@ func (n *Net) lose(p float64) bool {
 	return n.Rand.Float64() < p
 }
 
-// wait blocks for the delay and transmission time of size bytes on l;
-// false when done closed first.
-func (n *Net) wait(l Link, size int, done <-chan struct{}) bool {
-	d := l.Delay
-	if l.Rate > 0 {
-		d += time.Duration(int64(size) * int64(time.Second) / l.Rate)
+// transmission is the time taken to serialize size bytes.
+func transmission(size int, rate int64) time.Duration {
+	if rate <= 0 {
+		return 0
 	}
-	if d <= 0 {
-		return true
+	hi, lo := bits.Mul64(uint64(size), uint64(time.Second))
+	if hi >= uint64(rate) {
+		return math.MaxInt64
 	}
-	t := timeshim.NewTimer(timeshim.Or(n.Clock), d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-done:
-		return false
-	}
+	ns, _ := bits.Div64(hi, lo, uint64(rate))
+	return time.Duration(min(ns, math.MaxInt64))
+}
+
+// addDelay combines nonnegative link waits, saturating at the longest timer.
+func addDelay(a, b time.Duration) time.Duration {
+	a, b = max(0, a), max(0, b)
+	return a + min(b, math.MaxInt64-a)
 }
 
 // faultConn is one end of a stream connection to addr; to is true for
@@ -114,6 +116,7 @@ type faultConn struct {
 	// local and remote are the addresses of a DialFrom connection (nil:
 	// the halfConn's "pipe").
 	local, remote net.Addr
+	port          string // local DialFrom port owned until Close
 }
 
 func (c *faultConn) LocalAddr() net.Addr {
@@ -130,8 +133,8 @@ func (c *faultConn) RemoteAddr() net.Addr {
 	return c.halfConn.RemoteAddr()
 }
 
-func (n *Net) track(c *halfConn, addr string, to bool) *faultConn {
-	fc := &faultConn{halfConn: c, n: n, addr: addr, to: to, done: make(chan struct{})}
+func (n *Net) track(c *halfConn, addr string, to bool, local, remote net.Addr, port string) *faultConn {
+	fc := &faultConn{halfConn: c, n: n, addr: addr, to: to, local: local, remote: remote, port: port, done: make(chan struct{})}
 	f := &n.faults
 	f.mu.Lock()
 	if f.conns == nil {
@@ -158,8 +161,33 @@ func (c *faultConn) Write(b []byte) (int, error) {
 	if l.Off {
 		return 0, net.ErrClosed
 	}
-	if !c.n.wait(l, len(b), c.done) {
-		return 0, net.ErrClosed
+	if delay := addDelay(l.Delay, transmission(len(b), l.Rate)); delay > 0 {
+		timer := timeshim.NewTimer(timeshim.Or(c.n.Clock), delay)
+		defer timer.Stop()
+		for {
+			deadline, moved := c.w.wdl.snapshot()
+			ready, closed := false, false
+			if waitDeadline(deadline, func(timeout <-chan time.Time) bool {
+				select {
+				case <-timer.C:
+					ready = true
+				case <-c.done:
+					closed = true
+				case <-moved:
+				case <-timeout:
+					return true
+				}
+				return false
+			}) {
+				return 0, os.ErrDeadlineExceeded
+			}
+			if closed {
+				return 0, net.ErrClosed
+			}
+			if ready {
+				break
+			}
+		}
 	}
 	return c.halfConn.Write(b)
 }
@@ -167,6 +195,11 @@ func (c *faultConn) Write(b []byte) (int, error) {
 func (c *faultConn) Close() error {
 	c.once.Do(func() {
 		close(c.done)
+		if c.port != "" {
+			c.n.mu.Lock()
+			delete(c.n.dialPorts, c.port)
+			c.n.mu.Unlock()
+		}
 		f := &c.n.faults
 		f.mu.Lock()
 		delete(f.conns[c.addr], c)

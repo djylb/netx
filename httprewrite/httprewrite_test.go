@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"github.com/djylb/netx/httphead"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -505,7 +506,7 @@ func FuzzCompile(f *testing.F) {
 			}
 			return
 		}
-		if !validValue(v) {
+		if !httphead.ValidFieldValue(v) {
 			t.Fatalf("Expand(%q) = %q", tmpl, v)
 		}
 	})
@@ -524,7 +525,7 @@ func FuzzApplyRedirects(f *testing.F) {
 			t.Fatal(err)
 		}
 		for _, v := range []string{h.Get("Location"), h.Get("Refresh")} {
-			if validValue(loc) && validValue(refresh) && !validValue(v) {
+			if httphead.ValidFieldValue(loc) && httphead.ValidFieldValue(refresh) && !httphead.ValidFieldValue(v) {
 				t.Fatalf("rewrote to %q", v)
 			}
 		}

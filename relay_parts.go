@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // RelayEnd is an end of a Relay made of a reader and a writer, such as one
@@ -58,7 +60,8 @@ func (e *RelayEnd) CloseWrite() error {
 	return closeWrite(e.Writer)
 }
 
-// Close calls CloseFunc, or closes Reader and Writer.
+// Close calls CloseFunc, or closes Reader and Writer. Values whose identity
+// cannot be compared are closed separately.
 func (e *RelayEnd) Close() error {
 	switch {
 	case e == nil:
@@ -70,7 +73,7 @@ func (e *RelayEnd) Close() error {
 	if c, ok := e.Reader.(io.Closer); ok {
 		errs = append(errs, c.Close())
 	}
-	if c, ok := e.Writer.(io.Closer); ok && any(e.Writer) != any(e.Reader) {
+	if c, ok := e.Writer.(io.Closer); ok && !netutil.Same(e.Writer, e.Reader) {
 		errs = append(errs, c.Close())
 	}
 	return errors.Join(errs...)
@@ -87,7 +90,7 @@ func (e *RelayEnd) Abort(cause error) {
 		return
 	}
 	abortBeneath(e.Reader, cause)
-	if any(e.Writer) != any(e.Reader) {
+	if !netutil.Same(e.Writer, e.Reader) {
 		abortBeneath(e.Writer, cause)
 	}
 	_ = e.Close()

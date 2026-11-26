@@ -196,7 +196,7 @@ func ValidFieldName(s string) bool {
 // ValidFieldValue reports whether s may be a field value: visible ASCII,
 // spaces, tabs and bytes from 0x80, without other control characters
 // (RFC 9110, section 5.5).
-func ValidFieldValue(s string) bool {
+func ValidFieldValue[T ~string | ~[]byte](s T) bool {
 	for i := range len(s) {
 		if c := s[i]; c < ' ' && c != '\t' || c == 0x7f {
 			return false
@@ -218,8 +218,9 @@ func TrimOWS(s string) string {
 
 // Tokens returns the elements of the comma-separated list s, with
 // whitespace trimmed and empty elements skipped (RFC 9110, section 5.6.1).
-func Tokens(s string) func(yield func(string) bool) {
+func Tokens(list string) func(yield func(string) bool) {
 	return func(yield func(string) bool) {
+		s := list
 		for s != "" {
 			var t string
 			t, s, _ = strings.Cut(s, ",")

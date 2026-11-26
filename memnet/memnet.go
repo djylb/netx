@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/djylb/netx/internal/bufpool"
+	"github.com/djylb/netx/internal/netutil"
 	"github.com/djylb/timeshim"
 )
 
@@ -39,6 +41,7 @@ type Net struct {
 
 	mu        sync.Mutex
 	listeners map[string]*listener
+	dialPorts map[string]bool // reserved by live DialFrom clients
 	packets   map[string]*packetConn
 	hosts     map[string][]netip.Addr
 	next      int
@@ -46,7 +49,7 @@ type Net struct {
 
 // New returns an empty network.
 func New() *Net {
-	return &Net{listeners: map[string]*listener{}, packets: map[string]*packetConn{}, next: 40000, hosts: map[string][]netip.Addr{}}
+	return new(Net)
 }
 
 // SetHost makes Resolve answer name with addrs; no addrs removes name.
@@ -56,6 +59,9 @@ func (n *Net) SetHost(name string, addrs ...netip.Addr) {
 	if len(addrs) == 0 {
 		delete(n.hosts, name)
 		return
+	}
+	if n.hosts == nil {
+		n.hosts = make(map[string][]netip.Addr)
 	}
 	n.hosts[name] = slices.Clone(addrs)
 }
@@ -74,13 +80,14 @@ func (n *Net) bindLocked(addr string, used func(string) bool) (string, error) {
 		return "", err
 	}
 	if port == "0" {
-		for {
-			n.next++
+		for range 65535 {
+			n.advancePort()
 			a := net.JoinHostPort(host, strconv.Itoa(n.next))
 			if !used(a) {
 				return a, nil
 			}
 		}
+		return "", errors.New("memnet: no free port")
 	}
 	if used(addr) {
 		return "", errors.New("memnet: address in use")
@@ -88,15 +95,29 @@ func (n *Net) bindLocked(addr string, used func(string) bool) (string, error) {
 	return addr, nil
 }
 
+func (n *Net) advancePort() {
+	if n.next == 0 {
+		n.next = 40000
+	}
+	n.next = n.next%65535 + 1
+}
+
+func (n *Net) streamAddressUsed(addr string) bool {
+	return n.listeners[addr] != nil || n.dialPorts[addr]
+}
+
 // Listen opens a stream listener at addr; the network is ignored.
 func (n *Net) Listen(_ context.Context, _, addr string) (net.Listener, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	a, err := n.bindLocked(addr, func(s string) bool { _, ok := n.listeners[s]; return ok })
+	a, err := n.bindLocked(addr, n.streamAddressUsed)
 	if err != nil {
 		return nil, err
 	}
 	l := &listener{n: n, addr: memAddr{network, a}, ch: make(chan net.Conn), done: make(chan struct{})}
+	if n.listeners == nil {
+		n.listeners = make(map[string]*listener)
+	}
 	n.listeners[a] = l
 	return l, nil
 }
@@ -138,31 +159,49 @@ func (h *Host) Dial(ctx context.Context, _, addr string) (net.Conn, error) {
 }
 
 func (n *Net) dial(ctx context.Context, src netip.Addr, addr string) (net.Conn, error) {
-	n.mu.Lock()
-	l := n.listeners[addr]
-	var from net.Addr
-	if src.IsValid() {
-		n.next++
-		from = memAddr{network, netip.AddrPortFrom(src, uint16(1024+n.next%64000)).String()}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	n.mu.Unlock()
-	if l == nil || n.LinkOf(addr).To.Off {
+	if n.LinkOf(addr).To.Off {
 		return nil, errRefused
 	}
-	c0, s0 := halfPipe()
-	c, s := n.track(c0, addr, true), n.track(s0, addr, false)
-	if from != nil {
-		c.local, c.remote = from, l.addr
-		s.local, s.remote = l.addr, from
+	n.mu.Lock()
+	l := n.listeners[addr]
+	if l == nil {
+		n.mu.Unlock()
+		return nil, errRefused
 	}
+	var local, remote net.Addr
+	var port string
+	if src.IsValid() {
+		var err error
+		port, err = n.bindLocked(net.JoinHostPort(src.String(), "0"), n.streamAddressUsed)
+		if err != nil {
+			n.mu.Unlock()
+			return nil, err
+		}
+		if n.dialPorts == nil {
+			n.dialPorts = make(map[string]bool)
+		}
+		n.dialPorts[port] = true
+		local, remote = memAddr{network, port}, l.addr
+	}
+	n.mu.Unlock()
+	c0, s0 := halfPipe()
+	c := n.track(c0, addr, true, local, remote, port)
+	s := n.track(s0, addr, false, remote, local, "")
+	var err error
 	select {
 	case l.ch <- s:
 		return c, nil
 	case <-l.done:
-		return nil, errRefused
+		err = errRefused
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		err = ctx.Err()
 	}
+	_ = c.Close()
+	_ = s.Close()
+	return nil, err
 }
 
 // ListenPacket opens a packet endpoint at addr; the network is ignored.
@@ -175,6 +214,11 @@ func (n *Net) ListenPacket(_ context.Context, _, addr string) (net.PacketConn, e
 		return nil, err
 	}
 	p := &packetConn{n: n, addr: memAddr{"udp", a}, in: make(chan datagram, 256), done: make(chan struct{})}
+	if n.packets == nil {
+		n.packets = make(map[string]*packetConn)
+	}
+	p.rdl.init()
+	p.wdl.init()
 	n.packets[a] = p
 	return p, nil
 }
@@ -241,20 +285,20 @@ type packetConn struct {
 	once sync.Once
 	done chan struct{}
 
-	mu       sync.Mutex
-	deadline time.Time
-	dlMoved  chan struct{} // closed when the read deadline changes
+	// Under n.mu: delayed packets reserve a receive queue slot before copying.
+	pending         int
+	nextIn, nextOut time.Time
+	rdl, wdl        pipeDeadline
 }
 
 func (p *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
-		p.mu.Lock()
-		dl := p.deadline
-		if p.dlMoved == nil {
-			p.dlMoved = make(chan struct{})
+		select {
+		case <-p.done:
+			return 0, nil, net.ErrClosed
+		default:
 		}
-		moved := p.dlMoved
-		p.mu.Unlock()
+		dl, moved := p.rdl.snapshot()
 		// A deadline set while blocked applies to this read, as on a
 		// real socket.
 		var (
@@ -307,48 +351,81 @@ func (p *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, net.ErrClosed
 	default:
 	}
+	if p.wdl.expired() {
+		return 0, os.ErrDeadlineExceeded
+	}
+	if len(b) > bufpool.MaxDatagram {
+		return 0, errors.New("memnet: datagram too large")
+	}
+	if addr == nil || netutil.IsNilPointer(addr) {
+		return 0, errors.New("memnet: nil destination")
+	}
+	name := addr.String()
 	p.n.mu.Lock()
-	dst := p.n.packets[addr.String()]
+	dst := p.n.packets[name]
 	p.n.mu.Unlock()
 	if dst == nil {
 		return len(b), nil
 	}
 	// the link of the destination (towards it) and of the source (out of it)
-	l := p.n.LinkOf(addr.String()).To
-	if from := p.n.LinkOf(p.addr.s).From; !from.zero() {
-		l = Link{Delay: l.Delay + from.Delay, Loss: max(l.Loss, from.Loss), Rate: minRate(l.Rate, from.Rate), Off: l.Off || from.Off}
-	}
-	if l.Off || p.n.lose(l.Loss) {
+	to, from := p.n.LinkOf(name).To, p.n.LinkOf(p.addr.s).From
+	if to.Off || from.Off || p.n.lose(max(to.Loss, from.Loss)) {
 		return len(b), nil
 	}
-	d := datagram{append([]byte(nil), b...), p.addr}
-	if l.Delay == 0 && l.Rate == 0 {
+	clk := timeshim.Or(p.n.Clock)
+	now := clk.Now()
+	p.n.mu.Lock()
+	if dst.pending+len(dst.in) >= cap(dst.in) {
+		p.n.mu.Unlock()
+		return len(b), nil
+	}
+	dst.pending++
+	tx := reserveLink(now, &dst.nextIn, len(b), to.Rate)
+	out := reserveLink(now, &p.nextOut, len(b), from.Rate)
+	delay := addDelay(max(tx, out), addDelay(to.Delay, from.Delay))
+	p.n.mu.Unlock()
+	d := datagram{slices.Clone(b), p.addr}
+	if delay <= 0 {
 		dst.deliver(d)
 		return len(b), nil
 	}
-	go func() { // delivered later, in order of the timers
-		if p.n.wait(l, len(b), dst.done) {
+	timer := timeshim.NewTimer(clk, delay)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C:
 			dst.deliver(d)
+		case <-dst.done:
+			dst.n.mu.Lock()
+			dst.pending--
+			dst.n.mu.Unlock()
 		}
 	}()
 	return len(b), nil
 }
 
-func (p *packetConn) deliver(d datagram) {
-	select {
-	case p.in <- d:
-	default: // queue full: dropped, like UDP
+func reserveLink(now time.Time, next *time.Time, size int, rate int64) time.Duration {
+	if rate <= 0 {
+		return 0
 	}
+	start := now
+	if next.After(now) {
+		start = *next
+	}
+	*next = start.Add(transmission(size, rate))
+	return next.Sub(now)
 }
 
-func minRate(a, b int64) int64 {
-	switch {
-	case a == 0:
-		return b
-	case b == 0:
-		return a
+func (p *packetConn) deliver(d datagram) {
+	p.n.mu.Lock()
+	defer p.n.mu.Unlock()
+	p.pending--
+	select {
+	case <-p.done:
+		return
+	default:
 	}
-	return min(a, b)
+	p.in <- d // the sender reserved this slot
 }
 
 func (p *packetConn) Close() error {
@@ -363,20 +440,14 @@ func (p *packetConn) Close() error {
 
 func (p *packetConn) LocalAddr() net.Addr { return p.addr }
 
-func (p *packetConn) SetDeadline(t time.Time) error { return p.SetReadDeadline(t) }
+func (p *packetConn) SetDeadline(t time.Time) error { p.wdl.set(t); return p.SetReadDeadline(t) }
 
 func (p *packetConn) SetReadDeadline(t time.Time) error {
-	p.mu.Lock()
-	p.deadline = t
-	if p.dlMoved != nil {
-		close(p.dlMoved)
-		p.dlMoved = nil
-	}
-	p.mu.Unlock()
+	p.rdl.set(t)
 	return nil
 }
 
-func (p *packetConn) SetWriteDeadline(time.Time) error { return nil }
+func (p *packetConn) SetWriteDeadline(t time.Time) error { p.wdl.set(t); return nil }
 
 // halfConn is one end of a stream connection: r carries the peer's bytes,
 // w ours, so CloseWrite is a FIN (the peer reads EOF and may still write)
@@ -392,8 +463,7 @@ type halfConn struct {
 // the writing direction alone, and after SetLinger(0) Close resets the
 // connection: the peer's reads and writes fail with ECONNRESET.
 func Pipe() (net.Conn, net.Conn) {
-	ab, ba := newStreamDir(), newStreamDir()
-	return &halfConn{r: ba, w: ab}, &halfConn{r: ab, w: ba}
+	return halfPipe()
 }
 
 // halfPipe is Pipe with the concrete ends.
@@ -471,6 +541,9 @@ func (d *streamDir) read(p []byte) (int, error) {
 		case d.rclosed:
 			d.mu.Unlock()
 			return 0, io.ErrClosedPipe
+		case d.rdl.expired():
+			d.mu.Unlock()
+			return 0, os.ErrDeadlineExceeded
 		case len(d.buf) > 0:
 			if len(p) == 0 {
 				d.mu.Unlock()
@@ -507,6 +580,9 @@ func (d *streamDir) write(p []byte) (int, error) {
 		case d.rclosed:
 			d.mu.Unlock()
 			return n, io.ErrClosedPipe
+		case d.wdl.expired():
+			d.mu.Unlock()
+			return n, os.ErrDeadlineExceeded
 		case n == len(p):
 			d.mu.Unlock()
 			return n, nil
@@ -574,12 +650,22 @@ func (dl *pipeDeadline) set(t time.Time) {
 	dl.mu.Unlock()
 }
 
+func (dl *pipeDeadline) expired() bool {
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	return !dl.t.IsZero() && !time.Now().Before(dl.t)
+}
+
+func (dl *pipeDeadline) snapshot() (time.Time, <-chan struct{}) {
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	return dl.t, dl.moved
+}
+
 // wait blocks until ch is closed (nil) or the deadline passes.
 func (dl *pipeDeadline) wait(ch <-chan struct{}) error {
 	for {
-		dl.mu.Lock()
-		t, moved := dl.t, dl.moved
-		dl.mu.Unlock()
+		t, moved := dl.snapshot()
 		done := false
 		if waitDeadline(t, func(timeout <-chan time.Time) bool {
 			select {

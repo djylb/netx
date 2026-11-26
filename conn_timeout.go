@@ -99,7 +99,7 @@ func (c *TimeoutConn) refreshDeadline() error {
 	if idle <= 0 {
 		return nil
 	}
-	if clock.RealEpoch.At(time.Now())+int64(idle) <= c.deadline.Load() {
+	if c.deadline.Load()-clock.RealEpoch.Now() >= int64(idle) {
 		return nil // at least idle left
 	}
 	c.mu.Lock()
@@ -110,11 +110,11 @@ func (c *TimeoutConn) refreshDeadline() error {
 		return nil
 	}
 	now := time.Now()
-	if clock.RealEpoch.At(now)+int64(idle) <= c.deadline.Load() {
+	if c.deadline.Load()-clock.RealEpoch.At(now) >= int64(idle) {
 		return nil
 	}
-	ahead := idle + min(idle/16, time.Second)
-	want := clock.RealEpoch.At(now) + int64(ahead)
+	ahead := idle + min(idle/16, time.Second, time.Duration(1<<63-1)-idle)
+	want := clock.RealEpoch.At(now.Add(ahead))
 	// now.Add keeps the monotonic reading, so the socket deadline does not
 	// follow wall-clock steps either.
 	rd := now.Add(ahead)
@@ -147,7 +147,12 @@ func (c *TimeoutConn) inner() net.Conn {
 }
 
 // Close implements net.Conn.
-func (c *TimeoutConn) Close() error { return c.inner().Close() }
+func (c *TimeoutConn) Close() error {
+	if c == nil {
+		return net.ErrClosed
+	}
+	return c.inner().Close()
+}
 
 // LocalAddr implements net.Conn.
 func (c *TimeoutConn) LocalAddr() net.Addr { return c.inner().LocalAddr() }
@@ -229,3 +234,6 @@ func (c *TimeoutConn) netxLayer() layerInfo {
 	}
 	return info
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *TimeoutConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

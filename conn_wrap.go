@@ -23,7 +23,7 @@ type wrapOptions struct {
 type WrapOption func(*wrapOptions)
 
 // WithWrapParentClose makes WrapConn close parent after closing rwc.
-// parent is skipped when rwc unwraps to it through NetConn, and
+// parent is skipped when rwc already owns it, and
 // net.ErrClosed from parent is ignored because rwc may already have closed it.
 func WithWrapParentClose() WrapOption {
 	return func(o *wrapOptions) {
@@ -43,7 +43,10 @@ func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.C
 			opt(&cfg)
 		}
 	}
-	if parent == nil {
+	if netutil.IsNilPointer(rwc) {
+		rwc = nil
+	}
+	if parent == nil || netutil.IsNilPointer(parent) {
 		if c, ok := rwc.(net.Conn); ok {
 			parent = c
 		} else {
@@ -52,9 +55,6 @@ func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.C
 			//noinspection GoResourceLeak
 			parent = InnermostConn(rwc)
 		}
-	}
-	if netutil.IsNilPointer(parent) {
-		parent = nil
 	}
 	w := &wrappedConn{rwc: rwc, parent: parent, closeParent: cfg.closeParent}
 	if n, ok := rwc.(ReadNotifier); ok && !netutil.IsNilPointer(n) {
@@ -114,19 +114,27 @@ func (w *wrappedConn) CloseWrite() error { return closeWrite(w.rw()) }
 
 func (w *wrappedConn) Close() error {
 	if w == nil {
-		return nil
+		return net.ErrClosed
 	}
 	var err1, err2 error
+	parent := w.separateParent()
 	if w.rwc != nil {
 		err1 = w.rwc.Close()
 	}
-	if w.closeParent && w.parent != nil && !sameWrappedParent(w.rwc, w.parent) {
+	if parent != nil {
 		// rwc may wrap parent without exposing it, so parent can already be closed.
-		if err2 = w.parent.Close(); errors.Is(err2, net.ErrClosed) {
+		if err2 = parent.Close(); errors.Is(err2, net.ErrClosed) {
 			err2 = nil
 		}
 	}
 	return errors.Join(err1, err2)
+}
+
+func (w *wrappedConn) separateParent() net.Conn {
+	if w.closeParent && w.parent != nil && !sameWrappedParent(w.rwc, w.parent) {
+		return w.parent
+	}
+	return nil
 }
 
 // NetConn returns the connection whose addresses and deadlines w uses.
@@ -141,29 +149,18 @@ func (w *wrappedConn) netxLayer() layerInfo {
 	info := layerInfo{self: w, kind: layerWraps | layerReads}
 	if w != nil {
 		info.conn, info.rwc = w.parent, w.rwc
+		info.borrowParent = !w.closeParent
 	}
 	return info
 }
 
-// sameWrappedParent reports whether parent is rwc itself or any connection
-// reachable from rwc through NetConn, so closing rwc closes parent.
+// sameWrappedParent reports whether closing rwc also closes parent.
 func sameWrappedParent(rwc io.ReadWriteCloser, parent net.Conn) bool {
-	if rwc == nil || parent == nil {
-		return false
-	}
-	var cur any = rwc
-	for depth := 0; depth <= maxUnwrapDepth; depth++ {
-		conn, isConn := cur.(net.Conn)
-		if isConn && sameNetConn(conn, parent) {
-			return true
-		}
-		// This ownership check must not close the borrowed connection.
-		//noinspection GoResourceLeak
-		next, ok := nextConn(cur)
-		if !ok || next == nil || (isConn && sameNetConn(next, conn)) {
-			return false
-		}
-		cur = next
-	}
-	return false
+	return netutil.WalkOwned(rwc, func(v any) bool { return netutil.Same(v, parent) })
 }
+
+// NetxOwned describes the children closed with this layer.
+func (w *wrappedNotifyConn) NetxOwned() OwnedLayers { return w.netxLayer().owned() }
+
+// NetxOwned describes the children closed with this layer.
+func (w *wrappedConn) NetxOwned() OwnedLayers { return w.netxLayer().owned() }

@@ -14,6 +14,8 @@ import (
 	"github.com/djylb/timeshim"
 
 	"github.com/djylb/netx/internal/clock"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 type relayOptions struct {
@@ -397,7 +399,7 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, f *RelayFlow) (int6
 		f.end(0, err)
 		return 0, err
 	}
-	interrupt := afterFuncSync(ctx, func() {
+	interrupt := netutil.AfterFuncSync(ctx, func() {
 		if r, ok := src.(interface{ SetReadDeadline(t time.Time) error }); ok {
 			_ = r.SetReadDeadline(clock.Past)
 		}

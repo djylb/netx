@@ -213,9 +213,10 @@ func perHost() *tls.Config {
   `DefaultIdleTimeout` (24h) at zero and keeps entries at negative values.
   `Forget` drops one file pair and `Clear` drops all.
 - `CertStore` holds certificates by ID and picks one for each handshake, for
-  `GetCertificate`. `Add`, `AddPEM` and `AddFiles` (kept in sync as in
-  `CertFiles`, in the background as handshakes come, or at once with
-  `CheckFiles`) take an ID; an empty one means the certificate file's
+  `GetCertificate`. File-backed certificates are checked in the background as handshakes
+  arrive. `CheckFiles` requests an on-demand check. Overlapping calls can return
+  before the refresh finishes. `Add`, `AddPEM` and `AddFiles` take an ID.
+  An empty ID means the certificate file's
   cleaned path for `AddFiles`, which stays across renewals, and
   `CertID(cert)`, the leaf's hex SHA-256 fingerprint, for `Add` and
   `AddPEM`. A fingerprint names one exact certificate, so give certificates
@@ -502,7 +503,7 @@ func sniff(ctx context.Context, c net.Conn) (net.Conn, bool, error) {
   the wrapped connection cannot do it.
 - `DoWithContext(ctx, c, fn)` bounds I/O on `c` by `ctx`, and clears `c`'s
   deadline when `fn` returns. Like `Peek` and `PeekFull` it leaves `c` open on
-  failure, since a read that times out need not end the connection.
+  failure. A cancelable context requires deadline support before ordinary I/O starts.
   `DoHandshake` is the same for an exchange that `c` is no use without: it
   closes `c` on failure, after `CloseBeneathTLS(c)` when the exchange timed
   out or was canceled, so that a TLS connection sends no `close_notify` the
@@ -1041,9 +1042,9 @@ func over(ctx context.Context, url string, proto func(net.Conn) error) error {
 - Addresses come from the halves that have them, else are `duplex`. A nil
   read half reads `io.EOF`, a nil write half fails writes with
   `errors.ErrUnsupported`.
-- `WriteTo` and `ReadFrom` hand copies to the halves, so `io.Copy` and
-  `netx.Relay` splice between sockets beneath the connection as they would
-  between the sockets themselves. Read and Write do not allocate.
+- Copies to and from standalone sockets and files keep their kernel fast paths.
+  With other peers each read or write is serialized separately. Read and Write
+  do not allocate.
 
 A `duplex.Writer` is a write half whose stream can be swapped, and a
 `duplex.Reader` a read half that reads one stream after another, for a
@@ -1062,7 +1063,15 @@ c := duplex.Join(downlink, up)
 // Later, from the code that rotates uploads: Swap waits for the write in
 // progress, holds back the next ones, switches, and closes the first upload,
 // which ends its body for the receiver.
-err := up.Swap(ctx, nextUpload)
+if err := up.Swap(ctx, nextUpload); err != nil {
+	if replaced, ok := err.(*duplex.ReplacedStreamError); ok {
+		// nextUpload belongs to up. Report the previous upload's close error.
+		return replaced
+	}
+	// Installation failed. The caller still owns nextUpload.
+	_ = nextUpload.Close()
+	return err
+}
 ```
 
 ```go
@@ -1876,8 +1885,10 @@ func handler(w http.ResponseWriter, req *http.Request) {
   independently of whether the address header named a client.
 - Forwarded is parsed from the right as well, so that elements a trusted
   proxy appends are read even after a malformed or hostile one.
+- `PrefixSet.Prefixes()` returns the smallest covering prefixes in address order.
+  `Len()` counts valid input prefixes, including duplicates.
 - `PrefixSet` is built once, merges overlapping prefixes and looks addresses
-  up by binary search (3.5 ns in 1000 prefixes). `Resolve` does not
+  up by binary search over disjoint address ranges. `Resolve` does not
   allocate: 15 ns for an untrusted peer, 80–250 ns through one or more
   proxies.
 - `AppendXForwardedFor`, `AppendForwarded` and `AppendElement` format the

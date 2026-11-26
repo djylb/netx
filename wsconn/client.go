@@ -240,10 +240,7 @@ func checkNegotiated(resp *httphead.Response, opts *ClientOptions) (*deflateConf
 
 // Validate reports a setting out of range, which fails the handshakes.
 func (o *ClientOptions) Validate() error {
-	if err := o.Options.Validate(); err != nil {
-		return err
-	}
-	return validateHandshake(o.MaxHeaderBytes)
+	return o.validateHandshake(o.MaxHeaderBytes)
 }
 
 // ExtendedConnectHeader returns the fields of an HTTP/2 extended CONNECT

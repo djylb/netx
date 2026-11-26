@@ -870,3 +870,46 @@ func TestPacketListenerMaxConnsSpoofedFlood(t *testing.T) {
 		t.Fatal("the freed place did not go to the next new peer")
 	}
 }
+
+func TestInvalidPeerPort(t *testing.T) {
+	for _, aware := range []bool{false, true} {
+		l := newUDPListener(t)
+		l.pktinfo = aware
+		for _, port := range []int{-1, 65536} {
+			peer := &net.UDPAddr{IP: l.Addr().(*net.UDPAddr).IP, Port: port}
+			if c, err := l.Dial(peer); err == nil {
+				_ = c.Close()
+				t.Errorf("Dial accepted %d", port)
+			}
+			if _, err := l.WriteTo(nil, peer); err == nil {
+				t.Errorf("WriteTo accepted %d", port)
+			}
+		}
+	}
+}
+
+type noWriteDeadline struct{ *feedPacketConn }
+
+func (noWriteDeadline) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
+
+func TestPacketListenerWithoutWriteDeadline(t *testing.T) {
+	pc := noWriteDeadline{newFeedPacketConn()}
+	l := NewPacketListener(pc)
+	defer func() { _ = l.Close() }()
+	peer := pc.LocalAddr()
+	c, err := l.Dial(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, send := range []func([]byte) (int, error){c.Write, func(p []byte) (int, error) { return l.WriteTo(p, peer) }} {
+		if n, err := send([]byte{1}); n != 1 || err != nil {
+			t.Fatalf("plain send = %d, %v", n, err)
+		}
+	}
+	if err = c.SetWriteDeadline(time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Write(nil); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("bounded send = %v", err)
+	}
+}

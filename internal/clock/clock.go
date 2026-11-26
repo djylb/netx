@@ -3,6 +3,7 @@ package clock
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/djylb/timeshim"
@@ -35,6 +36,16 @@ func (e *Epoch) Clock() timeshim.Clock { return e.clock }
 
 // Now returns the clock's time as nanoseconds since the epoch.
 func (e *Epoch) Now() int64 { return e.At(e.clock.Now()) }
+
+// Touch advances last to the current epoch time.
+func (e *Epoch) Touch(last *atomic.Int64) {
+	now := e.Now()
+	for prev := last.Load(); now > prev; prev = last.Load() {
+		if last.CompareAndSwap(prev, now) {
+			return
+		}
+	}
+}
 
 // At returns t, a time of the clock, as nanoseconds since the epoch.
 func (e *Epoch) At(t time.Time) int64 { return int64(t.Sub(e.base)) }

@@ -36,7 +36,12 @@ func (c *AddrOverrideConn) Read(b []byte) (int, error)  { return c.inner().Read(
 func (c *AddrOverrideConn) Write(b []byte) (int, error) { return c.inner().Write(b) }
 
 // Close implements net.Conn.
-func (c *AddrOverrideConn) Close() error { return c.inner().Close() }
+func (c *AddrOverrideConn) Close() error {
+	if c == nil {
+		return net.ErrClosed
+	}
+	return c.inner().Close()
+}
 
 // SetDeadline implements net.Conn.
 func (c *AddrOverrideConn) SetDeadline(t time.Time) error { return c.inner().SetDeadline(t) }
@@ -92,3 +97,6 @@ func (c *AddrOverrideConn) netxLayer() layerInfo {
 	}
 	return info
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *AddrOverrideConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

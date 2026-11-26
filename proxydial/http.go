@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/httphead"
 )
 
 // maxConnectReplyBytes bounds the status line and headers of a CONNECT reply.
@@ -121,7 +122,7 @@ func (d *HTTPDialer) request(address string) ([]byte, error) {
 	}
 	for key, values := range d.Header {
 		for _, v := range values {
-			if key == "" || hasControl(key) || strings.ContainsAny(key, " :") || invalidFieldValue(v) {
+			if !httphead.ValidFieldName(key) || !httphead.ValidFieldValue(v) {
 				return nil, fmt.Errorf("proxydial: invalid header field %q", key)
 			}
 			b = append(b, key+": "+v+"\r\n"...)
@@ -157,45 +158,35 @@ func connect(c net.Conn, req []byte) (net.Conn, error) {
 	// Only the status line and headers are parsed: a 2xx reply has no body
 	// (RFC 9110, section 9.3.6), and the bytes after it belong to the tunnel.
 	br := bufio.NewReader(io.LimitReader(c, maxConnectReplyBytes))
-	tp := textproto.NewReader(br)
-	code, status, err := readConnectStatus(tp)
-	var header textproto.MIMEHeader
-	if err == nil {
-		header, err = tp.ReadMIMEHeader()
-	}
-	if err != nil {
-		return nil, fmt.Errorf("proxydial: read CONNECT response: %w", err)
-	}
-	if code/100 != 2 {
-		return nil, &ConnectError{StatusCode: code, Status: status, Header: header}
+	var buf []byte
+	for {
+		var err error
+		buf, err = httphead.Read(br, buf, maxConnectReplyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("proxydial: read CONNECT response: %w", err)
+		}
+		resp, err := httphead.ParseResponse(string(buf), nil)
+		if err != nil {
+			return nil, fmt.Errorf("proxydial: malformed status line or header: %w", err)
+		}
+		if resp.Code/100 == 1 && resp.Code != 101 {
+			continue
+		}
+		if resp.Code/100 != 2 {
+			header := make(textproto.MIMEHeader)
+			for _, f := range resp.Header {
+				header.Add(f.Name, f.Value)
+			}
+			status := strings.TrimSpace(strconv.Itoa(resp.Code) + " " + resp.Reason)
+			return nil, &ConnectError{StatusCode: resp.Code, Status: status, Header: header}
+		}
+		break
 	}
 	if n := br.Buffered(); n > 0 {
 		prefix, _ := br.Peek(n)
 		return netx.NewPrefixConn(c, prefix), nil
 	}
 	return c, nil
-}
-
-// readConnectStatus reads an HTTP/1.x status line and returns the status code
-// and the status, such as 200 and "200 Connection established".
-func readConnectStatus(tp *textproto.Reader) (int, string, error) {
-	line, err := tp.ReadLine()
-	if err != nil {
-		return 0, "", err
-	}
-	proto, status, _ := strings.Cut(line, " ")
-	code, _, _ := strings.Cut(status, " ")
-	if !strings.HasPrefix(proto, "HTTP/1.") || len(code) != 3 || strings.Trim(code, "0123456789") != "" {
-		return 0, "", fmt.Errorf("malformed status line %q", line)
-	}
-	n, _ := strconv.Atoi(code)
-	return n, status, nil
-}
-
-// invalidFieldValue reports whether v contains a control character other
-// than the horizontal tab, which header values may contain (RFC 9110).
-func invalidFieldValue(v string) bool {
-	return strings.IndexFunc(v, func(r rune) bool { return r != '\t' && (r < ' ' || r == 0x7f) }) >= 0
 }
 
 // hasControl reports whether s contains a control character. Spaces, which

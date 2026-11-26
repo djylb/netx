@@ -103,6 +103,9 @@ func AddrFromNetAddr(a net.Addr) Addr {
 }
 
 func addrFromIP(ip net.IP, port int) Addr {
+	if !netutil.ValidPort(port) {
+		return Addr{}
+	}
 	addr, _ := netip.AddrFromSlice(ip)
 	return Addr{IP: addr.Unmap(), Port: uint16(port)}
 }

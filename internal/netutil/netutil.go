@@ -26,6 +26,9 @@ func IsNilPointer(v any) bool {
 	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
+// ValidPort reports whether a socket port fits the wire format.
+func ValidPort(port int) bool { return port >= 0 && port <= 65535 }
+
 // UnmapAddrPort returns ap with an IPv4-mapped IPv6 address as IPv4, as
 // which a dual-stack socket reports IPv4 peers, so that a peer has one form.
 // A zone is kept.
@@ -45,11 +48,11 @@ func PeerAddrPort(addr net.Addr) netip.AddrPort {
 	switch a := addr.(type) {
 	case nil:
 	case *net.TCPAddr:
-		if a != nil {
+		if a != nil && ValidPort(a.Port) {
 			ap = a.AddrPort()
 		}
 	case *net.UDPAddr:
-		if a != nil {
+		if a != nil && ValidPort(a.Port) {
 			ap = a.AddrPort()
 		}
 	default:
@@ -139,22 +142,17 @@ func HostIP(name string) (netip.Addr, bool) {
 	return ip.Unmap().WithZone(""), true
 }
 
-// ResetOnClose makes the close of the *net.TCPConn beneath v, found
-// through NetConn methods, send RST instead of FIN (SO_LINGER 0). It
-// closes nothing.
-func ResetOnClose(v any) {
-	for range 16 {
-		if v == nil || IsNilPointer(v) {
-			return
-		}
-		if tc, ok := v.(*net.TCPConn); ok {
-			_ = tc.SetLinger(0)
-			return
-		}
-		getter, ok := v.(interface{ NetConn() net.Conn })
-		if !ok {
-			return
-		}
-		v = getter.NetConn()
+// Same reports whether a and b have comparable, equal dynamic values.
+func Same(a, b any) bool {
+	if a == nil || b == nil {
+		return false
 	}
+	av := reflect.ValueOf(a)
+	bv := reflect.ValueOf(b)
+	// Value.Comparable also looks at the values in interface fields, which
+	// Type.Comparable does not and on which Equal would panic.
+	if av.Type() != bv.Type() || !av.Comparable() || !bv.Comparable() {
+		return false
+	}
+	return av.Equal(bv)
 }

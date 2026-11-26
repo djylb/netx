@@ -3,7 +3,6 @@ package netx
 import (
 	"io"
 	"net"
-	"reflect"
 	"slices"
 
 	"github.com/djylb/netx/internal/netutil"
@@ -28,8 +27,9 @@ type layerInfo struct {
 	rwc io.ReadWriteCloser
 	// datagrams, when not nil, hands over the datagrams that each Read
 	// returns one of.
-	datagrams datagramSource
-	kind      layerKind
+	datagrams    datagramSource
+	kind         layerKind
+	borrowParent bool
 }
 
 // layerKind tells how a connection of this package passes data on.
@@ -66,8 +66,23 @@ func layerOf(v any) (layerInfo, bool) {
 	return info, info.self == v
 }
 
+// OwnedLayers describes the children closed by a wrapper. An external wrapper
+// can implement NetxOwned() OwnedLayers. Set Self to the wrapper itself and
+// First and Second to the children its Close owns. Leave unused children nil.
+// A NetConn method alone exposes a borrowed connection.
+type OwnedLayers = netutil.Owned
+
+// owned describes the same layer for operations that can close its children.
+func (info layerInfo) owned() netutil.Owned {
+	var parent net.Conn
+	if !info.borrowParent {
+		parent = info.conn
+	}
+	return netutil.BuiltinOwned(info.self, info.rwc, parent)
+}
+
 // reader returns what the connection's Reads read.
-func (info *layerInfo) reader() io.Reader {
+func (info layerInfo) reader() io.Reader {
 	if info.rwc != nil {
 		return info.rwc
 	}
@@ -93,12 +108,17 @@ func InnermostConn(v any) net.Conn {
 // package and NetConn methods, such as to find the *tls.Conn or
 // *TimeoutConn beneath other wrappers.
 func ConnAs[T any](v any) (T, bool) {
-	var seen [8]any
-	return connAs[T](v, 0, seen[:0])
+	var result T
+	found := netutil.Walk(v, wrapped, func(layer any) bool {
+		var ok bool
+		result, ok = layer.(T)
+		return ok
+	})
+	return result, found
 }
 
 // maxUnwrapDepth bounds NetConn chains so cyclic wrappers cannot loop forever.
-const maxUnwrapDepth = 16
+const maxUnwrapDepth = netutil.MaxUnwrapDepth
 
 // wrapped returns what a wrapper of this package wraps, one layer down and
 // in the order unwrapping looks at it, without its NetConn method, so that
@@ -112,42 +132,10 @@ func wrapped(v any) (first, second any, ok bool) {
 	if info.conn != nil {
 		first = info.conn
 	}
-	if info.rwc != nil {
+	if info.rwc != nil && !netutil.Same(info.rwc, first) {
 		second = info.rwc
 	}
 	return first, second, true
-}
-
-func connAs[T any](v any, depth int, seen []any) (T, bool) {
-	var zero T
-	if v == nil || netutil.IsNilPointer(v) {
-		return zero, false
-	}
-	if t, ok := v.(T); ok {
-		return t, true
-	}
-	if first, second, ok := wrapped(v); ok {
-		if slices.Contains(seen, v) {
-			return zero, false
-		}
-		seen = append(seen, v)
-		for _, inner := range [...]any{first, second} {
-			if t, ok := connAs[T](inner, depth, seen); ok {
-				return t, true
-			}
-		}
-		return zero, false
-	}
-	// Only looked at, not owned.
-	//noinspection GoResourceLeak
-	next, ok := nextConn(v)
-	if !ok || next == nil || depth >= maxUnwrapDepth {
-		return zero, false
-	}
-	if conn, isConn := v.(net.Conn); isConn && sameNetConn(next, conn) {
-		return zero, false
-	}
-	return connAs[T](next, depth+1, seen)
 }
 
 // innermost unwraps v. depth counts the NetConn calls of other packages'
@@ -173,11 +161,11 @@ func innermost(v any, depth int, seen []any) net.Conn {
 	}
 	// Unwrapping only borrows connections; their owner remains responsible for closing them.
 	//noinspection GoResourceLeak
-	if raw, ok := nextConn(v); ok {
+	if raw, ok := netutil.NextConn(v); ok {
 		if raw == nil || netutil.IsNilPointer(raw) {
 			return nil
 		}
-		if conn, ok := v.(net.Conn); ok && sameNetConn(raw, conn) {
+		if conn, ok := v.(net.Conn); ok && netutil.Same(raw, conn) {
 			return raw
 		}
 		if depth >= maxUnwrapDepth {
@@ -192,32 +180,4 @@ func innermost(v any, depth int, seen []any) net.Conn {
 		return conn
 	}
 	return nil
-}
-
-// nextConn returns the connection that v wraps, if v exposes one.
-// The returned connection is borrowed; inspecting it does not transfer ownership.
-func nextConn(v any) (net.Conn, bool) {
-	getter, ok := v.(interface{ NetConn() net.Conn })
-	if !ok {
-		return nil, false
-	}
-	// *tls.Conn.NetConn does not accept a nil receiver.
-	if netutil.IsNilPointer(getter) {
-		return nil, true
-	}
-	return getter.NetConn(), true
-}
-
-func sameNetConn(a, b net.Conn) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	av := reflect.ValueOf(a)
-	bv := reflect.ValueOf(b)
-	// Value.Comparable also looks at the values in interface fields, which
-	// Type.Comparable does not and on which Equal would panic.
-	if av.Type() != bv.Type() || !av.Comparable() || !bv.Comparable() {
-		return false
-	}
-	return av.Equal(bv)
 }

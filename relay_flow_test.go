@@ -621,3 +621,30 @@ func TestConnGroupTrack(t *testing.T) {
 		t.Fatalf("Track() on a closed group = %v", err)
 	}
 }
+
+type nilSliceCloser []byte
+
+func (nilSliceCloser) Close() error { panic("closed a nil member") }
+
+func TestConnGroupRefusesNilMembers(t *testing.T) {
+	var g ConnGroup
+	a, b := net.Pipe()
+	defer func() { _ = a.Close(); _ = b.Close() }()
+	if _, err := g.Add(a); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []io.Closer{nil, (*net.TCPConn)(nil), nilSliceCloser(nil)} {
+		if _, err := g.Add(c); err == nil {
+			t.Fatal("added a nil member")
+		}
+	}
+	if _, err := g.Track((*net.TCPConn)(nil)); err == nil {
+		t.Fatal("tracked a nil connection")
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("peer read = %v", err)
+	}
+}

@@ -157,11 +157,11 @@ type CertStore struct {
 	// (10s), and a negative value never checks. The files of an expired
 	// certificate are read again, changed or not, at most once a minute
 	// either way. The checks run in the background, started by handshakes;
-	// CheckFiles runs one at once.
+	// CheckFiles requests an on-demand check and coalesces overlapping calls.
 	CheckInterval time.Duration
 	addMu         sync.RWMutex
-	checkMu       sync.Mutex // held by a check of the files
-	mu            sync.Mutex // of what Load brought
+	checking      atomic.Uint32 // a file check owns the fileSource snapshots
+	mu            sync.Mutex    // of what Load brought
 }
 
 // CertSource is how a certificate came into a CertStore.
@@ -246,7 +246,7 @@ type CertInfo struct {
 type storeCert struct {
 	notBefore, notAfter time.Time
 	cert                *tls.Certificate // with Leaf set
-	files               *fileSource      // for SourceFiles; used under checkMu
+	files               *fileSource      // for SourceFiles; used by the active check
 	id                  string
 	names               []string
 	given               []string // the names given when added, if any
@@ -256,7 +256,7 @@ type storeCert struct {
 }
 
 func (c *storeCert) valid(now time.Time) bool {
-	return !now.Before(c.notBefore) && now.Before(c.notAfter)
+	return validAt(c.cert.Leaf, now)
 }
 
 // certList holds the certificates for a name, or for a wildcard, the nAuth
@@ -404,15 +404,16 @@ func (s *CertStore) certificate(ctx context.Context, hello *tls.ClientHelloInfo)
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	now := s.now()
-	s.checkFilesIfDue(now)
+	if check := s.dueFileCheck(s.now()); check != nil {
+		go check()
+	}
 	if s.Select != nil {
 		id, err := s.Select(hello)
 		if err != nil {
 			return nil, err
 		}
 		if id != "" {
-			cert, err := s.byIDNow(id, now)
+			cert, err := s.byIDNow(id)
 			if err == nil {
 				return cert, nil
 			}
@@ -422,35 +423,32 @@ func (s *CertStore) certificate(ctx context.Context, hello *tls.ClientHelloInfo)
 	name := normalizeName(hello.ServerName)
 	if name == "" {
 		if ip := localIP(hello); ip != "" {
-			if c := s.best(hello, ip, false, now); c != nil {
+			if c := s.best(hello, ip, false, s.now()); c != nil && validAt(c.Leaf, s.now()) {
 				return c, nil
 			}
 		}
-		return s.defaultCert(now)
+		return s.defaultCert()
 	}
-	if c := s.best(hello, name, true, now); c != nil {
+	if c := s.best(hello, name, true, s.now()); c != nil && validAt(c.Leaf, s.now()) {
 		return c, nil
 	}
 	if s.Load != nil {
-		if c, err := s.loaded(ctx, name, now); c != nil || err != nil {
+		if c, err := s.loaded(ctx, name, s.now()); c != nil || err != nil {
 			return c, err
 		}
 	}
-	return s.defaultCert(now)
+	return s.defaultCert()
 }
 
 // byIDNow returns the certificate with id if it is valid now.
-func (s *CertStore) byIDNow(id string, now time.Time) (*tls.Certificate, error) {
+func (s *CertStore) byIDNow(id string) (*tls.Certificate, error) {
 	s.addMu.RLock()
-	defer s.addMu.RUnlock()
 	c, ok := s.byID[id]
-	switch {
-	case !ok:
+	s.addMu.RUnlock()
+	if !ok {
 		return nil, ErrUnknownID
-	case !c.valid(now):
-		return nil, ErrNotValidNow
 	}
-	return c.cert, nil
+	return deliverCertificate(c.cert, c.cert.Leaf, s.now())
 }
 
 // best returns the best added certificate for name that is valid now, or
@@ -494,10 +492,11 @@ func (s *CertStore) best(hello *tls.ClientHelloInfo, name string, wildcards bool
 	return first
 }
 
-func (s *CertStore) defaultCert(now time.Time) (*tls.Certificate, error) {
+func (s *CertStore) defaultCert() (*tls.Certificate, error) {
 	s.addMu.RLock()
-	defer s.addMu.RUnlock()
-	if c, ok := s.byID[s.defaultID]; ok && c.valid(now) {
+	c := s.byID[s.defaultID]
+	s.addMu.RUnlock()
+	if c != nil && c.valid(s.now()) {
 		return c.cert, nil
 	}
 	return nil, ErrNoCertificate
@@ -615,39 +614,67 @@ func loadedInfo(name string, cert *tls.Certificate, now time.Time) CertInfo {
 	return info
 }
 
-// CheckFiles checks the files of the certificates added with AddFiles now,
-// reading those that changed, as the checks every CheckInterval do, and
-// returns once done.
+const (
+	filesIdle uint32 = iota
+	filesScheduled
+	filesForced
+	filesForcePending
+)
+
+// CheckFiles checks all certificate files for changes. An overlapping forced
+// check is shared. If a scheduled check is running, it performs a forced
+// pass before it finishes. Overlapping calls return immediately, so a clock
+// used during a check can call CheckFiles.
 func (s *CertStore) CheckFiles() {
-	s.checkMu.Lock()
-	errs := s.syncFiles(s.now(), true)
-	s.checkMu.Unlock()
+	for {
+		switch s.checking.Load() {
+		case filesIdle:
+			if s.checking.CompareAndSwap(filesIdle, filesForced) {
+				s.finishCheck(s.syncFiles(s.now(), true))
+				return
+			}
+		case filesScheduled:
+			if s.checking.CompareAndSwap(filesScheduled, filesForcePending) {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+func (s *CertStore) finishCheck(errs []*CertError) {
+	s.checking.Store(filesIdle)
 	s.reportAll(errs)
 }
 
-// checkFilesIfDue starts a check of the files in the background when one is
-// due and none is running.
-func (s *CertStore) checkFilesIfDue(now time.Time) {
-	if s.nFiles.Load() == 0 || now.UnixNano() < s.nextCheck.Load() || !s.checkMu.TryLock() {
-		return
+// dueFileCheck reserves a due file check and returns the work for a background
+// goroutine, or nil when no check is needed.
+func (s *CertStore) dueFileCheck(now time.Time) func() {
+	if s.nFiles.Load() == 0 || now.UnixNano() < s.nextCheck.Load() || !s.checking.CompareAndSwap(filesIdle, filesScheduled) {
+		return nil
 	}
-	every := expiredRetry // for the expired, also when changes are not checked
+	every := expiredRetry
 	if s.CheckInterval == 0 {
 		every = min(every, DefaultCheckInterval)
 	} else if s.CheckInterval > 0 {
 		every = min(every, s.CheckInterval)
 	}
 	s.nextCheck.Store(now.Add(every).UnixNano())
-	go func() {
+	return func() {
 		errs := s.syncFiles(now, false)
-		s.checkMu.Unlock()
-		s.reportAll(errs)
-	}()
+		if s.checking.CompareAndSwap(filesScheduled, filesIdle) {
+			s.reportAll(errs)
+			return
+		}
+		s.checking.Store(filesForced)
+		s.finishCheck(append(errs, s.syncFiles(s.now(), true)...))
+	}
 }
 
 // syncFiles checks the files of the certificates that are due, or of all,
-// and replaces those whose files changed. It runs under checkMu and returns
-// the failures, for OnError once checkMu is released.
+// and replaces those whose files changed. Only the active check uses the file metadata. It returns
+// failures for OnError after the check finishes.
 func (s *CertStore) syncFiles(now time.Time, all bool) []*CertError {
 	var errs []*CertError
 	s.addMu.RLock()
@@ -663,7 +690,7 @@ func (s *CertStore) syncFiles(now time.Time, all bool) []*CertError {
 		if !check && !all {
 			continue
 		}
-		cert, err := c.files.sync(force, now, c.cert.Leaf)
+		cert, err := c.files.sync(force, s.now, c.cert.Leaf)
 		if err == nil && cert != nil {
 			var renewed *storeCert
 			if renewed, err = s.newCert(c.id, cert, c.given, SourceFiles, c.files); err == nil {

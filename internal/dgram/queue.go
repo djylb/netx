@@ -206,7 +206,7 @@ func (q *Queue) Done() <-chan struct{} { return q.closed }
 func (q *Queue) SetReadDeadline(t time.Time) { q.readDeadline.Set(t) }
 
 // Touch records activity now.
-func (q *Queue) Touch() { q.active.Store(q.epoch.Now()) }
+func (q *Queue) Touch() { q.epoch.Touch(&q.active) }
 
 // Accepted records that the connection was handed to its user, which
 // starts its idle timeout.

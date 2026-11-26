@@ -1,7 +1,6 @@
 package udpflow
 
 import (
-	"bytes"
 	"net"
 	"net/netip"
 	"runtime"
@@ -21,6 +20,11 @@ func replyTargets(t *testing.T, v6 bool) (loop netip.Addr, dsts []netip.Addr) {
 	loop = netip.MustParseAddr("127.0.0.1")
 	if v6 {
 		loop = netip.IPv6Loopback()
+	}
+	// Use only assigned source addresses on Windows: a loopback alias can
+	// receive packets even when the kernel refuses it as a sendmsg source.
+	if runtime.GOOS == "windows" {
+		dsts = append(dsts, loop)
 	}
 	if !v6 && (runtime.GOOS == "linux" || runtime.GOOS == "android") {
 		dsts = append(dsts, netip.MustParseAddr("127.0.0.2")) // all of 127/8 is local
@@ -51,7 +55,8 @@ func replyTargets(t *testing.T, v6 bool) (loop netip.Addr, dsts []netip.Addr) {
 			dsts = append(dsts, ip)
 		}
 	}
-	return loop, dsts
+	slices.SortFunc(dsts, netip.Addr.Compare)
+	return loop, slices.Compact(dsts)
 }
 
 // TestPacketListenerReplySource: on a socket bound to a wildcard address,
@@ -86,68 +91,50 @@ func TestPacketListenerReplySource(t *testing.T) {
 				t.Fatal("packet information not enabled on a wildcard socket")
 			}
 			port := uint16(pc.LocalAddr().(*net.UDPAddr).Port)
-			go func() {
-				for {
-					c, err := l.Accept()
-					if err != nil {
-						return
-					}
-					go func() {
-						defer func() { _ = c.Close() }()
-						buf := make([]byte, 64)
-						for {
-							n, err := c.Read(buf)
-							if err != nil {
-								return
-							}
-							// echo with the address the conn reports; a
-							// datagram is written whole (Windows reports 0
-							// bytes for a WSASendMsg that completes at once)
-							out := slices.Concat(buf[:n], []byte(" "+c.LocalAddr().String()))
-							if w, err := c.Write(out); err == nil && w != len(out) {
-								t.Errorf("Write reported %d of %d bytes", w, len(out))
-							}
-						}
-					}()
-				}
-			}()
-			tested := 0
-			for i, dst := range dsts {
-				srcs := []netip.Addr{loop}
+			for _, dst := range dsts {
+				source := loop
 				if runtime.GOOS == "windows" {
-					// Windows routes neither from the loopback address to
-					// another local one nor between every pair of local
-					// addresses (virtual adapters): the peer takes the
-					// first other local address that reaches dst
-					srcs = nil
-					for j := range len(dsts) - 1 {
-						srcs = append(srcs, dsts[(i+1+j)%len(dsts)])
-					}
+					// A host need not route loopback traffic across adapters.
+					source = dst
 				}
-				got, from, ok := replyVia(t, srcs, netip.AddrPortFrom(dst, port))
-				if runtime.GOOS == "windows" && got == nil {
-					// the firewall of a virtual adapter may drop it
-					t.Logf("%v: unreachable or filtered from %v", dst, srcs)
-					continue
-				}
-				if !ok {
-					t.Fatalf("%v: unreachable from %v", dst, srcs)
-				}
-				tested++
-				if got == nil {
-					t.Fatalf("%v: no reply", dst)
-				}
-				if from.Addr().Unmap() != dst || from.Port() != port {
-					t.Errorf("reply to %v came from %v", dst, from)
-				}
-				if want := " " + netip.AddrPortFrom(dst, port).String(); !bytes.HasSuffix(got, []byte(want)) {
-					t.Errorf("LocalAddr: %q, want suffix %q", got, want)
-				}
-			}
-			if tested == 0 {
-				t.Skip("no pair of local addresses that reach each other")
+				checkReplySource(t, l, source, netip.AddrPortFrom(dst, port))
 			}
 		})
+	}
+}
+
+func checkReplySource(t *testing.T, l *PacketListener, source netip.Addr, target netip.AddrPort) {
+	t.Helper()
+	client, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(source, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	deadline := time.Now().Add(5 * time.Second)
+	if err = client.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.WriteToUDPAddrPort([]byte{1}, target); err != nil {
+		t.Fatal(err)
+	}
+	flow := nettest.AcceptWithin(t, l)
+	defer func() { _ = flow.Close() }()
+	if err = flow.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	if got := flow.LocalAddr().(*net.UDPAddr).AddrPort(); got != target {
+		t.Fatalf("LocalAddr = %v, want %v", got, target)
+	}
+	var payload [2]byte
+	if n, readErr := flow.Read(payload[:]); readErr != nil || n != 1 || payload[0] != 1 {
+		t.Fatalf("read = %v, %v", payload[:n], readErr)
+	}
+	if n, writeErr := flow.Write(payload[:1]); writeErr != nil || n != 1 {
+		t.Fatalf("write = %d, %v", n, writeErr)
+	}
+	n, from, err := client.ReadFromUDPAddrPort(payload[:])
+	if err != nil || n != 1 || payload[0] != 1 || from != target {
+		t.Fatalf("reply = %v from %v, %v; want %v", payload[:n], from, err, target)
 	}
 }
 
@@ -216,35 +203,4 @@ func TestPacketListenerWildcardDelayedReplies(t *testing.T) {
 			}
 		})
 	}
-}
-
-// replyVia sends to dst from the first of srcs that can send to it (on
-// Windows: that gets a reply) and returns the reply and its source (nil
-// reply: none came); ok is false when none of srcs can send to dst.
-func replyVia(t *testing.T, srcs []netip.Addr, dst netip.AddrPort) (got []byte, from netip.AddrPort, ok bool) {
-	t.Helper()
-	for _, src := range srcs {
-		cl, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(src, 0)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		buf := make([]byte, 128)
-		sent := false
-		for range 5 { // a loopback datagram can be lost on a busy host
-			if _, err := cl.WriteToUDPAddrPort([]byte("hi"), dst); err != nil {
-				break // this source does not reach dst
-			}
-			sent = true
-			_ = cl.SetReadDeadline(time.Now().Add(2 * time.Second))
-			if n, ap, err := cl.ReadFromUDPAddrPort(buf); err == nil {
-				got, from = buf[:n], ap
-				break
-			}
-		}
-		_ = cl.Close()
-		if sent && (got != nil || runtime.GOOS != "windows") {
-			return got, from, true
-		}
-	}
-	return nil, netip.AddrPort{}, false
 }

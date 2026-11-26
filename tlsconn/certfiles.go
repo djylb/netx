@@ -184,11 +184,10 @@ func (c *CertFiles) Clear() {
 func (c *CertFiles) get(key, certFile, keyFile string, load func() (*tls.Certificate, error)) (*tls.Certificate, error) {
 	now := c.now()
 	cert, err := c.lookup(now, key, certFile, keyFile, load)
-	if err == nil && cert.Leaf != nil && !validAt(cert.Leaf, now) {
-		// Kept, for its files to be read again, but not served.
-		return nil, ErrNotValidNow
+	if err != nil {
+		return nil, err
 	}
-	return cert, err
+	return deliverCertificate(cert, cert.Leaf, c.now())
 }
 
 func (c *CertFiles) lookup(now time.Time, key, certFile, keyFile string, load func() (*tls.Certificate, error)) (*tls.Certificate, error) {
@@ -221,7 +220,7 @@ func (c *CertFiles) lookup(now time.Time, key, certFile, keyFile string, load fu
 		// One caller checks while the others use the certificate it has.
 		e.reloading = true
 		c.mu.Unlock()
-		cert, err := e.files.sync(force, now, e.cert.Leaf)
+		cert, err := e.files.sync(force, c.now, e.cert.Leaf)
 		c.mu.Lock()
 		e.reloading = false
 		if cert != nil {
@@ -361,7 +360,7 @@ func (f *fileSource) due(now time.Time, interval time.Duration, leaf *x509.Certi
 // A certificate not valid now does not replace current if that is valid
 // now, as when an old pair was copied back: it fails with ErrNotValidNow. A
 // failed read records nothing, so that the next sync tries again.
-func (f *fileSource) sync(force bool, now time.Time, current *x509.Certificate) (*tls.Certificate, error) {
+func (f *fileSource) sync(force bool, clock func() time.Time, current *x509.Certificate) (*tls.Certificate, error) {
 	certInfo, err := os.Stat(f.certFile)
 	if err != nil {
 		return nil, err
@@ -377,6 +376,7 @@ func (f *fileSource) sync(force bool, now time.Time, current *x509.Certificate) 
 	if err != nil {
 		return nil, err
 	}
+	now := clock()
 	if !validAt(cert.Leaf, now) && current != nil && validAt(current, now) {
 		return nil, ErrNotValidNow
 	}

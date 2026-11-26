@@ -482,3 +482,26 @@ func TestZeroFlowListener(t *testing.T) {
 		t.Fatalf("Accept after Close = %v, %v", c, err)
 	}
 }
+
+func TestReplyLoopClosesFlow(t *testing.T) {
+	l := testFlowListener(t)
+	ap := l.Addr().(*net.UDPAddr).AddrPort()
+	info := PacketInfo{Src: ap, Dst: ap, Redirected: true}
+	closed, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closed.Close()
+	for _, reply := range []*net.UDPConn{new(net.UDPConn), closed} {
+		l.deliver(nil, info)
+		f := acceptFlow(t, l)
+		f.reply = reply
+		f.replyLoop(reply)
+		if l.flows.Len() != 0 || f.reply != nil || !f.q.Closed() {
+			t.Fatal("failed reply socket retained")
+		}
+		if _, err = f.Read(nil); err == nil {
+			t.Fatal("reply failure missing")
+		}
+	}
+}

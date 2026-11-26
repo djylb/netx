@@ -29,7 +29,7 @@ func (i *Idle) Init(d time.Duration, c timeshim.Clock) {
 }
 
 // Touch records activity.
-func (i *Idle) Touch() { i.activity.Store(i.epoch.Now()) }
+func (i *Idle) Touch() { i.epoch.Touch(&i.activity) }
 
 // BeginWait begins an operation during which the timer must not expire.
 func (i *Idle) BeginWait() { i.waiting.Add(1) }

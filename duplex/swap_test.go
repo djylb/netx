@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/djylb/netx/duplex"
@@ -475,4 +476,154 @@ func TestDeadlineCallNotUnderLock(t *testing.T) {
 			func() { _ = up.SetWriteDeadline(time.Now().Add(time.Hour)) },
 			up.Close)
 	})
+}
+
+type deadlineBarrier struct {
+	bytes.Buffer
+	setting, release chan struct{}
+}
+
+func (d *deadlineBarrier) set() error                       { close(d.setting); <-d.release; return nil }
+func (d *deadlineBarrier) SetReadDeadline(time.Time) error  { return d.set() }
+func (d *deadlineBarrier) SetWriteDeadline(time.Time) error { return d.set() }
+
+func TestInstallDeadlineBeforeIO(t *testing.T) {
+	for _, read := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			d := &deadlineBarrier{setting: make(chan struct{}), release: make(chan struct{})}
+			var r duplex.Reader
+			var w duplex.Writer
+			if read {
+				_, _ = d.WriteString("r")
+				go func() { _, _ = r.Append(d) }()
+			} else {
+				go func() { _ = w.Swap(t.Context(), d) }()
+			}
+			<-d.setting
+			finished := make(chan error, 1)
+			go func() {
+				var err error
+				if read {
+					_, err = r.Read(make([]byte, 1))
+				} else {
+					_, err = w.Write([]byte("w"))
+				}
+				finished <- err
+			}()
+			synctest.Wait()
+			select {
+			case err := <-finished:
+				t.Errorf("used stream before deadline was installed: %v", err)
+				close(d.release)
+				return
+			default:
+			}
+			close(d.release)
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+			_ = r.Close()
+			_ = w.Close()
+		})
+	}
+}
+
+type failedClose struct{ io.Writer }
+
+func (failedClose) Close() error { return io.ErrClosedPipe }
+
+func TestSwapTransfersOwnershipOnOldCloseError(t *testing.T) {
+	if err := new(duplex.ReplacedStreamError); err.Error() == "" || err.Unwrap() != nil {
+		t.Fatal("invalid zero ReplacedStreamError")
+	}
+	var w duplex.Writer
+	defer func() { _ = w.Close() }()
+	if err := w.Swap(t.Context(), failedClose{io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	var next bytes.Buffer
+	err := w.Swap(t.Context(), &next)
+	if _, ok := errors.AsType[*duplex.ReplacedStreamError](err); !ok || !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Swap = %v", err)
+	}
+	if _, err := w.Write([]byte("ok")); err != nil || next.String() != "ok" {
+		t.Fatalf("installed writer = %q, %v", next.String(), err)
+	}
+}
+
+type rejectingStream struct{ bytes.Buffer }
+
+func (*rejectingStream) SetReadDeadline(time.Time) error  { return io.ErrClosedPipe }
+func (*rejectingStream) SetWriteDeadline(time.Time) error { return io.ErrClosedPipe }
+
+func TestRejectedInheritedDeadline(t *testing.T) {
+	d := time.Now().Add(time.Hour)
+	var w duplex.Writer
+	defer func() { _ = w.Close() }()
+	old := &deadlineHalf{Writer: new(bytes.Buffer), calls: new(calls)}
+	if err := w.Swap(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.SetWriteDeadline(d); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Swap(t.Context(), new(rejectingStream)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Swap = %v", err)
+	}
+	if _, err := w.Write([]byte("old")); err != nil || old.Writer.(*bytes.Buffer).String() != "old" {
+		t.Fatal("failed installation displaced the old writer")
+	}
+	var r duplex.Reader
+	defer func() { _ = r.Close() }()
+	_ = r.SetReadDeadline(d)
+	if done, err := r.Append(new(rejectingStream)); done != nil || !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Append returned done=%v, err=%v", done != nil, err)
+	}
+}
+
+type deadlineHook struct {
+	bytes.Buffer
+	set func() error
+}
+
+func (s *deadlineHook) SetReadDeadline(time.Time) error  { return s.set() }
+func (s *deadlineHook) SetWriteDeadline(time.Time) error { return s.set() }
+
+func TestInstallDeadlinePanic(t *testing.T) {
+	var r duplex.Reader
+	var w duplex.Writer
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	s := &deadlineHook{set: func() error { panic("deadline") }}
+	for _, install := range []func() error{
+		func() error { _, err := r.Append(s); return err },
+		func() error { return w.Swap(t.Context(), s) },
+	} {
+		func() {
+			defer func() {
+				if recover() != "deadline" {
+					t.Error("missing deadline panic")
+				}
+			}()
+			_ = install()
+		}()
+	}
+	if _, err := r.Append(new(bytes.Buffer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Swap(t.Context(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwapOwnershipWithTypedCause(t *testing.T) {
+	var w duplex.Writer
+	defer func() { _ = w.Close() }()
+	cause := &duplex.ReplacedStreamError{Err: io.ErrClosedPipe}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(cause)
+	for _, err := range []error{w.Swap(ctx, io.Discard), w.Swap(t.Context(), &deadlineHook{set: func() error { return cause }})} {
+		if err == cause || !errors.Is(err, cause) {
+			t.Fatalf("installation error = %T %v", err, err)
+		}
+	}
 }

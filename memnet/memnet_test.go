@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/djylb/timeshim"
@@ -286,5 +287,55 @@ func TestLoopbackUDP(t *testing.T) {
 	defer func() { _ = c.Close() }()
 	if a := c.LocalAddr().(*net.UDPAddr); !a.IP.Equal(net.IPv4(127, 0, 0, 1)) || a.Port == 0 {
 		t.Fatalf("bound %v", a)
+	}
+}
+
+func TestDialCancellationReleasesEndpoints(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var n Net
+		l, err := n.Listen(t.Context(), "tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { _, err := n.DialFrom(ctx, netip.IPv6Loopback(), l.Addr().String()); done <- err }()
+		synctest.Wait()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		if len(n.faults.conns) != 0 || len(n.dialPorts) != 0 {
+			t.Fatal("canceled dial retained endpoints")
+		}
+	})
+}
+
+func TestLongTransmission(t *testing.T) {
+	size := int64(1) << 34
+	if int64(int(size)) == size {
+		if d := transmission(int(size), size); d != time.Second {
+			t.Errorf("transmission = %v", d)
+		}
+		if d := transmission(int(size), 1); d != time.Duration(1<<63-1) {
+			t.Errorf("slow transmission = %v", d)
+		}
+	}
+	n := New()
+	clk := timeshim.NewFake(time.Now())
+	n.Clock = clk
+	p, err := n.ListenPacket(t.Context(), "udp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	link := Link{Delay: time.Duration(1 << 62)}
+	n.SetLink(p.LocalAddr().String(), LinkPair{To: link, From: link})
+	if _, err = p.WriteTo([]byte("x"), p.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.(*packetConn).in) != 0 {
+		t.Error("overflowed delay delivered datagram immediately")
 	}
 }

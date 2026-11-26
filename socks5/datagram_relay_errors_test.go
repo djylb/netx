@@ -10,13 +10,14 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/djylb/netx"
 )
 
 // scriptedPacketConn takes every datagram sent and returns the replies and
-// errors of reads in turn, then repeats the last one forever.
+// errors of reads in turn, repeating only an explicitly sticky result.
 type scriptedPacketConn struct {
 	reads  chan scriptedRead
 	done   chan struct{}
@@ -28,6 +29,7 @@ type scriptedPacketConn struct {
 type scriptedRead struct {
 	err     error
 	payload string
+	sticky  bool
 }
 
 func newScriptedPacketConn() *scriptedPacketConn {
@@ -40,7 +42,7 @@ func (c *scriptedPacketConn) WriteTo(p []byte, _ netx.Addr) (int, error) {
 }
 
 func (c *scriptedPacketConn) ReadFrom(p []byte) (int, netx.Addr, error) {
-	if c.last.err == nil || len(c.reads) > 0 {
+	if !c.last.sticky {
 		select {
 		case c.last = <-c.reads:
 		case <-c.done:
@@ -72,13 +74,18 @@ func TestDatagramRelaySkipsICMPErrorsPerDatagram(t *testing.T) {
 	out := newScriptedPacketConn()
 	s := newFakeStream()
 	var reported atomic.Int32
-	done := runRelay(t, t.Context(), &DatagramRelay{OnError: func(error) { reported.Add(1) }}, s, out)
+	registered := make(chan struct{}, 3)
+	done := runRelay(t, t.Context(), &DatagramRelay{Sent: func(netx.Addr, int) { registered <- struct{}{} }, OnError: func(error) { reported.Add(1) }}, s, out)
 	dst := netx.Addr{Name: "x.test", Port: 9}
 	for range 3 {
 		s.send(t, dst, "x")
 	}
-	for out.sent.Load() < 3 {
-		time.Sleep(time.Millisecond)
+	for range 3 {
+		select {
+		case <-registered:
+		case <-time.After(time.Second):
+			t.Fatal("send was not registered")
+		}
 	}
 	out.reads <- scriptedRead{err: icmpErr(syscall.ECONNREFUSED)}
 	out.reads <- scriptedRead{err: icmpErr(syscall.ECONNRESET)}
@@ -112,7 +119,7 @@ func TestDatagramRelayEndsOnStickyResetError(t *testing.T) {
 		t.Run(err.Error(), func(t *testing.T) {
 			checkGoroutines(t)
 			out := newScriptedPacketConn()
-			out.reads <- scriptedRead{err: err}
+			out.reads <- scriptedRead{err: err, sticky: true}
 			s := newFakeStream()
 			var reported atomic.Int32
 			done := runRelay(t, t.Context(), &DatagramRelay{OnError: func(error) { reported.Add(1) }}, s, out)
@@ -162,5 +169,23 @@ func TestDatagramRelayInvalidDatagrams(t *testing.T) {
 		default:
 		}
 		s.send(t, netx.Addr{Name: "refused.test", Port: 9}, "x")
+	}
+}
+
+func TestICMPWhileSendInFlight(t *testing.T) {
+	for _, sent := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			d := datagramRelay{sending: true}
+			taken := make(chan bool, 1)
+			go func() { taken <- d.takeICMPCredit() }()
+			synctest.Wait()
+			d.finishSend(sent)
+			if got := <-taken; got != sent {
+				t.Fatalf("credit = %t, send succeeded = %t", got, sent)
+			}
+			if d.takeICMPCredit() {
+				t.Fatal("credit counted twice")
+			}
+		})
 	}
 }

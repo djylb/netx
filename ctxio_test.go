@@ -49,17 +49,17 @@ func TestDoWithContext(t *testing.T) {
 	if _, err := io.ReadFull(a, make([]byte, 1)); err != nil {
 		t.Fatalf("connection unusable after DoWithContext: %v", err)
 	}
-	// A connection without deadlines is closed to interrupt it.
+	// A connection without deadlines must remain usable by its owner.
 	p, q := net.Pipe()
-	defer func() { _ = q.Close() }()
+	defer func() { _ = p.Close(); _ = q.Close() }()
 	nd := &noDeadlinePipe{p}
-	ctx, cancel = context.WithCancel(context.Background())
-	time.AfterFunc(20*time.Millisecond, cancel)
-	if err := DoWithContext(ctx, nd, func() error {
-		_, err := nd.Read(make([]byte, 1))
-		return err
-	}); !errors.Is(err, context.Canceled) {
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	if err := DoWithContext(ctx, nd, func() error { t.Error("started uninterruptible operation"); return nil }); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("no deadlines: error = %v", err)
+	}
+	if err := p.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -73,16 +73,18 @@ type tlsShaped struct {
 	net.Conn
 }
 
+func (c tlsShaped) NetxOwned() OwnedLayers                   { return OwnedLayers{Self: c, First: c.Conn} }
 func (c tlsShaped) NetConn() net.Conn                        { return c.Conn }
 func (c tlsShaped) HandshakeContext(_ context.Context) error { return nil }
 
-// borrower has a NetConn method but no handshake: what it returns is not its
+// borrower has both TLS methods, but the transport it returns is not its
 // own to close.
 type borrower struct {
 	net.Conn
 }
 
-func (c borrower) NetConn() net.Conn { return c.Conn }
+func (borrower) HandshakeContext(context.Context) error { return nil }
+func (c borrower) NetConn() net.Conn                    { return c.Conn }
 
 func TestCloseBeneathTLS(t *testing.T) {
 	isClosed := func(c net.Conn) bool {
@@ -94,7 +96,7 @@ func TestCloseBeneathTLS(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, b) }()
 	CloseBeneathTLS(borrower{a})
 	if isClosed(a) {
-		t.Fatal("closed the connection beneath a wrapper without a handshake")
+		t.Fatal("closed a borrowed TLS transport")
 	}
 	CloseBeneathTLS(tlsShaped{a})
 	if !isClosed(a) {

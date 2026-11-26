@@ -2,10 +2,13 @@ package duplex
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
 // Writer is a write half whose stream can be swapped while it is in use,
@@ -27,7 +30,7 @@ type Writer struct {
 	deadline time.Time // under mu
 	w        io.Writer // under mu
 	changed  waiter    // under mu
-	writes   int       // writes in progress on w; under mu
+	writing  bool      // a Write owns the stream; under mu
 	gen      uint64    // counts the changes of deadline and stream, see Reader.gen; under mu
 	mu       sync.Mutex
 	set      bool // w was installed, perhaps nil; under mu
@@ -44,7 +47,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	w.mu.Lock()
-	for !w.closed && (w.swapping || !w.set) {
+	for !w.closed && (w.swapping || !w.set || w.writing) {
 		if err := w.changed.wait(&w.mu, w.deadline, nil); err != nil {
 			w.mu.Unlock()
 			return 0, err
@@ -59,30 +62,25 @@ func (w *Writer) Write(p []byte) (int, error) {
 		w.mu.Unlock()
 		return 0, errNoWriter
 	}
-	w.writes++
+	w.writing = true
 	w.mu.Unlock()
-
-	n, err := h.Write(p)
-
-	w.mu.Lock()
-	if w.writes--; w.writes == 0 && w.swapping {
+	defer func() {
+		w.mu.Lock()
+		w.writing = false
 		w.changed.broadcast()
-	}
-	w.mu.Unlock()
-	return n, err
+		w.mu.Unlock()
+	}()
+	return h.Write(p)
 }
 
-// Swap makes next the stream that writes go to. It waits for the writes in
-// progress to end, holding back new ones, so that each Write goes whole to
-// one stream and the old stream gets nothing after them. Then it installs
-// next, sets the write deadline of w on it, the zero time included, when it
-// has SetWriteDeadline, and closes the old stream, unless it is next,
-// ending it for its reader; it returns the error of that Close.
+// Swap waits for active writes, sets the inherited write deadline on next,
+// installs it, and closes the previous stream unless it is next. New writes
+// wait for the installation. Each Write goes wholly to one stream.
 //
-// Swap dials nothing: a caller that moves to a new connection prepares next
-// first, while writes go on into the old one. When ctx ends or w is closed
-// before the writes in progress do, Swap returns context.Cause(ctx) or
-// net.ErrClosed and leaves both streams as they were, next with the caller.
+// A nil error or a direct *ReplacedStreamError transfers ownership of next.
+// The latter reports an error closing the previous stream. Test the returned
+// error with a type assertion. All other errors leave next with the caller.
+// Cancellation before installation returns an error matching context.Cause(ctx).
 // Swaps run one at a time, in no set order: a sender whose receiver must
 // get the streams in the order of the swaps opens each stream and swaps to
 // it under one lock, or from one goroutine.
@@ -90,41 +88,73 @@ func (w *Writer) Swap(ctx context.Context, next io.Writer) error {
 	if w == nil {
 		return net.ErrClosed
 	}
+	old, err := w.install(ctx, next)
+	if err != nil {
+		return fmt.Errorf("duplex: installing stream: %w", err)
+	}
+	if cl, ok := old.(io.Closer); ok && !netutil.Same(old, next) {
+		if err := cl.Close(); err != nil {
+			return &ReplacedStreamError{Err: err}
+		}
+	}
+	return nil
+}
+
+func (w *Writer) install(ctx context.Context, next io.Writer) (io.Writer, error) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	for w.swapping && !w.closed && ctx.Err() == nil {
 		_ = w.changed.wait(&w.mu, time.Time{}, ctx.Done())
 	}
-	if w.closed || ctx.Err() != nil {
-		closed := w.closed
-		w.mu.Unlock()
-		if closed {
-			return net.ErrClosed
-		}
-		return context.Cause(ctx)
+	if w.closed {
+		return nil, net.ErrClosed
+	}
+	if ctx.Err() != nil {
+		return nil, context.Cause(ctx)
 	}
 	w.swapping = true
-	for w.writes > 0 && !w.closed && ctx.Err() == nil {
+	defer func() { w.swapping = false; w.changed.broadcast() }()
+	for w.writing && !w.closed && ctx.Err() == nil {
 		_ = w.changed.wait(&w.mu, time.Time{}, ctx.Done())
 	}
-	w.swapping = false
-	w.changed.broadcast()
-	if w.closed || w.writes > 0 {
-		closed := w.closed
-		w.mu.Unlock()
-		if closed {
-			return net.ErrClosed
+	for !w.closed && ctx.Err() == nil {
+		deadline, gen := w.deadline, w.gen
+		err := func() error {
+			w.mu.Unlock()
+			defer w.mu.Lock()
+			return setStreamWriteDeadline(next, deadline)
+		}()
+		if w.closed || ctx.Err() != nil || gen != w.gen {
+			continue
 		}
-		return context.Cause(ctx)
+		if err != nil {
+			return nil, err
+		}
+		old := w.w
+		w.w, w.set = next, true
+		w.gen++
+		return old, nil
 	}
-	old := w.w
-	w.w, w.set = next, true
-	w.gen++
-	w.mu.Unlock()
-	_ = w.applyDeadline()
-	if cl, ok := old.(io.Closer); ok && !same(old, next) {
-		return cl.Close()
+	if w.closed {
+		return nil, net.ErrClosed
 	}
-	return nil
+	return nil, context.Cause(ctx)
+}
+
+// ReplacedStreamError means Swap installed next and closing the previous stream failed.
+type ReplacedStreamError struct{ Err error }
+
+func (e *ReplacedStreamError) Error() string {
+	if e == nil || e.Err == nil {
+		return "duplex: closing the replaced stream failed"
+	}
+	return e.Err.Error()
+}
+func (e *ReplacedStreamError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // SetWriteDeadline sets the deadline for writes and their waits, and on
@@ -155,15 +185,7 @@ func (w *Writer) applyDeadline() error {
 		w.mu.Lock()
 		h, t, gen := w.w, w.deadline, w.gen
 		w.mu.Unlock()
-		if h == nil {
-			return nil
-		}
-		var err error
-		if d, ok := h.(writeDeadliner); ok {
-			err = d.SetWriteDeadline(t)
-		} else {
-			err = noDeadline(t, errNoWriteDeadline)
-		}
+		err := setStreamWriteDeadline(h, t)
 		w.mu.Lock()
 		latest := w.gen == gen
 		w.mu.Unlock()
@@ -171,6 +193,16 @@ func (w *Writer) applyDeadline() error {
 			return err
 		}
 	}
+}
+
+func setStreamWriteDeadline(h io.Writer, t time.Time) error {
+	if h == nil {
+		return nil
+	}
+	if d, ok := h.(writeDeadliner); ok {
+		return d.SetWriteDeadline(t)
+	}
+	return noDeadline(t, errNoWriteDeadline)
 }
 
 // Close closes the current stream and ends the writes and swaps that wait.

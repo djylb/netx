@@ -1,6 +1,9 @@
 package httphead
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Framing is how the body of a message is delimited (RFC 9112, section 6).
 type Framing uint8
@@ -39,7 +42,11 @@ func (f Framing) String() string {
 // than chunked alone gives ErrTransferCoding. A Content-Length of 0 is
 // NoBody.
 func RequestBody(h Header, minor int) (Framing, int64, error) {
-	te, length, hasLength, err := framingFields(h)
+	te, _, err := transferEncoding(h, false)
+	if err != nil {
+		return 0, 0, err
+	}
+	length, hasLength, err := ContentLength(h)
 	switch {
 	case err != nil:
 		return 0, 0, err
@@ -61,34 +68,34 @@ func RequestBody(h Header, minor int) (Framing, int64, error) {
 // code and header h, to a request with method method, is delimited, the length for
 // Length, and, for Chunked and UntilClose, the transfer codings other than
 // chunked as sent, such as "gzip", which the body is still encoded with. A
-// response to HEAD and one with a 1xx, 204 or 304 code has no body, whatever
+// response to HEAD or successful CONNECT and one with a 1xx, 204 or 304 code has no body, whatever
 // its fields say. Transfer-Encoding overrides Content-Length (RFC 9112,
 // section 6.3); a list that does not end in chunked is read until close,
 // and one that holds chunked before its end is an error, as are invalid or
 // differing Content-Length values. A response with neither is read until
 // close.
 func ResponseBody(method string, code int, h Header) (Framing, int64, string, error) {
-	if method == "HEAD" || code < 200 || code == 204 || code == 304 {
+	if method == "HEAD" || code < 200 || code == 204 || code == 304 || method == "CONNECT" && code/100 == 2 {
 		return NoBody, 0, "", nil
 	}
-	te, length, hasLength, err := framingFields(h)
+	te, final, err := transferEncoding(h, true)
 	switch {
-	case err != nil && te == "":
+	case err != nil:
 		return 0, 0, "", err
 	case te != "":
-		codings, last := "", te
-		if i := strings.LastIndexByte(te, ','); i >= 0 {
-			codings, last = TrimOWS(te[:i]), TrimOWS(te[i+1:])
-		}
-		for t := range Tokens(codings) {
-			if strings.EqualFold(t, "chunked") {
-				return 0, 0, "", malformed("chunked before the last transfer coding")
+		if strings.EqualFold(te[final:], "chunked") {
+			codings := ""
+			if final > 0 {
+				codings = te[:final-2]
 			}
-		}
-		if strings.EqualFold(last, "chunked") {
 			return Chunked, 0, codings, nil
 		}
 		return UntilClose, 0, te, nil
+	}
+	length, hasLength, err := ContentLength(h)
+	switch {
+	case err != nil:
+		return 0, 0, "", err
 	case hasLength && length > 0:
 		return Length, length, "", nil
 	case hasLength:
@@ -97,23 +104,101 @@ func ResponseBody(method string, code int, h Header) (Framing, int64, string, er
 	return UntilClose, 0, "", nil
 }
 
-// framingFields returns the transfer codings, all Transfer-Encoding fields
-// joined, and the Content-Length.
-func framingFields(h Header) (te string, length int64, hasLength bool, err error) {
-	length = -1
+// transferEncoding joins coding elements and records the start of the last one.
+// Commas inside quoted parameters belong to the value, including after an escape.
+func transferEncoding(h Header, response bool) (string, int, error) {
+	var enc strings.Builder
+	var final int
+	var chunked bool
 	for _, f := range h {
-		switch {
-		case strings.EqualFold(f.Name, "Transfer-Encoding"):
-			v := f.Value
-			if v == "" {
-				err = malformed("empty Transfer-Encoding")
-				continue
+		if !strings.EqualFold(f.Name, "Transfer-Encoding") {
+			continue
+		}
+		value := f.Value
+		for {
+			coding, rest, ok := cutCoding(value)
+			if !ok {
+				return "", 0, malformed("invalid Transfer-Encoding")
 			}
-			if te != "" {
-				te += ", "
+			if response && chunked {
+				return "", 0, malformed("chunked before the last transfer coding")
 			}
-			te += v
-		case strings.EqualFold(f.Name, "Content-Length"):
+			if enc.Len() > 0 {
+				enc.WriteString(", ")
+			}
+			final = enc.Len()
+			enc.WriteString(coding)
+			chunked = strings.EqualFold(coding, "chunked")
+			if rest == "" {
+				break
+			}
+			value = rest[1:]
+		}
+	}
+	return enc.String(), final, nil
+}
+
+// cutCoding consumes one transfer coding and its parameters up to the next comma.
+func cutCoding(value string) (coding, rest string, ok bool) {
+	start := strings.TrimLeft(value, " \t")
+	name, rest := cutToken(start)
+	if name == "" {
+		return "", "", false
+	}
+	for {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" || rest[0] == ',' {
+			return strings.TrimRight(start[:len(start)-len(rest)], " \t"), rest, true
+		}
+		if rest[0] != ';' || strings.EqualFold(name, "chunked") {
+			return "", "", false
+		}
+		key, tail := cutToken(strings.TrimLeft(rest[1:], " \t"))
+		tail = strings.TrimLeft(tail, " \t")
+		if key == "" || tail == "" || tail[0] != '=' {
+			return "", "", false
+		}
+		rest, ok = cutParameterValue(strings.TrimLeft(tail[1:], " \t"))
+		if !ok {
+			return "", "", false
+		}
+	}
+}
+
+func cutToken(s string) (token, rest string) {
+	i := 0
+	for i < len(s) && tokenChars[s[i]] {
+		i++
+	}
+	return s[:i], s[i:]
+}
+
+func cutParameterValue(s string) (string, bool) {
+	if s == "" || s[0] != '"' {
+		token, rest := cutToken(s)
+		return rest, token != ""
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			return s[i+1:], true
+		case '\\':
+			i++
+			if i == len(s) {
+				return "", false
+			}
+		}
+		if !ValidFieldValue(s[i : i+1]) {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// ContentLength returns the validated length and whether the field is present.
+func ContentLength(h Header) (length int64, hasLength bool, err error) {
+	for _, f := range h {
+		if strings.EqualFold(f.Name, "Content-Length") {
 			empty := true
 			for t := range Tokens(f.Value) {
 				empty = false
@@ -129,22 +214,13 @@ func framingFields(h Header) (te string, length int64, hasLength bool, err error
 			}
 		}
 	}
-	return te, length, hasLength, err
+	return length, hasLength, err
 }
 
 // parseLength parses a Content-Length value, decimal digits only.
 func parseLength(s string) (int64, bool) {
-	if s == "" || len(s) > 18 { // longer might not fit an int64
-		return 0, false
-	}
-	var n int64
-	for i := range len(s) {
-		if !isDigit(s[i]) {
-			return 0, false
-		}
-		n = n*10 + int64(s[i]-'0')
-	}
-	return n, true
+	n, err := strconv.ParseUint(s, 10, 63)
+	return int64(n), err == nil
 }
 
 // ParseChunkSize parses the chunk-size line of a chunked body, without its
@@ -181,10 +257,8 @@ ext:
 	if len(rest) > 0 && rest[0] != ';' {
 		return 0, malformed("chunk extension")
 	}
-	for _, c := range rest {
-		if c < ' ' && c != '\t' || c == 0x7f {
-			return 0, malformed("chunk extension")
-		}
+	if !ValidFieldValue(rest) {
+		return 0, malformed("chunk extension")
 	}
 	return size, nil
 }

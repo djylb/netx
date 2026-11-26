@@ -336,3 +336,12 @@ func TestPacketConnUDP(t *testing.T) {
 		t.Errorf("LocalAddr %v", pc.LocalAddr())
 	}
 }
+
+func TestTypedNilPacketConn(t *testing.T) {
+	for _, pc := range []net.PacketConn{nil, (*net.UDPConn)(nil)} {
+		c := new(Dialer).WrapPacketConn(pc)
+		if err := c.SetDeadline(time.Time{}); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("SetDeadline = %v", err)
+		}
+	}
+}

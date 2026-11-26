@@ -152,15 +152,15 @@ func ParseHeader(lines string, fields Header) (Header, error) {
 			if lines != "" {
 				return fields, malformed("data after the empty line")
 			}
-			break
+			return fields, nil
 		}
-		f, err := parseField(line)
+		f, err := ParseField(line)
 		if err != nil {
 			return fields, err
 		}
 		fields = append(fields, f)
 	}
-	return fields, nil
+	return fields, malformed("missing empty line")
 }
 
 // split splits a head into its start line and fields.
@@ -195,9 +195,9 @@ func nextLine(s string) (string, string, error) {
 	return line, after, nil
 }
 
-// parseField parses a field line "name: value".
-func parseField(line string) (Field, error) {
-	if line[0] == ' ' || line[0] == '\t' {
+// ParseField parses a single field line without its line ending.
+func ParseField(line string) (Field, error) {
+	if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
 		return Field{}, malformed("obsolete line folding")
 	}
 	colon := strings.IndexByte(line, ':')

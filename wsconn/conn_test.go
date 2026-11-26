@@ -489,3 +489,49 @@ func TestReadMessageLimitAllocs(t *testing.T) {
 		t.Fatalf("%v allocs per message", n)
 	}
 }
+
+type rejectWriteDeadline struct{ net.Conn }
+
+func (rejectWriteDeadline) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
+
+func TestPingCallbackClosesConn(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		input := frame(finBit|opPing, true, []byte("p"))
+		if !reject {
+			input = append(input, frame(finBit|opClose, true, nil)...)
+		}
+		raw := &memConn{r: bytes.NewReader(input)}
+		var transport net.Conn = raw
+		if reject {
+			transport = rejectWriteDeadline{raw}
+		}
+		calls := 0
+		c := newTestConn(transport, nil, false, &Options{OnPing: func(c *Conn, data []byte) {
+			calls++
+			if string(data) != "p" || len(raw.written()) != 0 {
+				t.Errorf("ping = %q, output before callback = %x", data, raw.written())
+			}
+			if err := c.Close(); err != nil {
+				t.Errorf("close = %v", err)
+			}
+		}})
+		_, _, err := c.ReadMessage()
+		var ce *CloseError
+		if calls != 1 || reject && !errors.Is(err, net.ErrClosed) || !reject && !errors.As(err, &ce) {
+			t.Fatalf("reject = %t, callbacks = %d, read = %v", reject, calls, err)
+		}
+		if reject && len(raw.written()) != 0 {
+			t.Fatal("unbounded close write")
+		}
+	}
+}
+
+func TestPongRequiresWriteBound(t *testing.T) {
+	input := cat(frame(finBit|opPing, true, nil), frame(finBit|opBinary, true, []byte("next")))
+	raw := &memConn{r: bytes.NewReader(input)}
+	c := newTestConn(rejectWriteDeadline{raw}, nil, false, nil)
+	defer c.Abort(nil)
+	if _, p, err := c.ReadMessage(); string(p) != "next" || err != nil || len(raw.written()) != 0 {
+		t.Fatalf("read = %q, %v; unbounded output = %x", p, err, raw.written())
+	}
+}

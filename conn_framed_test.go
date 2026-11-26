@@ -243,8 +243,8 @@ func TestFramedConnHelpersHandleNilUnderlyingConn(t *testing.T) {
 	if _, err := nilConn.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("nil Write() error = %v, want %v", err, net.ErrClosed)
 	}
-	if err := nilConn.Close(); err != nil {
-		t.Fatalf("nil Close() error = %v, want nil, as for the other wrappers", err)
+	if err := nilConn.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("nil Close() error = %v, want %v", err, net.ErrClosed)
 	}
 	if err := nilConn.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("nil SetDeadline() error = %v, want %v", err, net.ErrClosed)
@@ -506,6 +506,9 @@ func TestFramedConnCompleteWriteWithErrorDoesNotDesync(t *testing.T) {
 
 	if err := fc.WriteFrame([]byte("one")); !errors.Is(err, observeErr) || errors.Is(err, ErrFrameDesync) {
 		t.Fatalf("WriteFrame() error = %v, want %v without desync", err, observeErr)
+	}
+	if n, err := fc.Write([]byte("one")); n != 3 || !errors.Is(err, observeErr) {
+		t.Fatalf("Write = %d, %v", n, err)
 	}
 	raw.err = nil
 	if err := fc.WriteFrame([]byte("two")); err != nil {

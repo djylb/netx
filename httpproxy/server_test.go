@@ -24,6 +24,7 @@ import (
 	"github.com/djylb/netx/httphead"
 	"github.com/djylb/netx/httpproxy"
 	"github.com/djylb/netx/internal/nettest"
+	"github.com/djylb/netx/memnet"
 	"github.com/djylb/netx/proxydial"
 )
 
@@ -449,7 +450,15 @@ func TestConnectWithTransport(t *testing.T) {
 
 // One client connection carries requests to different hosts.
 func TestKeepAliveAcrossHosts(t *testing.T) {
-	o1 := origin(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "one") })
+	o1 := origin(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/a" {
+			_, _ = io.WriteString(w, "one")
+			return
+		}
+		w.Header().Set("Content-Length", "0")
+		w.Header().Set("Connection", "Content-Length")
+		w.WriteHeader(http.StatusOK)
+	})
 	o2 := origin(t, func(w http.ResponseWriter, r *http.Request) {
 		w.(http.Flusher).Flush() // chunked
 		_, _ = io.WriteString(w, "two")
@@ -465,13 +474,18 @@ func TestKeepAliveAcrossHosts(t *testing.T) {
 	br := bufio.NewReader(c)
 	// Pipelined: both requests are sent before either response.
 	_, _ = fmt.Fprintf(c, "GET %s/a HTTP/1.1\r\nHost: x\r\n\r\nPOST %s/b HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc", o1.URL, o2.URL)
-	for i, want := range []string{"one", "two", "one"} {
+	for i, want := range []string{"", "two", "one"} {
 		if i == 2 {
 			_, _ = fmt.Fprintf(c, "GET %s/c HTTP/1.1\r\n\r\n", o1.URL)
 		}
 		resp, err := http.ReadResponse(br, nil)
 		if err != nil {
 			t.Fatalf("response %d: %v", i, err)
+		}
+		if want == "" && resp.ContentLength != 0 {
+			_ = c.Close()
+			_ = resp.Body.Close()
+			t.Fatalf("length = %d", resp.ContentLength)
 		}
 		b, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
@@ -772,4 +786,32 @@ func TestConnectNegativeTimeouts(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 	assertEcho(t, c, "hello")
+}
+
+func TestTruncatedFixedBody(t *testing.T) {
+	for _, direction := range []string{"request", "response"} {
+		t.Run(direction, func(t *testing.T) {
+			client, proxy := memnet.Pipe()
+			target, origin := memnet.Pipe()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = origin.Close() }()
+			s := &httpproxy.Server{Dial: func(context.Context, *httpproxy.Request) (net.Conn, error) { return target, nil }}
+			defer func() { _ = s.Close() }()
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- s.ServeConn(ctx, proxy) }()
+			if direction == "request" {
+				_, _ = io.WriteString(client, "POST http://"+t.Name()+"/ HTTP/1.1\r\nContent-Length: 4\r\n\r\nx")
+				_ = client.(interface{ CloseWrite() error }).CloseWrite()
+			} else {
+				_, _ = io.WriteString(client, "GET http://"+t.Name()+"/ HTTP/1.1\r\n\r\n")
+				_, _ = io.WriteString(origin, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx")
+				_ = origin.(interface{ CloseWrite() error }).CloseWrite()
+			}
+			if err := <-done; !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("ServeConn = %v, want truncated body", err)
+			}
+		})
+	}
 }

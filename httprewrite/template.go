@@ -96,6 +96,7 @@ package httprewrite
 
 import (
 	"errors"
+	"github.com/djylb/netx/httphead"
 	"net/http"
 	"strings"
 	"sync"
@@ -174,6 +175,9 @@ type segment struct {
 // built-in ones. Variable names consist of ASCII letters, digits and
 // underscores and are case-sensitive.
 func Compile(src string, vars Vars) (*Template, error) {
+	if !httphead.ValidFieldValue(src) {
+		return nil, &rewriteError{ErrInvalidValue, "control character in template " + quote(src)}
+	}
 	t := &Template{src: src}
 	var lit strings.Builder
 	flush := func() {
@@ -184,9 +188,6 @@ func Compile(src string, vars Vars) (*Template, error) {
 	}
 	for i := 0; i < len(src); {
 		c := src[i]
-		if c < ' ' && c != '\t' || c == 0x7f {
-			return nil, &rewriteError{ErrInvalidValue, "control character in template " + quote(src)}
-		}
 		if c != '$' || i+1 == len(src) {
 			lit.WriteByte(c)
 			i++
@@ -270,7 +271,7 @@ func (t *Template) Append(dst []byte, c *Context) ([]byte, error) {
 			dst = append(dst, s.lit...)
 			continue
 		}
-		if !validValue(dst[start:]) {
+		if !httphead.ValidFieldValue(dst[start:]) {
 			return dst[:n], t.invalid()
 		}
 	}
@@ -290,7 +291,7 @@ func (t *Template) Expand(c *Context) (string, error) {
 		return t.segs[0].lit, nil
 	case len(t.segs) == 1 && t.segs[0].str != nil:
 		s := t.segs[0].str(c, t.segs[0].arg)
-		if !validValue(s) {
+		if !httphead.ValidFieldValue(s) {
 			return "", t.invalid()
 		}
 		return s, nil
@@ -319,16 +320,6 @@ func putBuf(b *[]byte) {
 
 func (t *Template) invalid() error {
 	return &rewriteError{ErrInvalidValue, "control character in the expansion of " + quote(t.src)}
-}
-
-// validValue reports whether s has no control character other than tab.
-func validValue[T string | []byte](s T) bool {
-	for i := range len(s) {
-		if c := s[i]; c < ' ' && c != '\t' || c == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 // quote quotes s for an error message without strconv's escapes of

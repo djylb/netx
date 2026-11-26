@@ -15,6 +15,7 @@ import (
 // go to the wrapped connection.
 type PrefixConn struct {
 	conn    net.Conn
+	packet  bool   // prefix is one complete datagram
 	prefix  []byte // under mu
 	mu      sync.Mutex
 	drained atomic.Bool // prefix fully consumed; reads skip the lock
@@ -36,7 +37,10 @@ type PrefixConn struct {
 // bytes, and the returned connection replays the whole datagram, so that
 // sniffing does not cut it short.
 func Peek(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) {
-	return peek(ctx, c, n, func(b []byte) (int, error) {
+	if readsDatagrams(c) {
+		return peek(ctx, c, n, true, c.Read)
+	}
+	return peek(ctx, c, n, false, func(b []byte) (int, error) {
 		for {
 			m, err := c.Read(b)
 			if m > 0 || err != nil || len(b) == 0 {
@@ -50,15 +54,15 @@ func Peek(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) {
 // On a datagram connection it reads one datagram, as Peek does.
 func PeekFull(ctx context.Context, c net.Conn, n int) (net.Conn, []byte, error) {
 	if readsDatagrams(c) {
-		return Peek(ctx, c, n)
+		return peek(ctx, c, n, true, c.Read)
 	}
-	return peek(ctx, c, n, func(b []byte) (int, error) { return io.ReadFull(c, b) })
+	return peek(ctx, c, n, false, func(b []byte) (int, error) { return io.ReadFull(c, b) })
 }
 
-func peek(ctx context.Context, c net.Conn, n int, read func([]byte) (int, error)) (net.Conn, []byte, error) {
+func peek(ctx context.Context, c net.Conn, n int, packet bool, read func([]byte) (int, error)) (net.Conn, []byte, error) {
 	n = max(n, 0)
 	size := n
-	if readsDatagrams(c) {
+	if packet {
 		size = largeBufSize // the whole datagram
 	}
 	b := make([]byte, size)
@@ -69,17 +73,21 @@ func peek(ctx context.Context, c net.Conn, n int, read func([]byte) (int, error)
 		return err
 	})
 	b = b[:m]
-	if m == 0 {
+	if m == 0 && (err != nil || !packet) {
 		return c, nil, err
 	}
-	return NewPrefixConn(c, b), b[:min(m, n)], err
+	return newPrefixConn(c, b, packet), b[:min(m, n)], err
 }
 
 // NewPrefixConn returns c with prefix replayed before its own data. prefix is
 // not copied and must not be modified afterwards.
 func NewPrefixConn(c net.Conn, prefix []byte) *PrefixConn {
-	pc := &PrefixConn{conn: c, prefix: prefix}
-	pc.drained.Store(len(prefix) == 0)
+	return newPrefixConn(c, prefix, false)
+}
+
+func newPrefixConn(c net.Conn, prefix []byte, packet bool) *PrefixConn {
+	pc := &PrefixConn{conn: c, prefix: prefix, packet: packet}
+	pc.drained.Store(len(prefix) == 0 && !pc.packet)
 	return pc
 }
 
@@ -89,10 +97,10 @@ func (c *PrefixConn) Read(b []byte) (int, error) {
 	}
 	if !c.drained.Load() {
 		c.mu.Lock()
-		if len(c.prefix) > 0 {
+		if c.prefix != nil {
 			n := copy(b, c.prefix)
 			c.prefix = c.prefix[n:]
-			if len(c.prefix) == 0 {
+			if len(c.prefix) == 0 || c.packet {
 				c.prefix = nil
 				c.drained.Store(true)
 			}
@@ -117,7 +125,12 @@ func (c *PrefixConn) inner() net.Conn {
 func (c *PrefixConn) Write(b []byte) (int, error) { return c.inner().Write(b) }
 
 // Close implements net.Conn.
-func (c *PrefixConn) Close() error { return c.inner().Close() }
+func (c *PrefixConn) Close() error {
+	if c == nil {
+		return net.ErrClosed
+	}
+	return c.inner().Close()
+}
 
 // LocalAddr implements net.Conn.
 func (c *PrefixConn) LocalAddr() net.Addr { return c.inner().LocalAddr() }
@@ -151,7 +164,7 @@ func (c *PrefixConn) WriteTo(w io.Writer) (int64, error) {
 	c.drained.Store(true)
 	c.mu.Unlock()
 
-	if len(prefix) > 0 {
+	if len(prefix) > 0 || c.packet && prefix != nil {
 		if n, err := writeOnce(w, prefix); err != nil {
 			return int64(n), err
 		}
@@ -182,3 +195,6 @@ func (c *PrefixConn) netxLayer() layerInfo {
 	}
 	return info
 }
+
+// NetxOwned describes the children closed with this layer.
+func (c *PrefixConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

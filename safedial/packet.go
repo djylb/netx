@@ -220,9 +220,9 @@ type (
 // other methods are those of the net.PacketConn it
 // wraps.
 type PacketConn struct {
-	net.PacketConn
-	g *guard
-	w udpAddrPortWriter // the PacketConn's, or nil
+	conn net.PacketConn
+	g    *guard
+	w    udpAddrPortWriter // the PacketConn's, or nil
 }
 
 // WrapPacketConn returns c with every destination checked against d's
@@ -231,10 +231,53 @@ type PacketConn struct {
 // describes, and sent to as a *net.UDPAddr. Checking a datagram to an IP
 // address does not allocate.
 func (d *Dialer) WrapPacketConn(c net.PacketConn) *PacketConn {
-	w := &PacketConn{PacketConn: c}
+	if c == nil || netutil.IsNilPointer(c) {
+		return &PacketConn{}
+	}
+	w := &PacketConn{conn: c}
 	w.w, _ = c.(udpAddrPortWriter)
 	w.g = newGuard(d, func(p []byte, ap netip.AddrPort) { _, _ = w.writeAddrPort(p, ap, nil) })
 	return w
+}
+
+// ReadFrom forwards to the underlying packet connection.
+func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if c == nil || c.conn == nil {
+		return 0, nil, net.ErrClosed
+	}
+	return c.conn.ReadFrom(p)
+}
+
+// LocalAddr forwards to the underlying packet connection.
+func (c *PacketConn) LocalAddr() net.Addr {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.LocalAddr()
+}
+
+// SetDeadline forwards to the underlying packet connection.
+func (c *PacketConn) SetDeadline(t time.Time) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetDeadline(t)
+}
+
+// SetReadDeadline forwards to the underlying packet connection.
+func (c *PacketConn) SetReadDeadline(t time.Time) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline forwards to the underlying packet connection.
+func (c *PacketConn) SetWriteDeadline(t time.Time) error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetWriteDeadline(t)
 }
 
 // writeAddrPort sends p to ap, with addr, if not nil, the same address as
@@ -246,13 +289,19 @@ func (c *PacketConn) writeAddrPort(p []byte, ap netip.AddrPort, addr net.Addr) (
 	if addr == nil {
 		addr = net.UDPAddrFromAddrPort(ap)
 	}
-	return c.PacketConn.WriteTo(p, addr)
+	return c.conn.WriteTo(p, addr)
 }
 
 // WriteTo sends p to addr, a *net.UDPAddr, a netx.Addr or another address
 // whose String is "host:port", if the policy allows it.
 func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if c == nil || c.conn == nil {
+		return 0, net.ErrClosed
+	}
 	if a, ok := addr.(*net.UDPAddr); ok && a != nil {
+		if !netutil.ValidPort(a.Port) {
+			return 0, netx.ErrInvalidAddr
+		}
 		ap := a.AddrPort()
 		if err := c.g.d.Check(packetNetwork, ap); err != nil {
 			return 0, err
@@ -279,6 +328,9 @@ func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 // WriteToUDPAddrPort sends p to ap if the policy allows it, without
 // allocating with a *net.UDPConn.
 func (c *PacketConn) WriteToUDPAddrPort(p []byte, ap netip.AddrPort) (int, error) {
+	if c == nil || c.conn == nil {
+		return 0, net.ErrClosed
+	}
 	if err := c.g.d.Check(packetNetwork, ap); err != nil {
 		return 0, err
 	}
@@ -288,7 +340,10 @@ func (c *PacketConn) WriteToUDPAddrPort(p []byte, ap netip.AddrPort) (int, error
 // ReadFromUDPAddrPort reads a datagram and returns its source, from any
 // address.
 func (c *PacketConn) ReadFromUDPAddrPort(p []byte) (int, netip.AddrPort, error) {
-	if r, ok := c.PacketConn.(udpAddrPortReader); ok {
+	if c == nil || c.conn == nil {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
+	if r, ok := c.conn.(udpAddrPortReader); ok {
 		return r.ReadFromUDPAddrPort(p)
 	}
 	n, addr, err := c.ReadFrom(p)
@@ -298,6 +353,9 @@ func (c *PacketConn) ReadFromUDPAddrPort(p []byte) (int, netip.AddrPort, error) 
 // Close cancels the lookups of host names and closes the wrapped
 // connection.
 func (c *PacketConn) Close() error {
+	if c == nil || c.conn == nil {
+		return net.ErrClosed
+	}
 	c.g.close()
-	return c.PacketConn.Close()
+	return c.conn.Close()
 }

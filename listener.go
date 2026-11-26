@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"sync"
+
+	"github.com/djylb/netx/internal/netutil"
 )
 
-var errNilListenerConn = errors.New("netx: nil connection")
+var errNilConn = errors.New("netx: nil connection")
 
 // ChanListener is a net.Listener fed by the program instead of a socket.
 // Deliver hands it a connection accepted elsewhere, and Dial connects to it
@@ -54,8 +56,11 @@ func NewChanListener(addr net.Addr, queue int) *ChanListener {
 // failure it returns ctx.Err() or net.ErrClosed and c stays the caller's, to
 // close or to hand elsewhere.
 func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
-	if c == nil {
-		return errNilListenerConn
+	if l == nil {
+		return net.ErrClosed
+	}
+	if c == nil || netutil.IsNilPointer(c) {
+		return errNilConn
 	}
 	l.init()
 	select {
@@ -83,7 +88,7 @@ func (l *ChanListener) Deliver(ctx context.Context, c net.Conn) error {
 // reports whether it did; l then owns c, as after Deliver. Otherwise c stays
 // the caller's.
 func (l *ChanListener) TryDeliver(c net.Conn) bool {
-	if c == nil {
+	if l == nil || c == nil || netutil.IsNilPointer(c) {
 		return false
 	}
 	l.init()
@@ -132,6 +137,9 @@ func (l *ChanListener) Dial(ctx context.Context, remote net.Addr) (net.Conn, err
 // Accept waits for the next queued connection. It returns net.ErrClosed once
 // l is closed.
 func (l *ChanListener) Accept() (net.Conn, error) {
+	if l == nil {
+		return nil, net.ErrClosed
+	}
 	l.init()
 	select {
 	case <-l.done:
@@ -147,19 +155,24 @@ func (l *ChanListener) Accept() (net.Conn, error) {
 }
 
 // Close stops l and closes the connections still queued. Blocked Accept,
-// Deliver and Dial calls return net.ErrClosed. Close always returns nil.
+// Deliver and Dial calls return net.ErrClosed. A nil listener returns net.ErrClosed.
+// Concurrent and reentrant Close calls can return before the queue drains.
 func (l *ChanListener) Close() error {
+	if l == nil {
+		return net.ErrClosed
+	}
 	l.init()
-	l.closeOnce.Do(func() {
-		close(l.done)
+	owner := false
+	l.closeOnce.Do(func() { close(l.done); owner = true })
+	if owner {
 		l.drain()
-	})
+	}
 	return nil
 }
 
 // Addr returns the address given to NewChanListener, or "pipe".
 func (l *ChanListener) Addr() net.Addr {
-	if l.addr == nil {
+	if l == nil || l.addr == nil {
 		return pipeAddr{}
 	}
 	return l.addr
@@ -218,6 +231,9 @@ func (l *SingleConnListener) init() {
 // Accept returns the connection the first time and then blocks until it or
 // l is closed, returning net.ErrClosed.
 func (l *SingleConnListener) Accept() (net.Conn, error) {
+	if l == nil {
+		return nil, net.ErrClosed
+	}
 	l.mu.Lock()
 	c := l.conn
 	l.conn = nil
@@ -233,6 +249,9 @@ func (l *SingleConnListener) Accept() (net.Conn, error) {
 // Close ends a blocked Accept and closes the connection if Accept has not
 // returned it yet.
 func (l *SingleConnListener) Close() error {
+	if l == nil {
+		return net.ErrClosed
+	}
 	l.mu.Lock()
 	c := l.conn
 	l.conn = nil
@@ -246,7 +265,7 @@ func (l *SingleConnListener) Close() error {
 
 // Addr returns the connection's LocalAddr, or "pipe" if it has none.
 func (l *SingleConnListener) Addr() net.Addr {
-	if l.addr == nil {
+	if l == nil || l.addr == nil {
 		return pipeAddr{}
 	}
 	return l.addr
@@ -290,3 +309,6 @@ type pipeAddr struct{}
 
 func (pipeAddr) Network() string { return "pipe" }
 func (pipeAddr) String() string  { return "pipe" }
+
+// NetxOwned describes the children closed with this layer.
+func (c *singleConn) NetxOwned() OwnedLayers { return c.netxLayer().owned() }

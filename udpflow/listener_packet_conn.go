@@ -4,12 +4,10 @@ import (
 	"hash/maphash"
 	"net"
 	"net/netip"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/djylb/netx/internal/clock"
 	"github.com/djylb/netx/internal/dgram"
 	"github.com/djylb/netx/internal/flowtable"
 	"github.com/djylb/netx/internal/netutil"
@@ -54,7 +52,7 @@ type packetConn struct {
 	// from records the explicit reply source, if fixed.
 	from          atomic.Pointer[replySource]
 	membership    flowtable.Membership[packetFlow, peerKey]
-	writeDeadline clock.Deadline
+	writer        dgram.Writer
 	q             dgram.Queue
 	once          sync.Once
 	routedReplies atomic.Bool
@@ -93,14 +91,7 @@ func (c *packetConn) Write(b []byte) (int, error) {
 	if c == nil {
 		return 0, net.ErrClosed
 	}
-	select {
-	case <-c.q.Done():
-		return 0, net.ErrClosed
-	case <-c.writeDeadline.Wait():
-		return 0, os.ErrDeadlineExceeded
-	default:
-	}
-	n, err := c.writeDatagram(b)
+	n, err := c.sock.gate.Write(&c.writer, c.q.Done(), func() (int, error) { return c.writeDatagram(b) })
 	if err == nil {
 		c.q.Touch()
 	}
@@ -160,8 +151,8 @@ func (c *packetConn) shutdown(err error) {
 	c.once.Do(func() {
 		c.l.conns.Remove(c)
 		c.q.Close(err)
-		c.writeDeadline.Stop()
 	})
+	c.writer.Close()
 }
 
 // LocalAddr returns the flow's fixed local destination, or the packet
@@ -187,8 +178,7 @@ func (c *packetConn) SetDeadline(t time.Time) error {
 		return net.ErrClosed
 	}
 	c.q.SetReadDeadline(t)
-	c.writeDeadline.Set(t)
-	return nil
+	return c.writer.SetDeadline(t)
 }
 
 func (c *packetConn) SetReadDeadline(t time.Time) error {
@@ -199,12 +189,10 @@ func (c *packetConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// SetWriteDeadline makes later writes fail once t has passed. A write that is
-// already in progress on the shared socket is not interrupted.
+// SetWriteDeadline bounds waiting, active and future writes of this flow.
 func (c *packetConn) SetWriteDeadline(t time.Time) error {
 	if c == nil || c.q.Closed() {
 		return net.ErrClosed
 	}
-	c.writeDeadline.Set(t)
-	return nil
+	return c.writer.SetDeadline(t)
 }

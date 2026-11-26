@@ -104,12 +104,17 @@ func TestPrefixSet(t *testing.T) {
 			t.Errorf("all does not contain %s", a)
 		}
 	}
-	if len(all.v4) != 1 || len(all.v6) != 1 {
-		t.Errorf("all = %v %v", all.v4, all.v6)
+	if len(all.Prefixes()) != 2 {
+		t.Errorf("all = %v", all.Prefixes())
 	}
 	merged := mustSet(t, "10.0.0.0/9", "10.128.0.0/9", "10.0.0.0/24", "2001:db8::/33", "2001:db8:8000::/33")
-	if len(merged.v4) != 1 || len(merged.v6) != 1 {
-		t.Errorf("adjacent prefixes not merged: %v %v", merged.v4, merged.v6)
+	if len(merged.Prefixes()) != 2 || merged.Len() != 5 {
+		t.Errorf("short set enumerated %v", merged.Prefixes())
+	}
+	// Exercise the range representation, including duplicate prefixes.
+	merged = NewPrefixSet(append(merged.Prefixes(), merged.Prefixes()...)...)
+	if len(merged.Prefixes()) != 2 {
+		t.Errorf("adjacent prefixes not merged: %v", merged.Prefixes())
 	}
 	for _, bad := range []string{"10.0.0.0/33", "example.com", "fe80::1%eth0", "10.0.0.0/8/8"} {
 		if _, err := ParsePrefixSet(bad); !errors.Is(err, ErrInvalidPrefix) || !strings.Contains(err.Error(), bad) {
@@ -490,10 +495,13 @@ func BenchmarkResolve(b *testing.B) {
 func BenchmarkPrefixSetContains(b *testing.B) {
 	var entries []string
 	for i := range 1000 {
-		entries = append(entries, netip.AddrFrom4([4]byte{byte(i >> 4), byte(i << 4), 0, 0}).String()+"/12")
+		entries = append(entries, netip.AddrFrom4([4]byte{byte(i >> 4), byte(i << 4), 0, 0}).String()+"/13")
 	}
 	s := mustSet(b, entries...)
-	a := netip.MustParseAddr("200.1.2.3")
+	if got := len(s.Prefixes()); got != len(entries) {
+		b.Fatalf("generated %d disjoint prefixes, want %d", got, len(entries))
+	}
+	a := netip.AddrFrom4([4]byte{32, 16, 1, 2})
 	b.ReportAllocs()
 	for b.Loop() {
 		s.Contains(a)

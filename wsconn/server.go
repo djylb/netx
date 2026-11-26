@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/djylb/netx/httphead"
@@ -69,10 +68,7 @@ type ServerOptions struct {
 
 // Validate reports a setting out of range, which fails the handshakes.
 func (o *ServerOptions) Validate() error {
-	if err := o.Options.Validate(); err != nil {
-		return err
-	}
-	return validateHandshake(o.MaxHeaderBytes)
+	return o.validateHandshake(o.MaxHeaderBytes)
 }
 
 // AnyOrigin is a ServerOptions.CheckOrigin that accepts every request.
@@ -411,9 +407,6 @@ func statusText(code int) string {
 	return "Error"
 }
 
-// pastDeadline interrupts blocked I/O.
-var pastDeadline = time.Unix(1, 0)
-
 // doHandshake runs fn, an exchange on conn, bounded by ctx, or by timeout
 // when ctx has no deadline and timeout is not negative (zero meaning
 // DefaultHandshakeTimeout). It clears conn's deadline after a success and
@@ -427,35 +420,9 @@ func doHandshake(ctx context.Context, conn net.Conn, timeout time.Duration, fn f
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	deadline, hasDeadline := ctx.Deadline()
-	if hasDeadline {
-		_ = conn.SetDeadline(deadline)
-	}
-	// The interrupt sets the deadline only while fn runs.
-	var mu sync.Mutex
-	running := true
-	stop := context.AfterFunc(ctx, func() {
-		mu.Lock()
-		defer mu.Unlock()
-		if running && conn.SetDeadline(pastDeadline) != nil {
-			_ = conn.Close()
-		}
-	})
-	err := fn()
-	stop()
-	mu.Lock()
-	running = false
-	mu.Unlock()
-	if err == nil {
-		_ = conn.SetDeadline(time.Time{})
-		return nil
-	}
-	_ = conn.Close()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if hasDeadline && netutil.IsDeadlineTimeout(err) {
-		return context.DeadlineExceeded
+	err := netutil.DoWithContext(ctx, conn, fn, true)
+	if err != nil {
+		_ = conn.Close()
 	}
 	return err
 }

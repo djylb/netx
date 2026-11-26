@@ -181,10 +181,12 @@ type clientConn struct {
 	pw            *io.PipeWriter
 	cancel        context.CancelFunc
 
-	rd, wd  *time.Timer // under mu
-	once    sync.Once
-	mu      sync.Mutex
-	expired bool // under mu
+	rd, wd    *streamTimer // under mu
+	once      sync.Once
+	mu        sync.Mutex
+	closed    bool          // under mu
+	expired   bool          // under mu
+	resetDone chan struct{} // reset in progress or complete; under mu
 }
 
 func (c *clientConn) Read(p []byte) (int, error) {
@@ -216,16 +218,22 @@ func (c *clientConn) isExpired() bool {
 // and the response body, and releases the stream.
 func (c *clientConn) Close() error {
 	c.once.Do(func() {
-		_ = c.pw.Close()
-		_ = c.body.Close()
-		c.cancel()
 		c.mu.Lock()
-		for _, t := range []*time.Timer{c.rd, c.wd} {
+		c.closed = true
+		for _, t := range []*streamTimer{c.rd, c.wd} {
 			if t != nil {
 				t.Stop()
 			}
 		}
+		c.rd, c.wd = nil, nil
+		resetDone := c.resetDone
 		c.mu.Unlock()
+		if resetDone != nil {
+			<-resetDone
+		}
+		_ = c.pw.Close()
+		_ = c.body.Close()
+		c.cancel()
 	})
 	return nil
 }
@@ -234,56 +242,65 @@ func (c *clientConn) LocalAddr() net.Addr  { return c.local }
 func (c *clientConn) RemoteAddr() net.Addr { return c.remote }
 
 func (c *clientConn) SetDeadline(t time.Time) error {
-	c.set(&c.rd, t)
-	c.set(&c.wd, t)
-	return nil
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.SetWriteDeadline(t)
 }
 
 func (c *clientConn) SetReadDeadline(t time.Time) error {
-	c.set(&c.rd, t)
-	return nil
+	return c.set(&c.rd, t)
 }
 
 func (c *clientConn) SetWriteDeadline(t time.Time) error {
-	c.set(&c.wd, t)
-	return nil
+	return c.set(&c.wd, t)
 }
 
+type streamTimer struct{ *time.Timer }
+
 // set arms the timer that resets the stream at t.
-func (c *clientConn) set(timer **time.Timer, t time.Time) {
+func (c *clientConn) set(timer **streamTimer, t time.Time) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.closed {
+		c.mu.Unlock()
+		return net.ErrClosed
+	}
 	if *timer != nil {
 		(*timer).Stop()
 		*timer = nil
 	}
 	if t.IsZero() || c.expired {
-		return
+		c.mu.Unlock()
+		return nil
 	}
 	if d := time.Until(t); d > 0 {
-		// A callback that fires while set replaces its timer finds
-		// another timer in place and does nothing.
-		var tm *time.Timer
-		tm = time.AfterFunc(d, func() {
-			c.mu.Lock()
-			if *timer != tm {
-				c.mu.Unlock()
-				return
-			}
-			c.expired = true
-			c.mu.Unlock()
-			c.reset()
-		})
+		tm := new(streamTimer)
+		tm.Timer = time.AfterFunc(d, func() { c.expire(timer, tm) })
 		*timer = tm
-		return
+		c.mu.Unlock()
+		return nil
 	}
-	c.expired = true
-	c.reset()
+	c.resetLocked()
+	return nil
 }
 
-// reset resets the stream: a request body that fails makes the transport
+func (c *clientConn) expire(slot **streamTimer, t *streamTimer) {
+	c.mu.Lock()
+	if c.closed || c.expired || *slot != t {
+		c.mu.Unlock()
+		return
+	}
+	c.resetLocked()
+}
+
+// resetLocked commits expiry under mu, unlocks, and resets the stream: a request body that fails makes the transport
 // reset it, also while it waits for the body, which ctx does not end.
-func (c *clientConn) reset() {
+func (c *clientConn) resetLocked() {
+	c.expired = true
+	done := make(chan struct{})
+	c.resetDone = done
+	c.mu.Unlock()
+	defer close(done)
 	_ = c.pw.CloseWithError(os.ErrDeadlineExceeded)
 	c.cancel()
 }

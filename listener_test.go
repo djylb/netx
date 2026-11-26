@@ -428,3 +428,35 @@ func TestZeroListeners(t *testing.T) {
 	}
 	_ = open.Close()
 }
+
+type listenerCloser struct {
+	net.Conn
+	l *ChanListener
+}
+
+func (c listenerCloser) Close() error { return c.l.Close() }
+
+func TestListenerCloseReentry(t *testing.T) {
+	l := NewChanListener(nil, 1)
+	if !l.TryDeliver(listenerCloser{l: l}) {
+		t.Fatal("delivery failed")
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTypedNilDelivery(t *testing.T) {
+	l := NewChanListener(nil, 2)
+	for _, c := range []net.Conn{nil, (*net.TCPConn)(nil)} {
+		if l.TryDeliver(c) || l.Deliver(t.Context(), c) == nil {
+			t.Fatal("accepted nil connection")
+		}
+	}
+	if err := new(trackedConn).Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("zero tracked Close = %v", err)
+	}
+	if err := (*trackedConn)(nil).Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Close = %v", err)
+	}
+}

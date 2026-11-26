@@ -1,6 +1,9 @@
 package netutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Samples of RFC 3492, section 7.1, that hold no uppercase letters.
 func TestPunycodeRFC3492(t *testing.T) {
@@ -14,6 +17,14 @@ func TestPunycodeRFC3492(t *testing.T) {
 	for _, tt := range tests {
 		if got := Punycode(tt.in); got != tt.want {
 			t.Errorf("Punycode(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestToASCIILabelLength(t *testing.T) {
+	for _, label := range []string{strings.Repeat("a", 64), strings.Repeat("é", 60)} {
+		if s, ok := ToASCII(label); ok {
+			t.Errorf("accepted %d-byte label", len(s))
 		}
 	}
 }

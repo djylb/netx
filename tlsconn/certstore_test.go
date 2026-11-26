@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/djylb/timeshim"
@@ -689,4 +690,89 @@ func TestCertStoreLoadDefaults(t *testing.T) {
 			t.Errorf("MaxEntries %d: %d names kept, want %d", tt.max, n, tt.want)
 		}
 	}
+}
+
+func TestCertStoreDeliveryAfterCallback(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	cert := makeCert(t, nil, nil, now.Add(-time.Hour), now.Add(time.Hour), t.Name())
+	for _, selectID := range []bool{false, true} {
+		clk := timeshim.NewFake(now)
+		s := &CertStore{Clock: clk}
+		mustAdd(t, s, "id", cert)
+		s.SetDefault("id")
+		if selectID {
+			s.Select = func(*tls.ClientHelloInfo) (string, error) { clk.Advance(time.Hour); return "id", nil }
+		} else {
+			s.Load = func(context.Context, string) (*tls.Certificate, error) { clk.Advance(time.Hour); return nil, nil }
+		}
+		if got, err := s.forName(t.Context(), "other"); got != nil || !errors.Is(err, ErrNoCertificate) {
+			t.Errorf("select=%v: returned certificate %v, err %v", selectID, got != nil, err)
+		}
+	}
+}
+
+type checkingClock struct {
+	timeshim.Clock
+	hook func()
+}
+
+func (c checkingClock) Now() time.Time { c.hook(); return c.Clock.Now() }
+
+func TestClockCanCheckFiles(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		cert := newCert(t, 0)
+		dir := t.TempDir()
+		cf, kf := writeCert(t, dir, *cert)
+		s := &CertStore{CheckInterval: time.Nanosecond}
+		if _, err := s.AddFiles("id", cf, kf); err != nil {
+			t.Fatal(err)
+		}
+		writeCert(t, dir, *newCert(t, 0))
+		setModTime(t, time.Now().Add(time.Hour), cf, kf)
+		var entered atomic.Bool
+		done := make(chan struct{})
+		clk := timeshim.NewFake(time.Now().Add(time.Second))
+		s.Clock = checkingClock{clk, func() {
+			if entered.CompareAndSwap(false, true) {
+				s.CheckFiles()
+				close(done)
+			}
+		}}
+		if background {
+			check := s.dueFileCheck(clk.Now())
+			if check == nil {
+				t.Fatal("expected a scheduled check")
+			}
+			check()
+		} else {
+			s.CheckFiles()
+		}
+		<-done
+	}
+}
+
+func TestSharedLoadExpiresBeforeDelivery(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	cert := makeCert(t, nil, nil, now.Add(-time.Hour), now.Add(time.Hour), t.Name())
+	leaf, err := leafOf(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		clk := timeshim.NewFake(now)
+		s := &CertStore{Clock: clk}
+		e := &storeEntry{name: t.Name(), ready: make(chan struct{}), lastUsed: now}
+		s.addLocked(e)
+		done := make(chan error, 1)
+		go func() { _, err := s.loaded(t.Context(), e.name, now); done <- err }()
+		synctest.Wait()
+		s.mu.Lock()
+		s.setCertLocked(e, cert, leaf, now, false)
+		clk.Advance(time.Hour)
+		close(e.ready)
+		s.mu.Unlock()
+		if err := <-done; !errors.Is(err, ErrNotValidNow) {
+			t.Fatalf("loaded = %v", err)
+		}
+	})
 }

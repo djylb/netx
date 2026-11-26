@@ -7,6 +7,9 @@
 // the standard library only.
 package leakcheck
 
+// This file is the standalone source for independently built test suites.
+// Synchronize the whole file, including the runtime stack parser.
+
 import (
 	"bytes"
 	"fmt"

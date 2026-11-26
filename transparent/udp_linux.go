@@ -5,6 +5,7 @@ package transparent
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -204,4 +205,9 @@ func dialUDP(ctx context.Context, local, remote netip.AddrPort) (*net.UDPConn, e
 		return nil, err
 	}
 	return c.(*net.UDPConn), nil
+}
+
+// retryReply reports asynchronous errors about a previous UDP send.
+func retryReply(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH)
 }

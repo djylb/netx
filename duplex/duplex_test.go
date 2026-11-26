@@ -390,7 +390,7 @@ func (s *readerFromSink) ReadFrom(r io.Reader) (int64, error) {
 
 func TestCopyForwarding(t *testing.T) {
 	var sink readerFromSink
-	if n, err := duplex.Join(strings.NewReader("data"), nil).WriteTo(&sink); n != 4 || err != nil || sink.src != nil {
+	if n, err := duplex.Join(strings.NewReader("data"), nil).WriteTo(&sink); n != 4 || err != nil || sink.String() != "data" {
 		t.Fatalf("WriteTo of an io.WriterTo = %d, %v, ReadFrom of %T", n, err, sink.src)
 	}
 	plain := writerToHalf{strings.NewReader("data")}
@@ -400,8 +400,24 @@ func TestCopyForwarding(t *testing.T) {
 	}
 	var out readerFromSink
 	src := writerToHalf{strings.NewReader("data")}
-	if n, err := duplex.Join(nil, &out).ReadFrom(src); n != 4 || err != nil || out.src != io.Reader(src) {
+	if n, err := duplex.Join(nil, &out).ReadFrom(src); n != 4 || err != nil || out.String() != "data" {
 		t.Fatalf("ReadFrom = %d, %v, source %T", n, err, out.src)
+	}
+}
+
+func TestEmptyBulkCopy(t *testing.T) {
+	c := duplex.Join(nil, nil)
+	var sink readerFromSink
+	if n, err := c.WriteTo(&sink); n != 0 || err != nil || sink.src != nil {
+		t.Fatalf("empty read half: %d, %v", n, err)
+	}
+	file, err := os.CreateTemp(t.TempDir(), "empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if n, err := c.ReadFrom(file); n != 0 || err != nil {
+		t.Fatalf("empty file: %d, %v", n, err)
 	}
 }
 
@@ -460,5 +476,66 @@ func TestConcurrent(t *testing.T) {
 		_ = ra.Close()
 		_ = wb.Close()
 		wg.Wait()
+	}
+}
+
+// Each wrapper reaches the other connection only after both copies have entered.
+type copyBarrier struct {
+	*duplex.Conn
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (b copyBarrier) WriteTo(w io.Writer) (int64, error) {
+	b.entered <- struct{}{}
+	<-b.release
+	return b.Conn.WriteTo(w)
+}
+func (b copyBarrier) ReadFrom(r io.Reader) (int64, error) {
+	b.entered <- struct{}{}
+	<-b.release
+	return b.Conn.ReadFrom(r)
+}
+
+func TestConcurrentBulkCopy(t *testing.T) {
+	a := duplex.Join(writerToHalf{strings.NewReader("data")}, nil)
+	var out bytes.Buffer
+	b := duplex.Join(nil, struct{ io.Writer }{&out})
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	results := make(chan error, 2)
+	go func() { _, err := a.WriteTo(copyBarrier{b, entered, release}); results <- err }()
+	go func() { _, err := b.ReadFrom(copyBarrier{a, entered, release}); results <- err }()
+	<-entered
+	<-entered
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out.String() != "data" {
+		t.Fatalf("copied %q", out.String())
+	}
+}
+
+func TestSharedBufferReadWrite(t *testing.T) {
+	var b bytes.Buffer
+	c := duplex.Join(&b, &b)
+	defer func() { _ = c.Close() }()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			_, _ = c.Write([]byte{1})
+		}
+	})
+	var got int
+	var one [1]byte
+	for range 1000 {
+		n, _ := c.Read(one[:])
+		got += n
+	}
+	wg.Wait()
+	if got+b.Len() != 1000 {
+		t.Fatalf("read %d, buffered %d", got, b.Len())
 	}
 }

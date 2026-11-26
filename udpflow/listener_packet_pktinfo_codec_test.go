@@ -21,9 +21,11 @@ import (
 type packetTestWriter struct {
 	err   error
 	calls []string
+	oob   []byte
 }
 
-func (w *packetTestWriter) WriteMsgUDPAddrPort(p, _ []byte, _ netip.AddrPort) (int, int, error) {
+func (w *packetTestWriter) WriteMsgUDPAddrPort(p, oob []byte, _ netip.AddrPort) (int, int, error) {
+	w.oob = slices.Clone(oob)
 	w.calls = append(w.calls, "fixed")
 	if w.err != nil {
 		err := w.err
@@ -93,7 +95,7 @@ func TestPacketListenerEstablishedFlowSkipsBroadcastSnapshot(t *testing.T) {
 	pc := newFeedPacketConn()
 	l := NewPacketListener(pc)
 	t.Cleanup(func() { _ = l.Close() })
-	sock := packetSocket{pc: pc, pktinfo: true, port: 9}
+	sock := packetSocket{pc: pc, gate: l.sock.gate, pktinfo: true, port: 9}
 	peer := netip.MustParseAddrPort("192.0.2.8:1234")
 	oob := packetTestDst4(netip.MustParseAddr("198.51.100.1"), 1)
 	l.deliver([]byte("first"), peer, nil, &sock, oob)
@@ -229,7 +231,7 @@ func TestPacketListenerSeparatesDestinations(t *testing.T) {
 	pc := newFeedPacketConn()
 	l := NewPacketListener(pc)
 	t.Cleanup(func() { _ = l.Close() })
-	sock := packetSocket{pc: pc, pktinfo: true, port: 9}
+	sock := packetSocket{pc: pc, gate: l.sock.gate, pktinfo: true, port: 9}
 	peer := netip.MustParseAddrPort("192.0.2.8:1234")
 	a := netip.MustParseAddr("198.51.100.1")
 	b := netip.MustParseAddr("198.51.100.2")
@@ -249,9 +251,10 @@ func TestPacketListenerSeparatesDestinations(t *testing.T) {
 	}
 	for _, want := range []struct {
 		dst      netip.Addr
+		ifindex  uint32
 		payloads []string
 	}{
-		{a, []string{"a", "c"}}, {b, []string{"b"}}, {local, []string{"d"}}, {local, []string{"e"}},
+		{a, 1, []string{"a", "c"}}, {b, 1, []string{"b"}}, {local, 1, []string{"d"}}, {local, 2, []string{"e"}},
 	} {
 		c := nettest.AcceptWithin(t, l)
 		if got, address := c.LocalAddr().(*net.UDPAddr).AddrPort(), netip.AddrPortFrom(want.dst, sock.port); got != address {
@@ -259,6 +262,12 @@ func TestPacketListenerSeparatesDestinations(t *testing.T) {
 		}
 		if queued := c.(*packetConn).q.Len(); queued != len(want.payloads) {
 			t.Fatalf("%d queued datagrams, want %d", queued, len(want.payloads))
+		}
+		// All requests arrived before any reply. Check the control message
+		// actually passed to the socket, including the link-local interface.
+		w := new(packetTestWriter)
+		if n, err := c.(*packetConn).writeUDP(w, []byte{1}, peer); err != nil || n != 1 || !bytes.Equal(w.oob, sourceOOB(want.dst, want.ifindex)) {
+			t.Fatalf("reply from %v on interface %d: n=%d oob=%x err=%v", want.dst, want.ifindex, n, w.oob, err)
 		}
 		buf := make([]byte, 8)
 		for _, payload := range want.payloads {
@@ -273,7 +282,7 @@ func TestPacketListenerGroupDestinations(t *testing.T) {
 	pc := newFeedPacketConn()
 	l := NewPacketListener(pc)
 	t.Cleanup(func() { _ = l.Close() })
-	sock := packetSocket{pc: pc, pktinfo: true, port: 9}
+	sock := packetSocket{pc: pc, gate: l.sock.gate, pktinfo: true, port: 9}
 	peer := netip.MustParseAddrPort("192.0.2.8:1234")
 	for i, addr := range []string{"255.255.255.255", "224.0.0.1", "239.1.2.3"} {
 		l.deliver([]byte{byte(i)}, peer, nil, &sock, packetTestDst4(netip.MustParseAddr(addr), uint32(i+1)))
