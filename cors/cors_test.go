@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func compile(t *testing.T, p Policy) *Compiled {
@@ -26,18 +27,20 @@ func TestInvalidPolicy(t *testing.T) {
 		fields []string
 	}{
 		{Policy{}, []string{"origins"}},
-		{Policy{Origins: []string{"*"}, Credentials: true, Methods: []string{}, Headers: []string{"*"}, ExposeHeaders: []string{"a b"}}, []string{"origins", "methods", "headers", "expose_headers"}},
-		{Policy{Origins: []string{"reflect", "null"}, Methods: []string{"*"}}, []string{"origins", "methods"}},
-		{Policy{Origins: []string{"null"}, Backend: true, Headers: []string{}}, []string{"preflight"}},
-		{Policy{Origins: []string{"null"}, Backend: true, MaxAge: new(uint32)}, []string{"preflight"}},
+		{Policy{OriginMode: OriginAny, Credentials: true, Methods: []string{}, Headers: []string{"*"}, ExposeHeaders: []string{"a b"}}, []string{"origin_mode", "methods", "headers", "expose_headers"}},
+		{Policy{OriginMode: OriginReflect, Origins: []string{"null"}, Methods: []string{"*"}}, []string{"origins", "methods"}},
+		{Policy{Origins: []string{"reflect"}, MaxAge: time.Millisecond}, []string{"origins", "max_age"}},
+		{Policy{OriginMode: 9, Preflight: 9, Origins: []string{"null"}}, []string{"origin_mode", "preflight"}},
+		{Policy{Origins: []string{"null"}, Preflight: PreflightBackend, Headers: []string{}}, []string{"preflight"}},
+		{Policy{Origins: []string{"null"}, Preflight: PreflightBackend, MaxAge: -1}, []string{"preflight"}},
 	} {
 		c, err := Compile(tc.p)
-		bad, ok := errors.AsType[PolicyError](err)
-		if c != nil || !ok || len(bad) != len(tc.fields) {
+		bad, ok := errors.AsType[Errors](err)
+		if c != nil || !ok || !errors.Is(err, ErrInvalid) || len(bad) != len(tc.fields) {
 			t.Fatalf("policy %+v: %v", tc.p, err)
 		}
-		for _, field := range tc.fields {
-			if bad[field] == "" || !strings.Contains(err.Error(), field) {
+		for i, field := range tc.fields {
+			if bad[i].Path != field || bad[i].Message == "" || !strings.Contains(err.Error(), field) {
 				t.Error(err)
 			}
 		}
@@ -60,11 +63,11 @@ func TestOrigins(t *testing.T) {
 		if _, err := Compile(Policy{Origins: []string{raw}}); err == nil {
 			t.Errorf("compiled %q", raw)
 		}
-		if got := compile(t, Policy{Origins: []string{"reflect"}}).AllowOrigin(raw); got != "" {
+		if got := compile(t, Policy{OriginMode: OriginReflect}).AllowOrigin(raw); got != "" {
 			t.Errorf("reflected %q", got)
 		}
 	}
-	if got := compile(t, Policy{Origins: []string{"*"}}).AllowOrigin("https://*.test"); got != "" {
+	if got := compile(t, Policy{OriginMode: OriginAny}).AllowOrigin("https://*.test"); got != "" {
 		t.Errorf("wildcard in request: %q", got)
 	}
 }
@@ -103,10 +106,9 @@ func TestSelection(t *testing.T) {
 }
 
 func TestPreflight(t *testing.T) {
-	age := uint32(0)
-	p := Policy{Origins: []string{"https://*.example.test"}, Methods: []string{"PUT"}, Headers: []string{"X-A", "X-B"}, Credentials: true, MaxAge: &age}
+	p := Policy{Origins: []string{"https://*.example.test"}, Methods: []string{"PUT"}, Headers: []string{"X-A", "X-B"}, Credentials: true, MaxAge: -1}
 	c := compile(t, p)
-	p.Origins[0], p.Methods[0], p.Headers[0], age = "*", "OTHER", "Other", 42
+	p.Origins[0], p.Methods[0], p.Headers[0] = "*", "OTHER", "Other"
 	const origin = "https://a.example.test"
 	for _, tc := range []struct {
 		origins, methods, headers []string
@@ -148,7 +150,7 @@ func TestPreflight(t *testing.T) {
 }
 
 func TestPreflightDefaults(t *testing.T) {
-	c := compile(t, Policy{Origins: []string{"*"}})
+	c := compile(t, Policy{OriginMode: OriginAny})
 	for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
 		r := request(http.MethodOptions, []string{"null"}, []string{m})
 		w := httptest.NewRecorder()
@@ -165,7 +167,7 @@ func TestPreflightDefaults(t *testing.T) {
 			t.Fatal(w)
 		}
 	}
-	for _, p := range []*Compiled{nil, {}, compile(t, Policy{Origins: []string{"*"}, Backend: true})} {
+	for _, p := range []*Compiled{nil, {}, compile(t, Policy{OriginMode: OriginAny, Preflight: PreflightBackend})} {
 		w := httptest.NewRecorder()
 		if p.Preflight(w, request(http.MethodOptions, []string{"null"}, []string{"GET"})) || len(w.Header()) != 0 {
 			t.Fatal(w)
@@ -191,7 +193,16 @@ func TestApplyResponse(t *testing.T) {
 		{"https://other.example", incoming, "", "Accept, Origin", false},
 		{"*", outgoing, "*", "Accept, Origin", false},
 	} {
-		c := compile(t, Policy{Origins: []string{tc.policy}, Credentials: tc.creds, ExposeHeaders: []string{"x-a", "X-A"}})
+		p := Policy{Credentials: tc.creds, ExposeHeaders: []string{"x-a", "X-A"}}
+		switch tc.policy {
+		case "*":
+			p.OriginMode = OriginAny
+		case "reflect":
+			p.OriginMode = OriginReflect
+		default:
+			p.Origins = []string{tc.policy}
+		}
+		c := compile(t, p)
 		res := &http.Response{StatusCode: http.StatusNotFound, Request: request(http.MethodGet, []string{tc.out}, nil), Header: http.Header{"Vary": {"Accept"}}}
 		res.Header.Set(credentials, "orphan")
 		c.ApplyResponse(res, q)
@@ -209,7 +220,7 @@ func TestApplyResponse(t *testing.T) {
 			t.Fatal(h)
 		}
 	}
-	c := compile(t, Policy{Origins: []string{"reflect"}, Credentials: true})
+	c := compile(t, Policy{OriginMode: OriginReflect, Credentials: true})
 	for _, status := range []int{101, 200} {
 		h := http.Header{"Vary": {"Origin", "Accept"}, allowOrigin: {"", "https://app.example"}, credentials: {"false", "true"}}
 		if status == 101 {
@@ -227,7 +238,7 @@ func TestApplyResponse(t *testing.T) {
 		t.Fatal(h)
 	}
 	h = http.Header{"Vary": {"origin, Accept", "ORIGIN, accept"}}
-	wild := compile(t, Policy{Origins: []string{"*"}})
+	wild := compile(t, Policy{OriginMode: OriginAny})
 	wild.ApplyResponse(&http.Response{StatusCode: http.StatusOK, Header: h}, nil)
 	if h.Get("Vary") != "origin, Accept" || h.Get(allowOrigin) != "" {
 		t.Fatal(h)
@@ -240,7 +251,7 @@ func TestApplyResponse(t *testing.T) {
 }
 
 func TestEmptyBackendOrigin(t *testing.T) {
-	c := compile(t, Policy{Origins: []string{"reflect"}})
+	c := compile(t, Policy{OriginMode: OriginReflect})
 	for _, raw := range []string{"null", "malformed"} {
 		res := &http.Response{StatusCode: http.StatusOK, Header: http.Header{allowOrigin: {" ", ""}}}
 		c.ApplyResponse(res, request(http.MethodGet, []string{raw}, nil))
@@ -251,12 +262,11 @@ func TestEmptyBackendOrigin(t *testing.T) {
 }
 
 func TestSharedPolicy(t *testing.T) {
-	p := Policy{Origins: []string{"https://a.example"}, Headers: []string{"X-Test"}, MaxAge: new(uint32)}
+	p := Policy{Origins: []string{"https://a.example"}, Headers: []string{"X-Test"}, MaxAge: -1}
 	c := compile(t, p)
 	var group sync.WaitGroup
 	group.Go(func() {
-		for i := range uint32(32) {
-			*p.MaxAge = i
+		for range 32 {
 			p.Origins[0] = "*"
 			p.Headers[0] = "X-Other"
 		}
@@ -273,4 +283,15 @@ func TestSharedPolicy(t *testing.T) {
 		})
 	}
 	group.Wait()
+}
+
+func TestMaxAge(t *testing.T) {
+	for age, want := range map[time.Duration]string{0: "", -time.Second: "0", 90 * time.Second: "90"} {
+		r := request(http.MethodOptions, []string{"https://a.example"}, []string{http.MethodGet})
+		w := httptest.NewRecorder()
+		compile(t, Policy{Origins: []string{"https://a.example"}, MaxAge: age}).Preflight(w, r)
+		if got := w.Header().Get(maxAge); got != want {
+			t.Errorf("%v: %q", age, got)
+		}
+	}
 }

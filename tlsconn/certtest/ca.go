@@ -3,13 +3,16 @@
 package certtest
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"sync/atomic"
@@ -24,19 +27,25 @@ type CA struct {
 	serial atomic.Int64
 }
 
-// NewCA creates a root valid from Unix second 0 through 1<<33.
-// Use NewCAWithValidity for a different test clock.
-func NewCA(t testing.TB) *CA {
-	t.Helper()
-	ca, err := NewCAWithValidity(time.Unix(0, 0), time.Unix(1<<33, 0))
+// NewCA creates a root valid from Unix second 0 through 1<<33. Use
+// NewCAWithValidity for a different test clock. It calls tb.Fatal on failure.
+func NewCA(tb testing.TB) *CA {
+	tb.Helper()
+	return NewCAWithValidity(tb, time.Unix(0, 0), time.Unix(1<<33, 0))
+}
+
+// NewCAWithValidity creates a root with inclusive validity bounds from start
+// through end. It calls tb.Fatal when end precedes start or signing fails.
+func NewCAWithValidity(tb testing.TB, start, end time.Time) *CA {
+	tb.Helper()
+	ca, err := newCA(start, end)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return ca
 }
 
-// NewCAWithValidity creates a root with explicit inclusive validity bounds.
-func NewCAWithValidity(start, end time.Time) (*CA, error) {
+func newCA(start, end time.Time) (*CA, error) {
 	if end.Before(start) {
 		return nil, errors.New("certtest: CA validity ends before it starts")
 	}
@@ -51,6 +60,36 @@ func NewCAWithValidity(start, end time.Time) (*CA, error) {
 	return ca, nil
 }
 
+// LeafOptions describes a leaf certificate for CA.Issue.
+type LeafOptions struct {
+	// Key signs the leaf's public key. Nil generates a fresh P-256 key. It
+	// must be a key that x509.MarshalPKCS8PrivateKey accepts, such as
+	// *ecdsa.PrivateKey, *rsa.PrivateKey or ed25519.PrivateKey.
+	Key crypto.Signer
+	// NotBefore starts the validity interval at X.509 second precision.
+	NotBefore time.Time
+	// Names become SANs: IP literals as IP SANs, all others as DNS SANs.
+	// The first name is also the subject common name. An empty list
+	// deliberately creates a leaf without subject or SANs.
+	Names []string
+	// Life is the validity length after NotBefore; it must not be negative.
+	Life time.Duration
+	// Client selects the client authentication EKU instead of server
+	// authentication.
+	Client bool
+}
+
+// Pool returns a fresh pool holding only the root, or nil for an
+// uninitialized CA.
+func (ca *CA) Pool() *x509.CertPool {
+	if ca == nil || ca.cert == nil {
+		return nil
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	return pool
+}
+
 // PEM returns a fresh PEM encoding of the root certificate, or nil for an
 // uninitialized CA.
 func (ca *CA) PEM() []byte {
@@ -60,67 +99,63 @@ func (ca *CA) PEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw})
 }
 
-// Issue signs a server leaf with a fresh P-256 key. The results are a
-// leaf-first PEM chain including the root and a PKCS #8 PEM private key.
-// IP literals become IP SANs; all other names are copied as DNS SANs.
-// An empty list deliberately creates a leaf without SANs.
-func (ca *CA) Issue(names []string, now time.Time, life time.Duration) (chain, key []byte, err error) {
-	return ca.issueFresh(names, now, life, x509.ExtKeyUsageServerAuth)
-}
-
-// IssueKey is like Issue but reuses the supplied ECDSA key.
-func (ca *CA) IssueKey(k *ecdsa.PrivateKey, names []string, now time.Time, life time.Duration) (chain, key []byte, err error) {
-	return ca.issueKey(k, names, now, life, x509.ExtKeyUsageServerAuth)
-}
-
-// IssueClient signs a leaf with the client authentication EKU and a fresh
-// key. An empty name deliberately omits the subject and SAN.
-func (ca *CA) IssueClient(name string, now time.Time, life time.Duration) (chain, key []byte, err error) {
-	var names []string
-	if name != "" {
-		names = []string{name}
+// Issue signs a leaf. The results are a leaf-first PEM chain including the
+// root and a PKCS #8 PEM private key.
+func (ca *CA) Issue(o LeafOptions) (chain, key []byte, err error) {
+	if o.Key == nil {
+		if o.Key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+			return nil, nil, err
+		}
 	}
-	return ca.issueFresh(names, now, life, x509.ExtKeyUsageClientAuth)
+	return ca.issueKey(o)
 }
 
-func (ca *CA) issueFresh(names []string, now time.Time, life time.Duration, use x509.ExtKeyUsage) ([]byte, []byte, error) {
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// IssueTLS is like Issue but returns a parsed certificate with its chain,
+// key and Leaf set.
+func (ca *CA) IssueTLS(o LeafOptions) (tls.Certificate, error) {
+	chain, key, err := ca.Issue(o)
 	if err != nil {
-		return nil, nil, err
+		return tls.Certificate{}, err
 	}
-	return ca.issueKey(k, names, now, life, use)
+	return tls.X509KeyPair(chain, key)
 }
 
-func (ca *CA) issueKey(k *ecdsa.PrivateKey, names []string, now time.Time, life time.Duration, use x509.ExtKeyUsage) ([]byte, []byte, error) {
+func (ca *CA) issueKey(o LeafOptions) ([]byte, []byte, error) {
 	if ca == nil || ca.cert == nil {
 		return nil, nil, errors.New("certtest: uninitialized CA")
 	}
-	if life < 0 {
+	if o.Life < 0 {
 		return nil, nil, errors.New("certtest: negative leaf lifetime")
 	}
-	//lint:ignore SA1019 PKCS #8 marshaling dereferences these components on a partially initialized ECDSA key.
-	if k == nil || k.D == nil || k.X == nil || k.Y == nil { //nolint:staticcheck // Guard the same incomplete keys for the bundled analyzer.
-		return nil, nil, errors.New("certtest: missing ECDSA key")
+	if k, ok := o.Key.(*ecdsa.PrivateKey); ok {
+		//lint:ignore SA1019 PKCS #8 marshaling dereferences these components on a partially initialized ECDSA key.
+		if k == nil || k.D == nil || k.X == nil || k.Y == nil { //nolint:staticcheck // Guard the same incomplete keys for the bundled analyzer.
+			return nil, nil, errors.New("certtest: incomplete ECDSA key")
+		}
 	}
-	key, err := x509.MarshalPKCS8PrivateKey(k)
+	key, err := x509.MarshalPKCS8PrivateKey(o.Key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("certtest: %w", err)
 	}
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(ca.serial.Add(1)), NotBefore: now, NotAfter: now.Add(life),
+	use := x509.ExtKeyUsageServerAuth
+	if o.Client {
+		use = x509.ExtKeyUsageClientAuth
+	}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(ca.serial.Add(1)), NotBefore: o.NotBefore, NotAfter: o.NotBefore.Add(o.Life),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{use}}
-	if len(names) > 0 {
-		tpl.Subject.CommonName = names[0]
+	if len(o.Names) > 0 {
+		tpl.Subject.CommonName = o.Names[0]
 	}
-	for _, name := range names {
+	for _, name := range o.Names {
 		if ip := net.ParseIP(name); ip != nil {
 			tpl.IPAddresses = append(tpl.IPAddresses, ip)
 		} else {
 			tpl.DNSNames = append(tpl.DNSNames, name)
 		}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.cert, &k.PublicKey, ca.key)
+	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.cert, o.Key.Public(), ca.key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("certtest: %w", err)
 	}
 	chain := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	return append(chain, ca.PEM()...), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), nil

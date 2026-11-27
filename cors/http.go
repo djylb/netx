@@ -44,8 +44,9 @@ func SelectPreflight[T any](r *http.Request, lookup func(method string) (T, bool
 	return route, false
 }
 
-// AddPreflightVary includes every preflight selector in Vary. Call this
-// before host admission checks when a local preflight can be denied there.
+// AddPreflightVary includes every preflight selector in Vary. Call it before
+// any check that may deny a request ahead of Preflight, such as host or
+// authorization checks, so that denials still vary on the preflight fields.
 func AddPreflightVary(h http.Header) { mergeVary(h, "Origin", askMethod, askHeaders) }
 
 func mergeVary(h http.Header, fields ...string) {
@@ -160,11 +161,11 @@ func (c *Compiled) ApplyResponse(res *http.Response, incoming *http.Request) {
 	// Empty backend values convey no permission. Drop these lines even if
 	// the request has no origin eligible for a replacement.
 	res.Header.Del(allowOrigin)
-	if c.mode == reflectOrigin && res.Request != nil {
+	if c.mode == OriginReflect && res.Request != nil {
 		incoming = res.Request
 	}
 	allowed := c.AllowOrigin(requestOrigin(incoming))
-	if allowed == "" && c.mode == reflectOrigin {
+	if allowed == "" && c.mode == OriginReflect {
 		return
 	}
 	if res.Header == nil {

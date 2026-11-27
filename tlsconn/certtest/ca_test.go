@@ -3,6 +3,7 @@ package certtest_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,8 +11,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"io"
 	"math/big"
 	"net"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -34,16 +37,13 @@ func keyPair(t *testing.T, chain, key []byte, err error) tls.Certificate {
 
 func TestValidityNamesAndKeys(t *testing.T) {
 	start := time.Unix(1_000, 0)
-	ca, err := certtest.NewCAWithValidity(start, start.Add(3*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ca := certtest.NewCAWithValidity(t, start, start.Add(3*time.Hour))
 	k, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := start.Add(time.Hour)
-	chain, key, err := ca.IssueKey(k, []string{"one.example", "*.example.test", "127.0.0.1", "::1"}, now, time.Hour)
+	chain, key, err := ca.Issue(certtest.LeafOptions{Key: k, Names: []string{"one.example", "*.example.test", "127.0.0.1", "::1"}, NotBefore: now, Life: time.Hour})
 	cert := keyPair(t, chain, key, err)
 	if len(cert.Certificate) != 2 || !cert.PrivateKey.(*ecdsa.PrivateKey).Equal(k) {
 		t.Fatal("wrong key or chain length")
@@ -56,10 +56,7 @@ func TestValidityNamesAndKeys(t *testing.T) {
 	if !leaf.NotBefore.Equal(now) || !leaf.NotAfter.Equal(now.Add(time.Hour)) || !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}) {
 		t.Fatal(leaf)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca.PEM()) {
-		t.Fatal("missing root")
-	}
+	pool := ca.Pool()
 	for _, host := range []string{"one.example", "one.example.test", "127.0.0.1", "::1"} {
 		opts := x509.VerifyOptions{DNSName: host, CurrentTime: now, Roots: pool}
 		chains, err := leaf.Verify(opts)
@@ -71,7 +68,7 @@ func TestValidityNamesAndKeys(t *testing.T) {
 			t.Error("accepted expired leaf")
 		}
 	}
-	chain, key, err = ca.Issue(nil, now, 0)
+	chain, key, err = ca.Issue(certtest.LeafOptions{NotBefore: now})
 	noSAN := keyPair(t, chain, key, err).Leaf
 	if len(noSAN.DNSNames)+len(noSAN.IPAddresses) != 0 || noSAN.Subject.CommonName != "" || !noSAN.NotBefore.Equal(noSAN.NotAfter) {
 		t.Fatal(noSAN)
@@ -85,9 +82,11 @@ func TestMutualTLS(t *testing.T) {
 	if !roots.AppendCertsFromPEM(ca.PEM()) {
 		t.Fatal("missing root")
 	}
-	chain, key, err := ca.Issue([]string{"server.example"}, now, time.Hour)
-	server := keyPair(t, chain, key, err)
-	chain, key, err = ca.IssueClient("client.example", now, time.Hour)
+	server, err := ca.IssueTLS(certtest.LeafOptions{Names: []string{"server.example"}, NotBefore: now, Life: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, key, err := ca.Issue(certtest.LeafOptions{Names: []string{"client.example"}, NotBefore: now, Life: time.Hour, Client: true})
 	client := keyPair(t, chain, key, err)
 	if !slices.Equal(client.Leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) {
 		t.Fatal(client.Leaf.ExtKeyUsage)
@@ -122,7 +121,7 @@ func TestConcurrentIssue(t *testing.T) {
 	var group sync.WaitGroup
 	for range count {
 		group.Go(func() {
-			chain, key, err := ca.Issue(nil, time.Unix(0, 0), time.Minute)
+			chain, key, err := ca.Issue(certtest.LeafOptions{NotBefore: time.Unix(0, 0), Life: time.Minute})
 			if err != nil {
 				t.Error(err)
 				return
@@ -172,7 +171,13 @@ func TestExactTemplate(t *testing.T) {
 
 func TestErrors(t *testing.T) {
 	now := time.Unix(0, 0)
-	if _, err := certtest.NewCAWithValidity(now, now.Add(-time.Hour)); err == nil {
+	fake := &fatalTB{TB: t}
+	done := make(chan *certtest.CA)
+	go func() {
+		defer close(done)
+		done <- certtest.NewCAWithValidity(fake, now, now.Add(-time.Hour))
+	}()
+	if <-done != nil || !fake.failed {
 		t.Fatal("reversed CA lifetime")
 	}
 	for _, tpl := range []*x509.Certificate{nil, {SerialNumber: big.NewInt(-1)}} {
@@ -185,21 +190,42 @@ func TestErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []*ecdsa.PrivateKey{nil, {}, {PublicKey: valid.PublicKey}} {
-		if chain, key, err := ca.IssueKey(k, nil, now, 0); err == nil || chain != nil || key != nil {
+	for _, k := range []crypto.Signer{(*ecdsa.PrivateKey)(nil), &ecdsa.PrivateKey{}, &ecdsa.PrivateKey{PublicKey: valid.PublicKey}, opaqueSigner{valid}} {
+		if chain, key, err := ca.Issue(certtest.LeafOptions{Key: k, NotBefore: now}); err == nil || chain != nil || key != nil {
 			t.Fatal("invalid key accepted")
 		}
 	}
-	if _, _, err := ca.Issue(nil, now, -time.Second); err == nil {
+	if _, _, err := ca.Issue(certtest.LeafOptions{NotBefore: now, Life: -time.Second}); err == nil {
 		t.Fatal("negative leaf lifetime")
 	}
-	if _, _, err := ca.Issue([]string{"é"}, now, time.Minute); err == nil {
+	if _, _, err := ca.Issue(certtest.LeafOptions{Names: []string{"é"}, NotBefore: now, Life: time.Minute}); err == nil {
 		t.Fatal("non-ASCII DNS SAN")
 	}
-	if root := new(certtest.CA).PEM(); root != nil {
+	if root, pool := new(certtest.CA).PEM(), new(certtest.CA).Pool(); root != nil || pool != nil {
 		t.Fatal("uninitialized root")
 	}
-	if _, _, err := new(certtest.CA).Issue(nil, now, 0); err == nil {
+	if _, _, err := new(certtest.CA).Issue(certtest.LeafOptions{NotBefore: now}); err == nil {
 		t.Fatal("uninitialized CA")
 	}
+}
+
+type fatalTB struct {
+	testing.TB
+	failed bool
+}
+
+func (f *fatalTB) Helper() {}
+
+func (f *fatalTB) Fatal(...any) {
+	f.failed = true
+	runtime.Goexit()
+}
+
+// opaqueSigner hides the concrete key type from PKCS #8 marshaling.
+type opaqueSigner struct{ k *ecdsa.PrivateKey }
+
+func (o opaqueSigner) Public() crypto.PublicKey { return o.k.Public() }
+
+func (o opaqueSigner) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return o.k.Sign(r, digest, opts)
 }

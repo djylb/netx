@@ -61,10 +61,14 @@ go get github.com/djylb/netx
 
 ## Cross-origin responses
 
-Compile a policy once and share it among handlers. Origin lists accept HTTP(S)
-origins, one-label wildcard patterns and the literal `null`. A singleton `*`
-allows any valid origin without credentials. A singleton `reflect` echoes any
-valid origin, using the outgoing request on a proxied response.
+Compile a policy once and share it among handlers. With the default
+`OriginList` mode, `Origins` accepts HTTP(S) origins, one-label wildcard
+patterns and the literal `null`. `OriginAny` allows any valid origin without
+credentials. `OriginReflect` echoes any valid origin, using the outgoing
+request on a proxied response. `MaxAge` is whole seconds: zero omits the
+header and a negative value sends zero. `Preflight: cors.PreflightBackend`
+leaves preflights to the application. Invalid policies return `cors.Errors`,
+an ordered list of `FieldError{Path, Message}` matching `cors.ErrInvalid`.
 
 ```go
 policy, err := cors.Compile(cors.Policy{
@@ -84,17 +88,20 @@ A backend that supplied an allow-origin value keeps control of its response.
 
 ## Test certificates
 
-`certtest.NewCA(t)` creates a root for fixture clocks. `Issue`, `IssueKey`
-and `IssueClient` return a PEM chain (leaf then root), a PKCS #8 key and an
-error. Add `ca.PEM()` to an explicit trust pool and set `tls.Config.Time` to
-the fixture clock for TLS handshakes.
+`certtest.NewCA(t)` and `certtest.NewCAWithValidity(t, start, end)` create a
+root for fixture clocks and fail the test on error. `ca.Issue(LeafOptions{...})`
+returns a PEM chain (leaf then root) and a PKCS #8 key; `ca.IssueTLS` returns
+the parsed `tls.Certificate`. `LeafOptions` takes names, the validity start and
+length, an optional `crypto.Signer` key and `Client` for the client EKU. Use
+`ca.Pool()` as the trust pool and set `tls.Config.Time` to the fixture clock
+for TLS handshakes.
 
 ```go
 ca := certtest.NewCA(t)
 now := time.Unix(3600, 0)
-chain, key, err := ca.Issue([]string{"service.example"}, now, time.Hour)
-if err != nil { t.Fatal(err) }
-server, err := tls.X509KeyPair(chain, key)
+server, err := ca.IssueTLS(certtest.LeafOptions{
+    Names: []string{"service.example"}, NotBefore: now, Life: time.Hour,
+})
 if err != nil { t.Fatal(err) }
 ```
 
