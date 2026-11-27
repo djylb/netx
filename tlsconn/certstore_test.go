@@ -327,32 +327,37 @@ func TestCertStoreFailedLoads(t *testing.T) {
 	}
 }
 
-// Forget drops a Load still running, whose old result then serves only the
-// handshakes that waited for it.
-func TestCertStoreForgetDuringLoad(t *testing.T) {
-	old, renewed := newCert(t, 0), newCert(t, 0)
-	release := make(chan struct{})
-	var loads atomic.Int64
-	s := &CertStore{Load: func(context.Context, string) (*tls.Certificate, error) {
-		if loads.Add(1) == 1 {
-			<-release
-			return old, nil
-		}
-		return renewed, nil
-	}}
+func checkInFlightLoad(t *testing.T, s *CertStore, old *tls.Certificate, started <-chan struct{}, release chan<- struct{}, during func(string)) {
+	t.Helper()
 	first := make(chan *tls.Certificate, 1)
 	go func() {
 		c, _ := s.forName(context.Background(), "a.example")
 		first <- c
 	}()
-	for loads.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	s.Forget("a.example")
+	<-started
+	during("a.example")
 	close(release)
 	if c := <-first; c != old {
 		t.Fatal("the waiting handshake did not get its Load's certificate")
 	}
+}
+
+// Forget drops a Load still running, whose old result then serves only the
+// handshakes that waited for it.
+func TestCertStoreForgetDuringLoad(t *testing.T) {
+	old, renewed := newCert(t, 0), newCert(t, 0)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var loads atomic.Int64
+	s := &CertStore{Load: func(context.Context, string) (*tls.Certificate, error) {
+		if loads.Add(1) == 1 {
+			close(started)
+			<-release
+			return old, nil
+		}
+		return renewed, nil
+	}}
+	checkInFlightLoad(t, s, old, started, release, s.Forget)
 	if c, _ := s.forName(context.Background(), "a.example"); c != renewed {
 		t.Fatal("the Load from before Forget was kept")
 	}
@@ -424,12 +429,14 @@ func TestCertStoreLoadsNotValidNow(t *testing.T) {
 // renewal announced meanwhile is loaded.
 func TestCertStoreRefreshDuringLoad(t *testing.T) {
 	old, renewed := newCert(t, 0), newCert(t, 0)
+	started := make(chan struct{})
 	release, releaseRefresh := make(chan struct{}), make(chan struct{})
 	reloaded := make(chan struct{}, 4)
 	var loads atomic.Int64
 	s := &CertStore{Load: func(context.Context, string) (*tls.Certificate, error) {
 		switch loads.Add(1) {
 		case 1:
+			close(started)
 			<-release
 			return old, nil
 		default:
@@ -438,19 +445,7 @@ func TestCertStoreRefreshDuringLoad(t *testing.T) {
 			return renewed, nil
 		}
 	}}
-	first := make(chan *tls.Certificate, 1)
-	go func() {
-		c, _ := s.forName(context.Background(), "a.example")
-		first <- c
-	}()
-	for loads.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	s.Refresh("a.example")
-	close(release)
-	if c := <-first; c != old {
-		t.Fatal("the waiting handshake did not get its Load's certificate")
-	}
+	checkInFlightLoad(t, s, old, started, release, s.Refresh)
 	if c, _ := s.forName(context.Background(), "a.example"); c != old {
 		t.Fatal("the old certificate did not serve while it was refreshed")
 	}

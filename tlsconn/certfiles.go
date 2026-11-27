@@ -355,8 +355,8 @@ func (f *fileSource) due(now time.Time, interval time.Duration, leaf *x509.Certi
 	return check, force
 }
 
-// sync reads the files if they changed since the last successful read, or
-// if force, and returns the new certificate, or nil if they were not read.
+// sync reads the files when forced or when they changed since the last
+// successful read. It returns the new certificate, or nil if it skipped the read.
 // A certificate not valid now does not replace current if that is valid
 // now, as when an old pair was copied back: it fails with ErrNotValidNow. A
 // failed read records nothing, so that the next sync tries again.

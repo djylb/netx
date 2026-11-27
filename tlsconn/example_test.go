@@ -106,8 +106,7 @@ func ExamplePinSet() {
 	defer func() { _ = conn.Close() }()
 }
 
-// Serve one certificate from files, picking up a renewal, such as by
-// certbot, once the files change.
+// Serve a certificate from files and load the renewal when the files change.
 func ExampleCertFiles_reload() {
 	var certs tlsconn.CertFiles
 	cfg := &tls.Config{

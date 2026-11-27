@@ -2,7 +2,6 @@ package netx
 
 import (
 	"errors"
-
 	"io"
 	"net"
 )

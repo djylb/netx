@@ -391,8 +391,8 @@ func (s *Server) associate(ctx context.Context, req *Request) error {
 	if err = req.Reply(ReplySucceeded, bound); err != nil {
 		return err
 	}
-	// The association lasts while the control connection is open; it ending
-	// first closes the control connection, which also ends the read below
+	// If the association ends first, it closes the control connection.
+	// This also interrupts the read below
 	// on connections without deadline support.
 	a.mu.Lock()
 	if isDone(a.done) {

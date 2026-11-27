@@ -7,32 +7,8 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/duplex"
+	"github.com/djylb/netx/internal/nettest"
 )
-
-// tcpPair returns the two ends of a loopback TCP connection.
-func tcpPair(b *testing.B) (client, server net.Conn) {
-	b.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		b.Skip(err)
-	}
-	defer func() { _ = ln.Close() }()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, _ := ln.Accept()
-		accepted <- c
-	}()
-	client, err = net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	server = <-accepted
-	if server == nil {
-		b.Fatal("accept failed")
-	}
-	b.Cleanup(func() { _ = client.Close(); _ = server.Close() })
-	return client, server
-}
 
 // BenchmarkCopyTCP copies TCP → duplex → TCP with netx.Copy, through
 // the Conn's WriteTo and ReadFrom ("forwarded") and through Read and Write
@@ -56,8 +32,8 @@ func BenchmarkCopyTCP(b *testing.B) {
 	for _, tc := range cases {
 		for _, how := range []string{"io.Copy", "netx.Copy"} {
 			b.Run(tc.name+"/"+how, func(b *testing.B) {
-				feed, in := tcpPair(b)
-				out, sink := tcpPair(b)
+				feed, in := nettest.TCPPair(b)
+				out, sink := nettest.TCPPair(b)
 				dst, src := tc.ends(in, out)
 				drained := make(chan struct{})
 				go func() { _, _ = io.Copy(io.Discard, sink); close(drained) }()

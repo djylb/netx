@@ -2,14 +2,12 @@ package netx
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestPackageDependencies enforces the module's dependency boundaries and
@@ -63,9 +61,7 @@ func TestPackageDependencies(t *testing.T) {
 		internalPrefix + "dnslookup": {internalPrefix + "bufpool"},
 		internalPrefix + "flowtable": {internalPrefix + "dgram", internalPrefix + "clock"},
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, goCmd, "list", "-mod=readonly", "-buildvcs=false", "-deps", "-test", "-json=ImportPath,Standard,Imports,Deps,TestImports,XTestImports,ForTest", "./...").Output()
+	out, err := exec.CommandContext(t.Context(), goCmd, "list", "-mod=readonly", "-buildvcs=false", "-deps", "-test", "-json=ImportPath,Standard,Imports,Deps,TestImports,XTestImports,ForTest", "./...").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +69,11 @@ func TestPackageDependencies(t *testing.T) {
 	type pkg struct {
 		ImportPath   string   `json:"importPath"`
 		ForTest      string   `json:"forTest"`
-		Standard     bool     `json:"standard"`
 		Imports      []string `json:"imports"`
 		Deps         []string `json:"deps"`
 		TestImports  []string `json:"testImports"`
 		XTestImports []string `json:"xTestImports"`
+		Standard     bool     `json:"standard"`
 	}
 	pkgs := make(map[string]pkg)
 	dec := json.NewDecoder(bytes.NewReader(out))

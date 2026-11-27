@@ -12,7 +12,7 @@ import (
 	"github.com/djylb/timeshim"
 )
 
-// Link are the properties of one direction of the traffic to or from an
+// Link describes the properties of traffic in one direction to or from an
 // address of a Net.
 type Link struct {
 	Delay time.Duration // added before every write or datagram
@@ -23,16 +23,16 @@ type Link struct {
 
 func (l Link) zero() bool { return l == Link{} }
 
-// LinkPair are both directions of the traffic of one address: To towards
+// LinkPair describes traffic in both directions for one address: To towards
 // it (the dialer's writes), From out of it (the listener's writes).
 type LinkPair struct {
 	To, From Link
 }
 
 type faults struct {
-	mu    sync.Mutex
 	links map[string]LinkPair
 	conns map[string]map[*faultConn]struct{}
+	mu    sync.Mutex
 }
 
 // SetLink sets the link properties of addr (a listener or packet
@@ -109,14 +109,14 @@ func addDelay(a, b time.Duration) time.Duration {
 type faultConn struct {
 	*halfConn
 	n    *Net
-	addr string
-	to   bool
-	once sync.Once
 	done chan struct{}
 	// local and remote are the addresses of a DialFrom connection (nil:
 	// the halfConn's "pipe").
 	local, remote net.Addr
+	addr          string
 	port          string // local DialFrom port owned until Close
+	once          sync.Once
+	to            bool
 }
 
 func (c *faultConn) LocalAddr() net.Addr {

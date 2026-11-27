@@ -13,26 +13,21 @@ import (
 // is made.
 func packetErr() error { return ErrListenUnsupported }
 
-//goland:noinspection GoUnusedParameter
-func readFromUDP(*net.UDPConn, []byte) (int, PacketInfo, error) {
+func readFromUDP(_ *net.UDPConn, _ []byte) (int, PacketInfo, error) {
 	return 0, PacketInfo{}, ErrOriginalDestinationUnsupported
 }
 
-//goland:noinspection GoUnusedParameter
-func dialUDP(context.Context, netip.AddrPort, netip.AddrPort) (*net.UDPConn, error) {
+func dialUDP(_ context.Context, _, _ netip.AddrPort) (*net.UDPConn, error) {
 	return nil, ErrListenUnsupported
 }
 
-//goland:noinspection GoUnusedParameter
-func readDatagram(syscall.RawConn) (*[]byte, int, error) {
+func readDatagram(_ syscall.RawConn) (*[]byte, int, error) {
 	return nil, 0, ErrListenUnsupported
 }
 
-// writeFrom sends b to the address to from c; the source address is the kernel's choice.
-//
-//goland:noinspection GoUnusedParameter
+// writeFrom sends b on c to the destination. The kernel chooses the source address.
 func writeFrom(c *net.UDPConn, b []byte, _, to netip.AddrPort) (int, error) {
 	return c.WriteToUDPAddrPort(b, to)
 }
 
-func retryReply(error) bool { return false }
+func retryReply(_ error) bool { return false }

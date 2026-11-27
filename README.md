@@ -1,8 +1,8 @@
 # netx
 
-Reusable Go networking helpers with no third-party dependencies; the one
-module they use is [timeshim](https://github.com/djylb/timeshim), an
-injectable clock that itself uses only the standard library.
+Reusable Go networking helpers. The only module dependency is
+[timeshim](https://github.com/djylb/timeshim), an injectable clock built
+on the standard library.
 
 Requires Go 1.26. Every package builds on all major Go ports, including
 Windows, the BSDs, js/wasm, wasip1 and Plan 9. Platform-specific features
@@ -58,42 +58,46 @@ go get github.com/djylb/netx
 
 ## Connections
 
+This example reads a TLS stream to standard output and counts the bytes
+received. Pass the server's `host:port` as the argument.
+
 ```go
 package main
 
 import (
 	"context"
-	"crypto/tls"
+	"errors"
+	"io"
 	"log"
-	"net"
+	"os"
 	"time"
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/tlsconn"
 )
 
-// wrap refreshes an idle deadline before every read and write and counts traffic.
-func wrap(c net.Conn) net.Conn {
-	c = netx.NewTimeoutConn(c, 30*time.Second)
-	return netx.ObserveConn(c,
-		func(n int64) error { return nil }, // read
-		func(n int64) error { return nil }, // write
-	)
-}
-
 func main() {
+	if len(os.Args) != 2 {
+		log.Fatal("usage: example host:port")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", "example.com:443")
+	var dialer tlsconn.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", os.Args[1])
+	cancel()
 	if err != nil {
 		log.Fatal(err)
 	}
-	// The dial and the handshake are bounded by ctx; on failure raw is closed.
-	conn, err := tlsconn.Client(ctx, wrap(raw), &tls.Config{ServerName: "example.com"})
-	if err != nil {
+	var received int64
+	observed := netx.ObserveConn(conn, func(n int64) error {
+		received += n
+		return nil
+	}, nil)
+	stream := netx.NewTimeoutConn(observed, 30*time.Second)
+	_, err = io.Copy(os.Stdout, stream)
+	if err := errors.Join(err, stream.Close()); err != nil {
 		log.Fatal(err)
 	}
-	defer conn.Close()
+	log.Printf("received %d bytes", received)
 }
 ```
 
@@ -201,8 +205,8 @@ func perHost() *tls.Config {
   loads share one read. Files stay in sync by change: a use at most every
   `CheckInterval` (`DefaultCheckInterval`, 10s; negative never) stats both
   files, following symbolic links, and reads them again only if the size,
-  modification time or file identity changed, so a certbot-style link swap
-  counts. Once a certificate has expired, its files are read again even when
+  modification time or file identity changed, including when a symbolic link
+  is replaced. Once a certificate has expired, its files are read again even when
   they look unchanged, at most once a minute, and it is not returned
   (`ErrNotValidNow`). A read that fails, such as a certificate replaced before
   its key, or that brings a certificate not valid now while the previous one
@@ -250,7 +254,7 @@ func perHost() *tls.Config {
   `RetryAfter`. A loaded certificate is loaded again before it
   expires (`RefreshBefore`, or a third of its lifetime if shorter) while it
   serves on, also when that fails or brings one not valid now; a refresh that
-  finds none stops it serving. `Refresh` makes one due, also during a load,
+  finds no certificate removes the old one. `Refresh` makes one due, also during a load,
   and `Forget` drops one; adding a certificate drops what was loaded for the
   names it covers. Names come from clients, so the loaded ones are bounded
   by `MaxEntries` (1024 at 0) and `IdleTimeout` (24h at 0); have `Load` turn
@@ -327,7 +331,7 @@ func prove(challenger *tlsconn.Challenger, leaf *x509.Certificate, userKey crypt
 ```
 
 - `ParseKeyPair` takes the chain, leaf first, as PEM (text around the blocks,
-  such as OpenSSL's attributes, and other block types are skipped) or DER,
+  including key attributes, and other block types are skipped) or DER,
   and one private key in PKCS #1, PKCS #8 or SEC 1 form (RSA, ECDSA,
   Ed25519); both may be in one file. It checks that the key's public key
   equals the leaf's and returns a `tls.Certificate` with its `Leaf` set.
@@ -584,8 +588,8 @@ func forwardMetered(ctx context.Context, client, backend net.Conn,
 `ExampleWithRelayFlows_limit` in the package documentation shows a complete
 limiter for `Wait` and `Done` that many relays can share.
 
-`ConnGroup` closes connections together, such as all of a user's when its
-allowance runs out: `remove, err := group.Add(conn)` adds one (`remove` is
+`ConnGroup` can close all of a user's connections when the user exhausts
+their allowance: `remove, err := group.Add(conn)` adds one (`remove` is
 called when it is done; a closed group returns `netx.ErrGroupClosed` and
 leaves `conn` alone), `CloseMembers(cause)` closes the current members and
 keeps the group open, and `Close` also refuses later ones. A connection can
@@ -806,10 +810,10 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
 - The first datagram of a new flow starts a connection; later ones are read
   from it, truncated to the buffer like a UDP socket. Closing a connection
   lets the next datagram of that flow start a new one.
-- Datagrams are dropped, as a socket buffer would, when a connection's queue
-  (`WithPacketQueue`, 128) or the accept backlog (`WithPacketAcceptBacklog`,
-  128) is full. A datagram larger than 2 KiB takes the room of several, so a queue
-  holds at most 128 × 2 KiB by default however large the datagrams are.
+- Datagrams are dropped when a connection's queue (`WithPacketQueue`) or
+  the accept backlog (`WithPacketAcceptBacklog`) is full. Both default to 128.
+  A datagram larger than 2 KiB uses multiple queue slots, so the default
+  queue holds at most 128 × 2 KiB.
   `WithPacketAcceptFilter` sees a new flow's first datagram and can reject it
   before anything is allocated for the peer; it can answer with
   `l.WriteTo`, as a stateless retry does.

@@ -8,12 +8,10 @@ import "syscall"
 // made.
 func listenErr() error { return ErrListenUnsupported }
 
-//goland:noinspection GoUnusedParameter
-func control(string, string, syscall.RawConn) error {
+func control(_, _ string, _ syscall.RawConn) error {
 	return ErrListenUnsupported
 }
 
-//goland:noinspection GoUnusedParameter
-func controlPacket(string, string, syscall.RawConn) error {
+func controlPacket(_, _ string, _ syscall.RawConn) error {
 	return ErrListenUnsupported
 }

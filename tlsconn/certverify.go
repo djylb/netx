@@ -139,8 +139,8 @@ func chainOf(cert *tls.Certificate) ([]*x509.Certificate, error) {
 	return chain, nil
 }
 
-// validityError returns ErrNotYetValid or ErrExpired if c is not valid at
-// at, by RFC 5280, whose NotAfter is the last valid instant, as x509 checks.
+// validityError returns ErrNotYetValid or ErrExpired if c is invalid at the given
+// time. RFC 5280 includes NotAfter in the validity interval.
 func validityError(c *x509.Certificate, at time.Time) error {
 	switch {
 	case at.Before(c.NotBefore):
@@ -151,7 +151,7 @@ func validityError(c *x509.Certificate, at time.Time) error {
 	return nil
 }
 
-// chainError classifies an error of x509.Certificate.Verify for leaf at at.
+// chainError classifies a verification error for leaf at the given time.
 func chainError(leaf *x509.Certificate, at time.Time, err error) error {
 	if invalid, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
 		switch invalid.Reason {

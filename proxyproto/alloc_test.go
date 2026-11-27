@@ -24,10 +24,10 @@ func TestHeaderWriteToAllocs(t *testing.T) {
 func TestReadDatagramAllocs(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
-		mode       DatagramMode
 		wire       []byte
-		wantHeader bool
 		maxAllocs  float64
+		mode       DatagramMode
+		wantHeader bool
 	}{
 		{name: "Auto without a header", mode: DatagramAuto, wire: []byte("query")},
 		{

@@ -103,6 +103,7 @@ func TestPacketListenerEstablishedFlowSkipsBroadcastSnapshot(t *testing.T) {
 	// Observe refresh requests without running the worker.
 	refresh := make(chan struct{}, 1)
 	l.broadcasts = &packetBroadcasts{refresh: refresh}
+	defer func() { l.broadcasts = nil }() // detach the synthetic cache before Close
 	l.broadcasts.snapshot.Store(&packetBroadcastSnapshot{expires: time.Now().Add(time.Hour)})
 	newPeer := netip.MustParseAddrPort("192.0.2.8:1235")
 	l.deliver([]byte("new before expiry"), newPeer, nil, &sock, oob)
@@ -251,10 +252,10 @@ func TestPacketListenerSeparatesDestinations(t *testing.T) {
 	}
 	for _, want := range []struct {
 		dst      netip.Addr
-		ifindex  uint32
 		payloads []string
+		ifindex  uint32
 	}{
-		{a, 1, []string{"a", "c"}}, {b, 1, []string{"b"}}, {local, 1, []string{"d"}}, {local, 2, []string{"e"}},
+		{dst: a, ifindex: 1, payloads: []string{"a", "c"}}, {dst: b, ifindex: 1, payloads: []string{"b"}}, {dst: local, ifindex: 1, payloads: []string{"d"}}, {dst: local, ifindex: 2, payloads: []string{"e"}},
 	} {
 		c := nettest.AcceptWithin(t, l)
 		if got, address := c.LocalAddr().(*net.UDPAddr).AddrPort(), netip.AddrPortFrom(want.dst, sock.port); got != address {
@@ -351,6 +352,8 @@ func TestPacketListenerSharedBroadcastCache(t *testing.T) {
 	if b == nil || second.broadcasts != b {
 		t.Fatal("destination-aware listeners must share a broadcast cache")
 	}
+	// A listener without a cache has no reference to release.
+	releasePacketBroadcasts(nil)
 	_ = first.Close()
 	select {
 	case <-b.stopped:

@@ -83,8 +83,8 @@ type borrower struct {
 	net.Conn
 }
 
-func (borrower) HandshakeContext(context.Context) error { return nil }
-func (c borrower) NetConn() net.Conn                    { return c.Conn }
+func (borrower) HandshakeContext(_ context.Context) error { return nil }
+func (c borrower) NetConn() net.Conn                      { return c.Conn }
 
 func TestCloseBeneathTLS(t *testing.T) {
 	isClosed := func(c net.Conn) bool {

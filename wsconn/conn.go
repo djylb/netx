@@ -58,37 +58,37 @@ type Conn struct {
 	zbuf        []byte
 	// The buffers of WriteMessages, under msgMu: the encoded frames, the
 	// compressed payload of a message, and the segments of a writev.
-	batch           []byte
-	rutf            utf8State
-	closeTimeout    time.Duration
-	rpos            int
-	pongLen         int   // under pongMu
-	rlimit          int64 // bound of the current message; negative for none
-	rlen            int64 // bytes of the message delivered
-	rtail           int   // bytes of deflateTail handed to the inflater
-	readLimit       int64
-	callbackPartial bool // a control callback interrupted a fragmented message
-	rseq            uint64
-	closeBy         atomic.Int64 // Close's deadline, in Unix nanoseconds
-	rremain         int64        // payload bytes left in the current frame
-	closeOnce       sync.Once
+	batch        []byte
+	rutf         utf8State
+	closeTimeout time.Duration
+	rpos         int
+	pongLen      int   // under pongMu
+	rlimit       int64 // bound of the current message; negative for none
+	rlen         int64 // bytes of the message delivered
+	rtail        int   // bytes of deflateTail handed to the inflater
+	readLimit    int64
+	rseq         uint64
+	closeBy      atomic.Int64 // Close's deadline, in Unix nanoseconds
+	rremain      int64        // payload bytes left in the current frame
+	closeOnce    sync.Once
 	// msgMu and frameMu are described above; wdMu guards wd and pongBound,
 	// and pongMu pongLen and pongData.
-	msgMu       sync.Mutex
-	frameMu     sync.Mutex
-	wdMu        sync.Mutex
-	pongMu      sync.Mutex
-	rkey        uint32
-	closed      atomic.Bool
-	closeSent   atomic.Bool // set under frameMu, or when Close gave up on it
-	pongPending atomic.Bool
-	closing     atomic.Bool // Close was called
-	wctrl       [maxHeaderLen + maxControlPayload]byte
-	pongData    [maxControlPayload]byte // under pongMu
-	ctrl        [maxControlPayload]byte
-	whb         [maxHeaderLen]byte
-	rcomp       bool // the message is compressed
-	client      bool
+	msgMu           sync.Mutex
+	frameMu         sync.Mutex
+	wdMu            sync.Mutex
+	pongMu          sync.Mutex
+	rkey            uint32
+	closed          atomic.Bool
+	closeSent       atomic.Bool // set under frameMu, or when Close gave up on it
+	pongPending     atomic.Bool
+	closing         atomic.Bool // Close was called
+	wctrl           [maxHeaderLen + maxControlPayload]byte
+	pongData        [maxControlPayload]byte // under pongMu
+	ctrl            [maxControlPayload]byte
+	whb             [maxHeaderLen]byte
+	callbackPartial bool // a control callback interrupted a fragmented message
+	rcomp           bool // the message is compressed
+	client          bool
 	// writev is set for connections whose net.Buffers writes are one
 	// writev(2), so that a server writes a header and a payload at once
 	// without copying the payload.

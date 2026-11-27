@@ -88,11 +88,11 @@ func TestHandshake(t *testing.T) {
 		t.Fatalf("subprotocols %q %q", srv.Subprotocol(), cli.Subprotocol())
 	}
 	req := srv.Request()
-	if req.Target != "/path?q=1" || req.Header.Get("X-Token") != "t" || req.Header.Get("Host") != "front.example" {
+	if req == nil || req.Target != "/path?q=1" || req.Header.Get("X-Token") != "t" || req.Header.Get("Host") != "front.example" {
 		t.Fatalf("request %+v", req)
 	}
-	if cli.Response().Header.Get("X-Server") != "yes" {
-		t.Fatalf("response %+v", cli.Response())
+	if resp := cli.Response(); resp == nil || resp.Header.Get("X-Server") != "yes" {
+		t.Fatalf("response %+v", resp)
 	}
 	if srv.Compressed() || cli.Compressed() {
 		t.Fatal("compression without options")

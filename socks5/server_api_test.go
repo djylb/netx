@@ -857,9 +857,9 @@ func TestUDPConnAsNetPacketConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	npc := u.AsNetPacketConn()
-	defer func() { _ = npc.Close() }()
-	if _, err := npc.WriteTo([]byte("x"), &net.UnixAddr{Name: "/sock", Net: "unix"}); !errors.Is(err, socks5.ErrInvalidAddr) {
+	packetConn := u.AsNetPacketConn()
+	defer func() { _ = packetConn.Close() }()
+	if _, err := packetConn.WriteTo([]byte("x"), &net.UnixAddr{Name: "/sock", Net: "unix"}); !errors.Is(err, socks5.ErrInvalidAddr) {
 		t.Fatalf("WriteTo(unix address) = %v, want ErrInvalidAddr", err)
 	}
 	buf := make([]byte, 64)
@@ -867,11 +867,11 @@ func TestUDPConnAsNetPacketConn(t *testing.T) {
 		var n int
 		var src net.Addr
 		for range 10 {
-			if _, err := npc.WriteTo([]byte("net"), dst); err != nil {
+			if _, err := packetConn.WriteTo([]byte("net"), dst); err != nil {
 				t.Fatal(err)
 			}
-			_ = npc.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-			if n, src, err = npc.ReadFrom(buf); err == nil {
+			_ = packetConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+			if n, src, err = packetConn.ReadFrom(buf); err == nil {
 				break
 			}
 		}

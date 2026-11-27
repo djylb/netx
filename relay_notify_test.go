@@ -496,7 +496,7 @@ func TestCopyNotifierContext(t *testing.T) {
 }
 
 // The notification that arrives during arm is taken by arm's caller, and one
-// that arrives later starts a task; neither is lost or doubled.
+// that arrives later starts a task; each notification is delivered exactly once.
 func TestNotifyCopyInterleavings(t *testing.T) {
 	for _, mode := range fireModes {
 		async := mode.async

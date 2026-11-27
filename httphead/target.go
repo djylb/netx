@@ -44,7 +44,7 @@ type Target struct {
 	Form Form
 }
 
-// ParseTarget parses the request-target of a request with method method:
+// ParseTarget parses a request-target according to the HTTP method:
 // the authority form for CONNECT, compared case-insensitively, and the
 // other forms for other methods. An absolute URI must have a host and no
 // user information, which is deprecated and would let the host differ from

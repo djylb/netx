@@ -64,12 +64,12 @@ func RequestBody(h Header, minor int) (Framing, int64, error) {
 	return Chunked, 0, nil
 }
 
-// ResponseBody returns how the body of a response with status
-// code and header h, to a request with method method, is delimited, the length for
-// Length, and, for Chunked and UntilClose, the transfer codings other than
-// chunked as sent, such as "gzip", which the body is still encoded with. A
-// response to HEAD or successful CONNECT and one with a 1xx, 204 or 304 code has no body, whatever
-// its fields say. Transfer-Encoding overrides Content-Length (RFC 9112,
+// ResponseBody determines response framing from the request method, response
+// status code and header. It returns the body length for Length. For Chunked
+// and UntilClose, it returns the other transfer codings still applied to the
+// body, such as "gzip". Responses to HEAD, successful CONNECT responses, and
+// responses with a 1xx, 204 or 304 status have no body regardless of their
+// headers. Transfer-Encoding overrides Content-Length (RFC 9112,
 // section 6.3); a list that does not end in chunked is read until close,
 // and one that holds chunked before its end is an error, as are invalid or
 // differing Content-Length values. A response with neither is read until

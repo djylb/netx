@@ -18,6 +18,7 @@ import (
 
 	"github.com/djylb/netx"
 	"github.com/djylb/netx/internal/dnslookup"
+	"github.com/djylb/netx/internal/nettest"
 
 	"github.com/djylb/timeshim"
 )
@@ -701,21 +702,7 @@ func BenchmarkDatagramRelay(b *testing.B) {
 // through the relay to a UDP echo and back.
 func benchmarkDatagramRelay(b *testing.B, size int, name bool) {
 	b.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		b.Skip(err)
-	}
-	defer func() { _ = ln.Close() }()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, _ := ln.Accept()
-		accepted <- c
-	}()
-	cc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	sc := <-accepted
+	cc, sc := nettest.TCPPair(b)
 	client := netx.NewFramedConn(cc, netx.WithFramedDatagrams())
 	stream := netx.NewFramedConn(sc, netx.WithFramedDatagrams())
 

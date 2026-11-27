@@ -144,19 +144,19 @@ func (r *DatagramRelay) Relay(ctx context.Context, stream io.ReadWriteCloser, ou
 
 // datagramRelay is one relay of a DatagramRelay or of a Server association.
 type datagramRelay struct {
-	stream   io.ReadWriter
-	out      PacketConn
-	allow    func(dst netx.Addr) bool
-	sent     func(dst netx.Addr, n int)
-	received func(src netx.Addr, n int)
-	onError  func(err error)
-	idle     *clock.Idle // nil without an idle timeout
+	stream     io.ReadWriter
+	out        PacketConn
+	allow      func(dst netx.Addr) bool
+	sent       func(dst netx.Addr, n int)
+	received   func(src netx.Addr, n int)
+	onError    func(err error)
+	idle       *clock.Idle // nil without an idle timeout
+	creditWait chan bool
+	creditMu   sync.Mutex
 	// icmpCredit counts the datagrams sent, up to maxICMPCredit, that a
 	// reported ICMP error can stand for; see replies.
-	creditMu   sync.Mutex
 	icmpCredit int
 	sending    bool
-	creditWait chan bool
 	// reportInvalid passes the datagrams dropped as invalid to onError,
 	// which a Server does not.
 	reportInvalid bool
@@ -345,7 +345,7 @@ func (d *datagramRelay) finishSend(sent bool) {
 }
 
 // isICMPError reports whether err is a UDP socket's report of an ICMP port
-// unreachable or reset: a *net.OpError on a udp network with the
+// unreachable or reset: a *net.OpError on a UDP network with the
 // ECONNREFUSED or ECONNRESET errno, not an error that only reads like one.
 func isICMPError(err error) bool {
 	var op *net.OpError

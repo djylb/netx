@@ -21,7 +21,6 @@ func control(_, _ string, c syscall.RawConn) error {
 	return controlFD(c, func(fd int) error { return setOptions(fd, bindAnyOpts) })
 }
 
-//goland:noinspection GoUnusedParameter
-func controlPacket(string, string, syscall.RawConn) error {
+func controlPacket(_, _ string, _ syscall.RawConn) error {
 	return ErrListenUnsupported
 }

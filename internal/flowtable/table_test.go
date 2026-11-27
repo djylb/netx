@@ -15,8 +15,8 @@ import (
 )
 
 type wheelConn struct {
-	member Membership[int, struct{}]
 	q      dgram.Queue
+	member Membership[int, struct{}]
 	key    int
 	free   bool // the wheel's lock was free while it was shut down
 }
@@ -167,9 +167,9 @@ func TestSetIdleHot(t *testing.T) {
 type indexedKey struct{ peer, dst int }
 
 type indexedConn struct {
+	q        dgram.Queue
 	member   Membership[indexedKey, int]
 	once     sync.Once
-	q        dgram.Queue
 	prepared bool
 }
 

@@ -16,8 +16,8 @@ const DefaultRecordingLimit = 64 * 1024
 // PrefixConn. For a single look at the first bytes, Peek is simpler.
 type RecordingConn struct {
 	underlying  net.Conn
-	buf         []byte
 	idle        *sync.Cond // allocated only when reads contend
+	buf         []byte
 	reading     bool
 	mu          sync.Mutex
 	detached    bool

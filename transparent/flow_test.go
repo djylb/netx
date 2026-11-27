@@ -110,14 +110,19 @@ func TestFlowDirect(t *testing.T) {
 		t.Fatal("direct flow reports redirected")
 	}
 	readFlow(t, f, "ping")
+	checkFlowReply(t, f, client, lnAddr)
+}
+
+func checkFlowReply(t *testing.T, f *FlowConn, client *net.UDPConn, dst netip.AddrPort) {
+	t.Helper()
 	if _, err := f.Write([]byte("pong")); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 	buf := make([]byte, 16)
 	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, from, err := client.ReadFromUDPAddrPort(buf)
-	if err != nil || string(buf[:n]) != "pong" || from != lnAddr {
-		t.Fatalf("client got %q from %v, %v; want pong from %v", buf[:n], from, err, lnAddr)
+	if err != nil || string(buf[:n]) != "pong" || from != dst {
+		t.Fatalf("client got %q from %v, %v; want pong from %v", buf[:n], from, err, dst)
 	}
 }
 

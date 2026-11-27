@@ -141,17 +141,10 @@ func (s *streamSocket) waitReadable() error {
 // blocked when there is nothing yet. Bytes a PrefixConn holds are read
 // through it.
 func (s *streamSocket) readNow(b []byte) (int, bool, error) {
-	if s.src.prefixPending() {
-		n, err := s.src.r.Read(b)
-		return n, false, err
-	}
-	if s.src.exhausted() {
-		return 0, false, io.EOF
-	}
-	b = b[:s.src.limited(int64(len(b)))]
-	if err := s.src.timeouts.refresh(); err != nil {
-		return 0, false, err
-	}
+	return s.src.readNow(b, s.tryRead)
+}
+
+func (s *streamSocket) tryRead(b []byte) (int, bool, error) {
 	s.buf, s.n, s.err, s.blocked = b, 0, nil, false
 	err := s.raw.Read(s.read)
 	s.buf = nil
@@ -164,7 +157,6 @@ func (s *streamSocket) readNow(b []byte) (int, bool, error) {
 	case s.n == 0 && len(b) > 0:
 		return 0, false, io.EOF
 	}
-	s.src.consumed(s.n)
 	return s.n, false, nil
 }
 

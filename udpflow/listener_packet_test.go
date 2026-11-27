@@ -872,19 +872,25 @@ func TestPacketListenerMaxConnsSpoofedFlood(t *testing.T) {
 }
 
 func TestInvalidPeerPort(t *testing.T) {
-	for _, aware := range []bool{false, true} {
-		l := newUDPListener(t)
-		l.pktinfo = aware
-		for _, port := range []int{-1, 65536} {
-			peer := &net.UDPAddr{IP: l.Addr().(*net.UDPAddr).IP, Port: port}
-			if c, err := l.Dial(peer); err == nil {
-				_ = c.Close()
-				t.Errorf("Dial accepted %d", port)
+	for _, bind := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
+		t.Run(bind, func(t *testing.T) {
+			pc, err := net.ListenPacket("udp4", bind)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, err := l.WriteTo(nil, peer); err == nil {
-				t.Errorf("WriteTo accepted %d", port)
+			l := NewPacketListener(pc)
+			t.Cleanup(func() { _ = l.Close() })
+			for _, port := range []int{-1, 65536} {
+				peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+				if c, err := l.Dial(peer); err == nil {
+					_ = c.Close()
+					t.Errorf("Dial accepted %d", port)
+				}
+				if _, err := l.WriteTo(nil, peer); err == nil {
+					t.Errorf("WriteTo accepted %d", port)
+				}
 			}
-		}
+		})
 	}
 }
 

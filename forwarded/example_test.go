@@ -17,7 +17,7 @@ func ExampleResolver() {
 	}
 	r := &forwarded.Resolver{Trusted: trusted, Metadata: forwarded.TrustProto}
 
-	req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.1.2.3:41000"
 	req.Header.Add("X-Forwarded-For", "127.0.0.1, 198.51.100.17")
 	req.Header.Set("X-Forwarded-Proto", "https")

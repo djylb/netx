@@ -30,9 +30,9 @@ type Writer struct {
 	deadline time.Time // under mu
 	w        io.Writer // under mu
 	changed  waiter    // under mu
-	writing  bool      // a Write owns the stream; under mu
 	gen      uint64    // counts the changes of deadline and stream, see Reader.gen; under mu
 	mu       sync.Mutex
+	writing  bool // a Write owns the stream; under mu
 	set      bool // w was installed, perhaps nil; under mu
 	swapping bool // a swap waits for the writes to end; new ones wait; under mu
 	closed   bool // under mu

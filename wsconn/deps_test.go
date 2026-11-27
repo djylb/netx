@@ -1,13 +1,11 @@
 package wsconn
 
 import (
-	"context"
 	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestDependencies checks what the package documentation promises: wsconn
@@ -32,10 +30,8 @@ func TestDependencies(t *testing.T) {
 		{module + "/wsconn", []string{"net/http", "crypto/tls", "crypto/sha1", "crypto/rand"}, []string{module + "/httphead"}},
 		{module + "/wsconn/wshttp", nil, []string{module + "/httphead", module + "/wsconn"}},
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
 	for _, r := range rules {
-		out, err := exec.CommandContext(ctx, goCmd, "list", "-mod=readonly", "-buildvcs=false", "-deps", "-f", "{{.ImportPath}}", r.pkg).Output()
+		out, err := exec.CommandContext(t.Context(), goCmd, "list", "-mod=readonly", "-buildvcs=false", "-deps", "-f", "{{.ImportPath}}", r.pkg).Output()
 		if err != nil {
 			t.Fatalf("go list %s: %v", r.pkg, err)
 		}

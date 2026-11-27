@@ -1,6 +1,7 @@
 package transparent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -110,7 +111,14 @@ func TestFlowListenerTPROXY(t *testing.T) {
 	defer func() { _ = l.Close() }()
 	port := strconv.Itoa(l.Addr().(*net.UDPAddr).Port)
 
-	const ns, hostIf, nsIf, target = "netxflow", "netxv0", "netxv1", "203.0.113.5:53"
+	const (
+		ns, hostIf, nsIf = "netxflow", "netxv0", "netxv1"
+		targetIP         = "203.0.113.5"
+		targetPort       = "53"
+		clientIP         = "10.231.0.2"
+		mark, table      = "0x4e7", "4231"
+	)
+	target := net.JoinHostPort(targetIP, targetPort)
 	run := func(name string, args ...string) {
 		t.Helper()
 		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
@@ -120,7 +128,6 @@ func TestFlowListenerTPROXY(t *testing.T) {
 	cleanup := func(name string, args ...string) {
 		t.Cleanup(func() { _ = exec.Command(name, args...).Run() })
 	}
-	rule := []string{"PREROUTING", "-t", "mangle", "-i", hostIf, "-p", "udp", "-d", "203.0.113.5", "--dport", "53", "-j", "TPROXY", "--on-port", port, "--tproxy-mark", "0x4e7"}
 	run("ip", "netns", "add", ns)
 	cleanup("ip", "netns", "del", ns)
 	run("ip", "link", "add", hostIf, "type", "veth", "peer", "name", nsIf)
@@ -128,33 +135,39 @@ func TestFlowListenerTPROXY(t *testing.T) {
 	run("ip", "link", "set", nsIf, "netns", ns)
 	run("ip", "addr", "add", "10.231.0.1/24", "dev", hostIf)
 	run("ip", "link", "set", hostIf, "up")
-	run("ip", "netns", "exec", ns, "ip", "addr", "add", "10.231.0.2/24", "dev", nsIf)
+	run("ip", "netns", "exec", ns, "ip", "addr", "add", clientIP+"/24", "dev", nsIf)
 	run("ip", "netns", "exec", ns, "ip", "link", "set", nsIf, "up")
 	run("ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", "10.231.0.1")
+	// Source validation can use the mark too. Keep the route back to the
+	// client unicast even when src_valid_mark is enabled.
+	route := []string{"local", targetIP + "/32", "dev", "lo", "table", table}
+	run("ip", append([]string{"route", "add"}, route...)...)
+	cleanup("ip", append([]string{"route", "del"}, route...)...)
+	policy := []string{"iif", hostIf, "fwmark", mark, "lookup", table}
+	run("ip", append([]string{"rule", "add"}, policy...)...)
+	cleanup("ip", append([]string{"rule", "del"}, policy...)...)
+	run("ip", "route", "get", targetIP, "from", clientIP, "iif", hostIf, "mark", mark)
+	rule := []string{"PREROUTING", "-t", "mangle", "-i", hostIf, "-p", "udp", "-d", targetIP, "--dport", targetPort, "-j", "TPROXY", "--on-port", port, "--tproxy-mark", mark}
 	run("iptables", append([]string{"-A"}, rule...)...)
 	cleanup("iptables", append([]string{"-D"}, rule...)...)
-	run("ip", "rule", "add", "fwmark", "0x4e7", "lookup", "4231")
-	cleanup("ip", "rule", "del", "fwmark", "0x4e7", "lookup", "4231")
-	run("ip", "route", "add", "local", "0.0.0.0/0", "dev", "lo", "table", "4231")
-	cleanup("ip", "route", "flush", "table", "4231")
 
 	for round := range 2 {
-		client := exec.Command("ip", "netns", "exec", ns, exe, "-test.run=^TestFlowClientHelper$", "-test.count=1")
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		client := exec.CommandContext(ctx, "ip", "netns", "exec", ns, exe, "-test.run=^TestFlowClientHelper$", "-test.count=1")
 		client.Env = append(os.Environ(), "NETX_FLOW_CLIENT="+target)
-		out := make(chan error, 1)
-		go func() {
-			b, err := client.CombinedOutput()
-			if err != nil {
-				err = fmt.Errorf("%w: %s", err, b)
-			}
-			out <- err
-		}()
-		c, err := l.Accept()
-		if err != nil {
+		var out bytes.Buffer
+		client.Stdout, client.Stderr = &out, &out
+		if err := client.Start(); err != nil {
 			t.Fatal(err)
 		}
-		f := c.(*FlowConn)
-		if !f.Redirected() || f.LocalAddr().String() != target || f.RemoteAddr().(*net.UDPAddr).IP.String() != "10.231.0.2" {
+		t.Cleanup(func() {
+			if client.ProcessState == nil {
+				_ = client.Wait()
+			}
+		})
+		f := acceptFlow(t, l)
+		if !f.Redirected() || f.LocalAddr().String() != target || f.RemoteAddr().(*net.UDPAddr).IP.String() != clientIP {
 			t.Fatalf("round %d: flow %v -> %v, redirected %v", round, f.RemoteAddr(), f.LocalAddr(), f.Redirected())
 		}
 		// The first datagram arrives on the listener, the later ones on the
@@ -165,9 +178,10 @@ func TestFlowListenerTPROXY(t *testing.T) {
 				t.Fatalf("round %d: Write() error = %v", round, err)
 			}
 		}
-		if err := <-out; err != nil {
-			t.Fatalf("round %d: client: %v", round, err)
+		if err := client.Wait(); err != nil {
+			t.Fatalf("round %d: client: %v: %s", round, err, &out)
 		}
+		cancel()
 		// Closing the flow closes its socket, so the next client's flow,
 		// from another port, starts anew.
 		_ = f.Close()
@@ -199,15 +213,7 @@ func TestFlowDirectAnswersFromDestination(t *testing.T) {
 	dst := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.2"), uint16(c.LocalAddr().(*net.UDPAddr).Port))
 	l.deliver([]byte("ping"), PacketInfo{Src: client.LocalAddr().(*net.UDPAddr).AddrPort(), Dst: dst})
 	f := acceptFlow(t, l)
-	if _, err := f.Write([]byte("pong")); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	buf := make([]byte, 16)
-	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, from, err := client.ReadFromUDPAddrPort(buf)
-	if err != nil || string(buf[:n]) != "pong" || from != dst {
-		t.Fatalf("client got %q from %v, %v; want pong from %v", buf[:n], from, err, dst)
-	}
+	checkFlowReply(t, f, client, dst)
 }
 
 // Broadcast datagrams reach a wildcard socket directly: they are not

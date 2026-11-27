@@ -429,7 +429,7 @@ func TestFromEnvironment(t *testing.T) {
 		t.Fatalf("FromEnvironment without NO_PROXY = %T, want *socks5.Dialer", d)
 	}
 
-	// A value without a scheme is an http proxy, as for curl.
+	// A value without a scheme uses HTTP.
 	for raw, want := range map[string]string{"127.0.0.1:1080": "127.0.0.1:1080", "proxy.local:3128": "proxy.local:3128", "proxy.local": "proxy.local:80"} {
 		t.Setenv("ALL_PROXY", raw)
 		d, err := FromEnvironment(nil)
@@ -941,7 +941,7 @@ func TestParseURL(t *testing.T) {
 		"socks5://u:pa/ss@h:1":               "pa",
 		"socks5://u:p%zzw@h:1":               "%zz",
 		"u:p%zzw@h:1":                        "%zz",
-		"http://[::1":                        "",
+		"https://[::1":                       "",
 	} {
 		_, err := ParseURL(raw)
 		if err == nil {
@@ -1107,6 +1107,8 @@ func TestFromString(t *testing.T) {
 	if h, ok := d.(*HTTPDialer); err != nil || !ok || h.ProxyAddr != "proxy.example:3128" {
 		t.Fatalf("FromString() = %#v, %v; want an HTTPDialer", d, err)
 	}
+	// Exercise missing authority without requiring a TLS dialer.
+	//noinspection HttpUrlsUsage
 	if _, err := FromString("http://", nil); err == nil {
 		t.Fatal("FromString() of a URL without host succeeded")
 	}

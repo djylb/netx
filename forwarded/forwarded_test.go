@@ -279,14 +279,14 @@ func TestResolveAddressTrustDoesNotImplyMetadataTrust(t *testing.T) {
 	trusted := mustSet(t, "10.0.0.0/8")
 	peer := ap("10.0.0.1:443")
 	for _, tc := range []struct {
-		header Header
 		name   string
 		value  string
+		header Header
 	}{
-		{HeaderXForwardedFor, "X-Forwarded-For", "198.51.100.9, 10.0.0.2"},
-		{HeaderXRealIP, "X-Real-Ip", "198.51.100.9"},
-		{HeaderXRealIP, "Cf-Connecting-Ip", "198.51.100.9"},
-		{HeaderForwarded, "Forwarded", "for=198.51.100.9;proto=https;host=example.com"},
+		{header: HeaderXForwardedFor, name: "X-Forwarded-For", value: "198.51.100.9, 10.0.0.2"},
+		{header: HeaderXRealIP, name: "X-Real-Ip", value: "198.51.100.9"},
+		{header: HeaderXRealIP, name: "Cf-Connecting-Ip", value: "198.51.100.9"},
+		{header: HeaderForwarded, name: "Forwarded", value: "for=198.51.100.9;proto=https;host=example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Resolver{Trusted: trusted, Header: tc.header, Name: tc.name}
@@ -308,15 +308,15 @@ func TestResolveMetadataTrustByField(t *testing.T) {
 		"Forwarded":         {`for=198.51.100.9;proto=http, for=10.0.0.2;proto=https;host=near.example.com`},
 	}
 	for _, tc := range []struct {
+		proto, host string
 		header      Header
 		metadata    Metadata
-		proto, host string
 	}{
-		{HeaderXForwardedFor, TrustProto, "https", ""},
-		{HeaderXForwardedFor, TrustHost, "", "example.com:443"},
-		{HeaderForwarded, TrustProto, "http", ""},
-		{HeaderForwarded, TrustHost, "", ""},
-		{HeaderForwarded, TrustProto | TrustHost, "http", ""},
+		{header: HeaderXForwardedFor, metadata: TrustProto, proto: "https", host: ""},
+		{header: HeaderXForwardedFor, metadata: TrustHost, proto: "", host: "example.com:443"},
+		{header: HeaderForwarded, metadata: TrustProto, proto: "http", host: ""},
+		{header: HeaderForwarded, metadata: TrustHost, proto: "", host: ""},
+		{header: HeaderForwarded, metadata: TrustProto | TrustHost, proto: "http", host: ""},
 	} {
 		r := &Resolver{Trusted: trusted, Header: tc.header, Metadata: tc.metadata}
 		if c := r.Resolve(peer, h); c.Addr != ap("198.51.100.9:0") || c.Proto != tc.proto || c.Host != tc.host {

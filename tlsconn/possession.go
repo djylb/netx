@@ -281,9 +281,9 @@ func (c *Challenger) Challenge(purpose string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
-// Expiry returns when challenge, as Challenge returned it for purpose,
-// expires, by the wall clock as it would read had it not been set since the
-// Challenger was made, or ErrBadChallenge or ErrNoChallenger.
+// Expiry returns the expiration time of a challenge issued for purpose.
+// It uses the wall clock in effect when the Challenger was created.
+// It returns ErrBadChallenge or ErrNoChallenger if the challenge cannot be opened.
 func (c *Challenger) Expiry(purpose, challenge string) (time.Time, error) {
 	raw, err := c.open(purpose, challenge)
 	if err != nil {

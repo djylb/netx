@@ -180,13 +180,12 @@ type clientConn struct {
 	local, remote net.Addr
 	pw            *io.PipeWriter
 	cancel        context.CancelFunc
-
-	rd, wd    *streamTimer // under mu
-	once      sync.Once
-	mu        sync.Mutex
-	closed    bool          // under mu
-	expired   bool          // under mu
-	resetDone chan struct{} // reset in progress or complete; under mu
+	rd, wd        *streamTimer  // under mu
+	resetDone     chan struct{} // reset in progress or complete; under mu
+	once          sync.Once
+	mu            sync.Mutex
+	closed        bool // under mu
+	expired       bool // under mu
 }
 
 func (c *clientConn) Read(p []byte) (int, error) {

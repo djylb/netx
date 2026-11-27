@@ -50,7 +50,7 @@ func TestEarlyResponseFromTargetThatStopsReading(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	_, _ = fmt.Fprintf(c, "POST http://%s/ HTTP/1.1\r\nContent-Length: %d\r\n\r\n", ln.Addr(), 64<<20)
+	_, _ = fmt.Fprintf(c, "POST %s/ HTTP/1.1\r\nContent-Length: %d\r\n\r\n", originURL(ln.Addr().String()), 64<<20)
 	go func() {
 		buf := make([]byte, 64<<10)
 		for {
@@ -104,14 +104,7 @@ func TestCheckSeesServedConn(t *testing.T) {
 func TestShutdownEndsKeptAliveConns(t *testing.T) {
 	o := origin(t, func(w http.ResponseWriter, r *http.Request) {})
 	s := &httpproxy.Server{}
-	addr := serve(t, s)
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	br := bufio.NewReader(c)
+	c, br := dialProxy(t, s)
 	_, _ = fmt.Fprintf(c, "GET %s/ HTTP/1.1\r\n\r\n", o.URL)
 	if _, err := http.ReadResponse(br, nil); err != nil {
 		t.Fatal(err)
@@ -160,7 +153,7 @@ func TestFastAnswerToCompleteRequestKeepsConns(t *testing.T) {
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	br := bufio.NewReader(c)
 	for i := range 3 {
-		_, _ = fmt.Fprintf(c, "POST http://%s/ HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", origin)
+		_, _ = fmt.Fprintf(c, "POST %s/ HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", origin)
 		resp, err := http.ReadResponse(br, nil)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)

@@ -160,8 +160,8 @@ func (s RelaySide) Other() RelaySide { return 3 - s }
 // Err where it is a *net.OpError; Relay does not take its fast paths apart to
 // tell it otherwise.
 type RelayError struct {
-	From RelaySide
 	Err  error
+	From RelaySide
 }
 
 func (e *RelayError) Error() string {

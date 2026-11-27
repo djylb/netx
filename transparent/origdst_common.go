@@ -20,7 +20,7 @@ var ErrOriginalDestinationUnsupported = fmt.Errorf("transparent: original destin
 //
 // On Linux it reads SO_ORIGINAL_DST, or IP6T_SO_ORIGINAL_DST for a native
 // IPv6 local address (REDIRECT/DNAT), and on FreeBSD and macOS it queries pf
-// with DIOCNATLOOK, which XNU only allows for root. Without a translation the
+// with DIOCNATLOOK, which the kernel restricts to root. Without a translation the
 // connection reached the address it was sent to, its local address, as
 // TPROXY and IP_BINDANY sockets receive it. A destination on another port
 // than the local one was redirected. One on the same port was redirected

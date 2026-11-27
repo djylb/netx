@@ -100,8 +100,8 @@ func (e *RelayEnd) Abort(cause error) {
 // io.MultiReader does, but lazily: Next is called for the first part, and
 // for the next one each time a part reaches EOF, until it returns a nil
 // part, so that what follows can depend on what came before, as an HTTP
-// body depends on its head. Relay and Copy copy each part as they would
-// copy it as a source of its own, so that a part that is a connection, or
+// body depends on its head. Relay and Copy treat each part as a separate
+// source, so that a part that is a connection, or
 // an *io.LimitedReader over one, is spliced where the connection would be.
 // An error of Next ends the reading with it. A ChainReader is not safe for
 // concurrent use.

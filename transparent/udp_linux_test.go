@@ -52,20 +52,20 @@ func TestOrigDstFromControl(t *testing.T) {
 	other := controlMessage(solIP, 8 /* IP_TTL */, []byte{64, 0, 0, 0})
 	tests := []struct {
 		name string
-		oob  []byte
 		want string
+		oob  []byte
 	}{
-		{"ipv4", append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...), "203.0.113.9:53"},
-		{"ipv6", controlMessage(solIPv6, ipv6RecvOrigDstAddr, sin6), "[2001:db8::7]:443"},
-		{"ipv4-mapped", controlMessage(solIPv6, ipv6RecvOrigDstAddr, mapped), "192.0.2.1:443"},
-		{"link-local", controlMessage(solIPv6, ipv6RecvOrigDstAddr, linkLocal), "[fe80::7%" + ifName + "]:443"},
-		{"link-local unknown interface", controlMessage(solIPv6, ipv6RecvOrigDstAddr, unknownIf), "[fe80::7%2147483632]:443"},
-		{"global with scope", controlMessage(solIPv6, ipv6RecvOrigDstAddr, globalScoped), "[2001:db8::7]:443"},
-		{"missing", other, ""},
-		{"short", controlMessage(solIP, ipRecvOrigDstAddr, sin[:6]), ""},
-		{"garbage", []byte{1, 2, 3}, ""},
-		{"unaligned", append([]byte{0}, append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...)...)[1:], "203.0.113.9:53"},
-		{"length past the buffer", controlMessage(solIP, ipRecvOrigDstAddr, sin)[:cmsgHeaderLen+8], ""},
+		{name: "ipv4", oob: append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...), want: "203.0.113.9:53"},
+		{name: "ipv6", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, sin6), want: "[2001:db8::7]:443"},
+		{name: "ipv4-mapped", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, mapped), want: "192.0.2.1:443"},
+		{name: "link-local", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, linkLocal), want: "[fe80::7%" + ifName + "]:443"},
+		{name: "link-local unknown interface", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, unknownIf), want: "[fe80::7%2147483632]:443"},
+		{name: "global with scope", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, globalScoped), want: "[2001:db8::7]:443"},
+		{name: "missing", oob: other, want: ""},
+		{name: "short", oob: controlMessage(solIP, ipRecvOrigDstAddr, sin[:6]), want: ""},
+		{name: "garbage", oob: []byte{1, 2, 3}, want: ""},
+		{name: "unaligned", oob: append([]byte{0}, append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...)...)[1:], want: "203.0.113.9:53"},
+		{name: "length past the buffer", oob: controlMessage(solIP, ipRecvOrigDstAddr, sin)[:cmsgHeaderLen+8], want: ""},
 	}
 	for _, tt := range tests {
 		got, ok := origDstFromControl(tt.oob)

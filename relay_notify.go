@@ -60,9 +60,8 @@ type ReadNotifier interface {
 	// f is called at most once, and exactly once unless stop cancels it
 	// first: when data arrives, at the end of the stream, on an error or a
 	// reset, when the source or the connection it belongs to is closed, and
-	// when a read deadline passes. A source that is readable when
-	// NotifyReadable is called calls f at once, without waiting for another
-	// event, possibly on the calling goroutine before NotifyReadable
+	// when a read deadline passes. If the source is already readable, NotifyReadable
+	// calls f immediately, possibly on the calling goroutine before it
 	// returns; a caller need not try TryRead first, and f must not wait for
 	// NotifyReadable to return.
 	//
@@ -141,22 +140,14 @@ func (s *notifySocket) notifyReadable(f func()) (stop func() bool) {
 // readNow reads what the source holds without waiting, reporting blocked
 // when there is nothing yet. Bytes a PrefixConn holds are read through it.
 func (s *notifySocket) readNow(b []byte) (int, bool, error) {
-	if s.src.prefixPending() {
-		n, err := s.src.r.Read(b)
-		return n, false, err
-	}
-	if s.src.exhausted() {
-		return 0, false, io.EOF
-	}
-	b = b[:s.src.limited(int64(len(b)))]
-	if err := s.src.timeouts.refresh(); err != nil {
-		return 0, false, err
-	}
+	return s.src.readNow(b, s.tryRead)
+}
+
+func (s *notifySocket) tryRead(b []byte) (int, bool, error) {
 	n, err := s.n.TryRead(b)
 	if n == 0 && IsWouldBlock(err) {
 		return 0, true, nil
 	}
-	s.src.consumed(n)
 	return n, false, err
 }
 

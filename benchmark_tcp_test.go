@@ -11,35 +11,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/djylb/netx/internal/nettest"
 )
 
-// benchTCPPair returns a connected loopback TCP pair for benchmarks.
-func benchTCPPair(b *testing.B) (net.Conn, net.Conn) {
-	b.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, _ := ln.Accept()
-		accepted <- c
-	}()
-	client, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	server := <-accepted
-	b.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
-	})
-	return client, server
-}
-
 func BenchmarkTimeoutConnWriteTCP(b *testing.B) {
-	client, server := benchTCPPair(b)
+	client, server := nettest.TCPPair(b)
 	go func() { _, _ = io.Copy(io.Discard, server) }()
 	conn := NewTimeoutConn(client, 30*time.Second)
 	msg := make([]byte, 512)
@@ -54,7 +31,7 @@ func BenchmarkTimeoutConnWriteTCP(b *testing.B) {
 
 func benchmarkFramedReadTCP(b *testing.B, opts ...FramedOption) {
 	b.Helper()
-	client, server := benchTCPPair(b)
+	client, server := nettest.TCPPair(b)
 	payload := make([]byte, 64)
 	frame := append([]byte{0, byte(len(payload))}, payload...)
 	burst := make([]byte, 0, len(frame)*256)
@@ -86,7 +63,7 @@ func BenchmarkFramedConnReadTCPBuffered(b *testing.B) {
 }
 
 func BenchmarkFramedConnWriteTCP(b *testing.B) {
-	client, server := benchTCPPair(b)
+	client, server := nettest.TCPPair(b)
 	go func() { _, _ = io.Copy(io.Discard, server) }()
 	fc := NewFramedConn(client)
 	msg := make([]byte, 1024)
@@ -118,8 +95,8 @@ func BenchmarkRelayTCP(b *testing.B) {
 	const chunk = 64 << 10
 	for _, mode := range []string{"io.Copy", "Relay", "RelayFlow", "ReadFrom"} {
 		b.Run(mode, func(b *testing.B) {
-			src, srcPeer := benchTCPPair(b)
-			dstPeer, dst := benchTCPPair(b)
+			src, srcPeer := nettest.TCPPair(b)
+			dstPeer, dst := nettest.TCPPair(b)
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -159,7 +136,7 @@ func BenchmarkRelayTCP(b *testing.B) {
 // a TCP connection whose peer has finished, so each Copy finds the end at
 // once, beneath a TimeoutConn and a PrefixConn, with a counting flow.
 func BenchmarkCopySetup(b *testing.B) {
-	client, server := benchTCPPair(b)
+	client, server := nettest.TCPPair(b)
 	_ = server.(*net.TCPConn).CloseWrite()
 	src := NewTimeoutConn(NewPrefixConn(client, nil), time.Minute)
 	f := RelayFlow{Done: func(int64) error { return nil }}

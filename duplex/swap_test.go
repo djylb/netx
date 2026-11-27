@@ -479,8 +479,8 @@ func TestDeadlineCallNotUnderLock(t *testing.T) {
 }
 
 type deadlineBarrier struct {
-	bytes.Buffer
 	setting, release chan struct{}
+	bytes.Buffer
 }
 
 func (d *deadlineBarrier) set() error                       { close(d.setting); <-d.release; return nil }
@@ -582,8 +582,8 @@ func TestRejectedInheritedDeadline(t *testing.T) {
 }
 
 type deadlineHook struct {
-	bytes.Buffer
 	set func() error
+	bytes.Buffer
 }
 
 func (s *deadlineHook) SetReadDeadline(time.Time) error  { return s.set() }
@@ -622,7 +622,8 @@ func TestSwapOwnershipWithTypedCause(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	cancel(cause)
 	for _, err := range []error{w.Swap(ctx, io.Discard), w.Swap(t.Context(), &deadlineHook{set: func() error { return cause }})} {
-		if err == cause || !errors.Is(err, cause) {
+		// Installation must wrap the cause: returning it directly would signal ownership.
+		if !errors.Is(errors.Unwrap(err), cause) {
 			t.Fatalf("installation error = %T %v", err, err)
 		}
 	}

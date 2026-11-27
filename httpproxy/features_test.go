@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,7 +23,7 @@ import (
 )
 
 // scriptedOrigin serves each connection with handle, counting connections.
-func scriptedOrigin(t *testing.T, handle func(c net.Conn, br *bufio.Reader)) (string, *atomic.Int32) {
+func scriptedOrigin(t *testing.T, handle func(c net.Conn, br *bufio.Reader)) (*url.URL, *atomic.Int32) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -44,7 +45,7 @@ func scriptedOrigin(t *testing.T, handle func(c net.Conn, br *bufio.Reader)) (st
 			})
 		}
 	})
-	return ln.Addr().String(), &conns
+	return &url.URL{Scheme: "http", Host: ln.Addr().String()}, &conns
 }
 
 // readReq reads a request head from br and returns it.
@@ -87,28 +88,20 @@ func TestKeptConnRetry(t *testing.T) {
 			_ = req
 		}
 	})
-	s := &httpproxy.Server{}
-	addr := serve(t, s)
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	br := bufio.NewReader(c)
-	if resp := doGet(t, c, br, "http://"+origin+"/1", "GET"); resp.StatusCode != http.StatusOK {
+	c, br := dialProxy(t, &httpproxy.Server{})
+	if resp := doGet(t, c, br, origin.String()+"/1", "GET"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("first GET = %d", resp.StatusCode)
 	}
 	// The second GET goes over the kept connection, which closes: it is
 	// sent again on a new one.
-	if resp := doGet(t, c, br, "http://"+origin+"/2", "GET"); resp.StatusCode != http.StatusOK {
+	if resp := doGet(t, c, br, origin.String()+"/2", "GET"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("retried GET = %d", resp.StatusCode)
 	}
 	if n := conns.Load(); n != 2 {
 		t.Fatalf("connections = %d, want 2", n)
 	}
 	// The same for a POST gets 502, not a second copy.
-	_, _ = fmt.Fprintf(c, "POST http://%s/3 HTTP/1.1\r\nContent-Length: 1\r\n\r\nx", origin)
+	_, _ = fmt.Fprintf(c, "POST %s/3 HTTP/1.1\r\nContent-Length: 1\r\n\r\nx", origin)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +124,7 @@ func TestKeptConnClosedByTarget(t *testing.T) {
 	})
 	s := &httpproxy.Server{}
 	addr := serve(t, s)
-	rawStatus(t, addr, "GET http://"+origin+"/ HTTP/1.1\r\n\r\n")
+	rawStatus(t, addr, "GET "+origin.String()+"/ HTTP/1.1\r\n\r\n")
 	waitFor(t, "the closed kept connection to leave the pool", func() bool { return s.IdleConns() == 0 })
 }
 
@@ -165,7 +158,7 @@ func TestReuseKey(t *testing.T) {
 		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 		br := bufio.NewReader(c)
 		for _, route := range []string{"a", "b", ""} {
-			_, _ = fmt.Fprintf(c, "GET http://%s/ HTTP/1.1\r\nX-Route: %s\r\n\r\n", origin, route)
+			_, _ = fmt.Fprintf(c, "GET %s/ HTTP/1.1\r\nX-Route: %s\r\n\r\n", origin, route)
 			resp, err := http.ReadResponse(br, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -228,7 +221,7 @@ func TestLargeBodiesSplicedExactly(t *testing.T) {
 	br := bufio.NewReader(c)
 	for i := range 2 {
 		go func() {
-			_, _ = fmt.Fprintf(c, "PUT http://%s/ HTTP/1.1\r\nContent-Length: %d\r\n\r\n", origin, size)
+			_, _ = fmt.Fprintf(c, "PUT %s/ HTTP/1.1\r\nContent-Length: %d\r\n\r\n", origin, size)
 			_, _ = c.Write(body)
 		}()
 		resp, err := http.ReadResponse(br, nil)
@@ -271,14 +264,14 @@ func TestMaxForwards(t *testing.T) {
 		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	})
 	addr := serve(t, &httpproxy.Server{})
-	_, reply := rawStatus(t, addr, "TRACE http://"+origin+"/ HTTP/1.1\r\nMax-Forwards: 0\r\nProxy-Authorization: secret\r\nX-A: 1\r\n\r\n")
-	if !strings.Contains(reply, "TRACE http://"+origin+"/ HTTP/1.1\r\n") || !strings.Contains(reply, "X-A: 1") || strings.Contains(reply, "secret") {
+	_, reply := rawStatus(t, addr, "TRACE "+origin.String()+"/ HTTP/1.1\r\nMax-Forwards: 0\r\nProxy-Authorization: secret\r\nX-A: 1\r\n\r\n")
+	if !strings.Contains(reply, "TRACE "+origin.String()+"/ HTTP/1.1\r\n") || !strings.Contains(reply, "X-A: 1") || strings.Contains(reply, "secret") {
 		t.Fatalf("TRACE reply %q", reply)
 	}
-	if code, _ := rawStatus(t, addr, "OPTIONS http://"+origin+"/ HTTP/1.1\r\nMax-Forwards: 0\r\n\r\n"); code != 200 || forwarded.Load() != nil {
+	if code, _ := rawStatus(t, addr, "OPTIONS "+origin.String()+"/ HTTP/1.1\r\nMax-Forwards: 0\r\n\r\n"); code != 200 || forwarded.Load() != nil {
 		t.Fatalf("OPTIONS Max-Forwards: 0 = %d, forwarded %v", code, forwarded.Load())
 	}
-	if code, _ := rawStatus(t, addr, "OPTIONS http://"+origin+"/ HTTP/1.1\r\nMax-Forwards: 5\r\n\r\n"); code != 200 || forwarded.Load() != "4" {
+	if code, _ := rawStatus(t, addr, "OPTIONS "+origin.String()+"/ HTTP/1.1\r\nMax-Forwards: 5\r\n\r\n"); code != 200 || forwarded.Load() != "4" {
 		t.Fatalf("OPTIONS Max-Forwards: 5 = %d, forwarded %v", code, forwarded.Load())
 	}
 }
@@ -303,7 +296,7 @@ func TestViaInterceptAndCodings(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	_, _ = fmt.Fprintf(c, "GET /path HTTP/1.1\r\nHost: %s\r\nVia: 1.0 first\r\n\r\n", origin)
+	_, _ = fmt.Fprintf(c, "GET /path HTTP/1.1\r\nHost: %s\r\nVia: 1.0 first\r\n\r\n", origin.Host)
 	tp := bufio.NewReader(c)
 	head, err := httphead.Read(tp, nil, 64<<10)
 	if err != nil {
@@ -317,7 +310,7 @@ func TestViaInterceptAndCodings(t *testing.T) {
 		t.Fatalf("response head %q", head)
 	}
 	s := <-got
-	if s.via != "1.0 first, 1.1 proxy" || s.host != origin || s.target != "/path" {
+	if s.via != "1.0 first, 1.1 proxy" || s.host != origin.Host || s.target != "/path" {
 		t.Fatalf("origin saw %+v", s)
 	}
 }
@@ -358,7 +351,7 @@ func TestResponseHeaderTimeout(t *testing.T) {
 	})
 	addr := serve(t, &httpproxy.Server{ResponseHeaderTimeout: 100 * time.Millisecond})
 	start := time.Now()
-	if code, _ := rawStatus(t, addr, "GET http://"+origin+"/ HTTP/1.1\r\n\r\n"); code != 504 {
+	if code, _ := rawStatus(t, addr, "GET "+origin.String()+"/ HTTP/1.1\r\n\r\n"); code != 504 {
 		t.Fatalf("slow target = %d, want 504", code)
 	}
 	if d := time.Since(start); d > 800*time.Millisecond {
@@ -374,7 +367,7 @@ func TestOnDoneRefusal(t *testing.T) {
 		OnDone: func(_ *httpproxy.Request, r httpproxy.Result) { done <- r },
 	}
 	addr := serve(t, s)
-	rawStatus(t, addr, "GET http://example.com/ HTTP/1.1\r\n\r\n")
+	rawStatus(t, addr, "GET "+originURL(t.Name())+"/ HTTP/1.1\r\n\r\n")
 	if r := <-done; r.Status != 403 || r.Err == nil || r.ToClient == 0 {
 		t.Fatalf("result %+v", r)
 	}

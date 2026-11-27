@@ -15,50 +15,53 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestTLSClientClearsHandshakeDeadline(t *testing.T) {
 	cert := testSelfSignedCert(t)
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
-	defer func() { _ = clientConn.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer func() { _ = serverConn.Close() }()
+		defer func() { _ = clientConn.Close() }()
 
-	errCh := make(chan error, 1)
-	go func() {
-		tlsServer := tls.Server(serverConn, &tls.Config{Certificates: []tls.Certificate{cert}})
-		if err := tlsServer.Handshake(); err != nil {
+		errCh := make(chan error, 1)
+		go func() {
+			tlsServer := tls.Server(serverConn, &tls.Config{Certificates: []tls.Certificate{cert}})
+			if err := tlsServer.Handshake(); err != nil {
+				errCh <- err
+				return
+			}
+			time.Sleep(2 * time.Second)
+			_, err := tlsServer.Write([]byte("x"))
 			errCh <- err
-			return
+		}()
+
+		tlsClient, err := Client(timeoutContext(t, time.Second), clientConn, &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "example.com",
+		})
+		if err != nil {
+			t.Fatalf("Client() error = %v", err)
 		}
-		time.Sleep(450 * time.Millisecond)
-		_, err := tlsServer.Write([]byte("x"))
-		errCh <- err
-	}()
+		defer func() { _ = tlsClient.Close() }()
+		// Close the peer first so close_notify fails at once instead of
+		// blocking on the unread pipe until tls.Conn's 5s close deadline.
+		defer func() { _ = serverConn.Close() }()
 
-	tlsClient, err := Client(timeoutContext(t, 300*time.Millisecond), clientConn, &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         "example.com",
+		buf := make([]byte, 1)
+		if _, err := tlsClient.Read(buf); err != nil {
+			t.Fatalf("Read() error = %v, want successful read after handshake deadline expires", err)
+		}
+		if got := string(buf); got != "x" {
+			t.Fatalf("Read() byte = %q, want %q", got, "x")
+		}
+
+		if err := <-errCh; err != nil {
+			t.Fatalf("server TLS flow error = %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Client() error = %v", err)
-	}
-	defer func() { _ = tlsClient.Close() }()
-	// Close the peer first so close_notify fails at once instead of
-	// blocking on the unread pipe until tls.Conn's 5s close deadline.
-	defer func() { _ = serverConn.Close() }()
-
-	buf := make([]byte, 1)
-	if _, err := tlsClient.Read(buf); err != nil {
-		t.Fatalf("Read() error = %v, want successful read after handshake deadline expires", err)
-	}
-	if got := string(buf); got != "x" {
-		t.Fatalf("Read() byte = %q, want %q", got, "x")
-	}
-
-	if err := <-errCh; err != nil {
-		t.Fatalf("server TLS flow error = %v", err)
-	}
 }
 
 // timeoutContext returns a context that ends after d, canceled when the test

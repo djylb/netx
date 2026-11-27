@@ -96,13 +96,13 @@ package httprewrite
 
 import (
 	"errors"
-	"github.com/djylb/netx/httphead"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/djylb/netx/forwarded"
+	"github.com/djylb/netx/httphead"
 )
 
 // Errors of compiling and expanding. They match one of these and carry a

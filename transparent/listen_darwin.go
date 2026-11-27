@@ -9,12 +9,10 @@ import "syscall"
 // target with DIOCNATLOOK.
 func listenErr() error { return nil }
 
-//goland:noinspection GoUnusedParameter
-func control(string, string, syscall.RawConn) error {
+func control(_, _ string, _ syscall.RawConn) error {
 	return nil
 }
 
-//goland:noinspection GoUnusedParameter
-func controlPacket(string, string, syscall.RawConn) error {
+func controlPacket(_, _ string, _ syscall.RawConn) error {
 	return ErrListenUnsupported
 }

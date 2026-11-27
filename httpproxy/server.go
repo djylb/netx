@@ -428,6 +428,10 @@ type serverConn struct {
 	c  net.Conn
 	s  *Server
 	br *bufio.Reader
+	// handOff gives the connection to the relay of a tunnel; see
+	// serve.Tracker.HandOff. tunnel is set once it has, which leaves ending
+	// the connection to the relay.
+	handOff func() bool
 	// The Proxy-Authorization value that passed, and its identity.
 	authValue, authUser string
 	// Buffers reused across requests: the request head read, the head
@@ -440,11 +444,7 @@ type serverConn struct {
 	// request bytes perhaps unread, which closing at once could turn into a
 	// reset that destroys the reply.
 	linger bool
-	// handOff gives the connection to the relay of a tunnel; see
-	// serve.Tracker.HandOff. tunnel is set once it has, which leaves ending
-	// the connection to the relay.
-	handOff func() bool
-	tunnel  atomic.Bool
+	tunnel atomic.Bool
 }
 
 // maxKeptBuf bounds the buffers kept between requests.

@@ -30,27 +30,26 @@ type Table[K, P, S comparable] struct {
 	membership func(S) *Membership[K, P]
 	hashKey    func(maphash.Seed, K) uint64
 	hashPeer   func(maphash.Seed, P) uint64
-
-	wheel  atomic.Pointer[idleWheel[S]]
-	epoch  *clock.Epoch
-	idleMu sync.Mutex
-	conns  sync.Map // K → S
-	n      atomic.Int64
-	max    int64
-	seed   maphash.Seed
-	shards [tableShards]tableShard[P, S]
-	once   sync.Once
-	closed atomic.Bool
+	wheel      atomic.Pointer[idleWheel[S]]
+	epoch      *clock.Epoch
+	shards     [tableShards]tableShard[P, S]
+	conns      sync.Map // K → S
+	idleMu     sync.Mutex
+	n          atomic.Int64
+	max        int64
+	seed       maphash.Seed
+	once       sync.Once
+	closed     atomic.Bool
 }
 
 type tableShard[P, S comparable] struct {
-	mu    sync.Mutex
 	peers map[P]peerFlows[S]
+	mu    sync.Mutex
 }
 
 type peerFlows[S comparable] struct {
-	count   int
 	unbound S
+	count   int
 }
 
 type acceptedFlow[P, S comparable] struct {
@@ -504,6 +503,7 @@ type idleWheel[S comparable] struct {
 	position func(S) *wheelPosition
 	epoch    *clock.Epoch
 	timer    timeshim.Timer
+	parts    [tableShards]wheelPartition[S]
 	inflight sync.WaitGroup
 	mu       sync.Mutex // serializes ticks and configuration changes
 	// Configuration writes also hold every partition lock. Flow
@@ -511,12 +511,11 @@ type idleWheel[S comparable] struct {
 	d       time.Duration
 	every   time.Duration
 	stopped bool
-	parts   [tableShards]wheelPartition[S]
 }
 
 type wheelPartition[S comparable] struct {
-	mu    sync.Mutex
 	slots [wheelSlots][]S
+	mu    sync.Mutex
 	cur   int // the last tick
 }
 

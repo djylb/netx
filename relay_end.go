@@ -196,6 +196,25 @@ func (s *relaySource) socket() relaySocket {
 	return s.sock
 }
 
+// readNow reads a pending prefix through its wrapper, or reads directly
+// from the socket with the source's byte limit and idle deadlines.
+func (s *relaySource) readNow(b []byte, tryRead func([]byte) (int, bool, error)) (int, bool, error) {
+	if s.prefixPending() {
+		n, err := s.r.Read(b)
+		return n, false, err
+	}
+	if s.exhausted() {
+		return 0, false, io.EOF
+	}
+	b = b[:s.limited(int64(len(b)))]
+	if err := s.timeouts.refresh(); err != nil {
+		return 0, false, err
+	}
+	n, blocked, err := tryRead(b)
+	s.consumed(n)
+	return n, blocked, err
+}
+
 // limited caps n to the bytes left within the source's bound, if it has one.
 func (s *relaySource) limited(n int64) int64 {
 	if s.limit != nil {

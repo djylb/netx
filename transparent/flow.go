@@ -35,9 +35,9 @@ import (
 // WithFlowIdleTimeout or read deadlines. The zero FlowListener owns no
 // socket and its Accept waits until Close.
 type FlowListener struct {
-	gate *dgram.WriteGate
 	// closeErr is the error of closing c, set once.
 	closeErr  error
+	gate      *dgram.WriteGate
 	c         *net.UDPConn
 	epoch     *clock.Epoch // of the idle timeout
 	opts      flowOptions
@@ -147,10 +147,9 @@ func ListenUDPFlows(ctx context.Context, network, address string, opts ...FlowOp
 
 // NewFlowListener starts reading c, a socket set up with ControlPacket, such
 // as one from ListenPacket, and returns a FlowListener for its flows. The
-// listener owns c and closes it on Close; c must not be read otherwise. A
-// read error meaning that c is closed closes the listener; other read errors
-// are retried, with a growing delay while they persist, and an expired read
-// deadline on c is cleared. It is available on Linux and Android; elsewhere
+// listener owns c and closes it on Close; c must not be read otherwise. If a
+// read reports that c is closed, the listener closes. Other read errors are retried
+// with a growing delay, and an expired read deadline on c is cleared. It is available on Linux and Android; elsewhere
 // it returns ErrListenUnsupported.
 func NewFlowListener(c *net.UDPConn, opts ...FlowOption) (*FlowListener, error) {
 	if err := packetErr(); err != nil {

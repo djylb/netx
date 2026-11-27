@@ -116,14 +116,14 @@ func TestParseTarget(t *testing.T) {
 		want           httphead.Target
 		ok             bool
 	}{
-		{"GET", "http://Example.com:8080/a?b#frag", httphead.Target{Form: httphead.AbsoluteForm, Scheme: "http", Authority: "Example.com:8080", Host: "Example.com", Port: 8080, Path: "/a?b"}, true},
+		{"GET", "https://Example.com:8080/a?b#frag", httphead.Target{Form: httphead.AbsoluteForm, Scheme: "https", Authority: "Example.com:8080", Host: "Example.com", Port: 8080, Path: "/a?b"}, true},
 		{"OPTIONS", "http://a", httphead.Target{Form: httphead.AbsoluteForm, Scheme: "http", Authority: "a", Host: "a", Path: "*"}, true},
 		{"GET", "http://a?q", httphead.Target{Form: httphead.AbsoluteForm, Scheme: "http", Authority: "a", Host: "a", Path: "/?q"}, true},
 		{"connect", "[fe80::1%25eth0]:443", httphead.Target{Form: httphead.AuthorityForm, Authority: "[fe80::1%25eth0]:443", Host: "fe80::1%eth0", Port: 443}, true},
 		{"GET", "/x", httphead.Target{Form: httphead.OriginForm, Path: "/x"}, true},
 		{"OPTIONS", "*", httphead.Target{Form: httphead.AsteriskForm, Path: "*"}, true},
 		{"GET", "http://user@a/", httphead.Target{}, false},
-		{"GET", "http:///", httphead.Target{}, false},
+		{"GET", "https:///", httphead.Target{}, false},
 		{"CONNECT", "a:0", httphead.Target{}, false},
 		{"CONNECT", "[1.2.3.4]:1", httphead.Target{}, false},
 		{"GET", "x", httphead.Target{}, false},
@@ -147,7 +147,7 @@ func TestHeaderAppendToRefusesInjection(t *testing.T) {
 // sees the written head reads it as this parser did.
 func FuzzParse(f *testing.F) {
 	for _, seed := range []string{
-		"GET http://example.com/ HTTP/1.1\r\nHost: x\r\nA:  b \r\n\r\n",
+		"GET https://example.com/ HTTP/1.1\r\nHost: x\r\nA:  b \r\n\r\n",
 		"\nHTTP/1.0 200\nX: y\n\n",
 		"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
 	} {
@@ -182,7 +182,7 @@ func FuzzParse(f *testing.F) {
 }
 
 func Example() {
-	br := bufio.NewReader(strings.NewReader("POST http://example.com/form HTTP/1.1\r\n" +
+	br := bufio.NewReader(strings.NewReader("POST https://example.com/form HTTP/1.1\r\n" +
 		"Host: example.com\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello"))
 	head, err := httphead.Read(br, nil, 64<<10)
 	if err != nil {

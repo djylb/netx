@@ -32,19 +32,24 @@ import (
 // address.
 func serve(t testing.TB, s *httpproxy.Server) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return nettest.Serve(t, s, httpproxy.ErrServerClosed)
+}
+
+func originURL(host string) string {
+	return (&url.URL{Scheme: "http", Host: host}).String()
+}
+
+func dialProxy(t *testing.T, s *httpproxy.Server) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	c, err := net.Dial("tcp", serve(t, s))
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- s.Serve(ln) }()
-	t.Cleanup(func() {
-		_ = s.Close()
-		if err := <-done; !errors.Is(err, httpproxy.ErrServerClosed) {
-			t.Errorf("Serve() = %v, want ErrServerClosed", err)
-		}
-	})
-	return ln.Addr().String()
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return c, bufio.NewReader(c)
 }
 
 func echoTCP(t testing.TB) string {
@@ -412,7 +417,7 @@ func TestForwardWithTransport(t *testing.T) {
 				t.Errorf("%s: origin got %s: %q", tt.method, h, s.header.Get(h))
 			}
 		}
-		if s.header.Get("Via") != "1.1 test" || s.host != strings.TrimPrefix(o.URL, "http://") || s.uri != "/p"+tt.query {
+		if s.header.Get("Via") != "1.1 test" || s.host != o.Listener.Addr().String() || s.uri != "/p"+tt.query {
 			t.Errorf("%s: origin got Via %q, Host %q, URI %q", tt.method, s.header.Get("Via"), s.host, s.uri)
 		}
 	}
@@ -464,14 +469,7 @@ func TestKeepAliveAcrossHosts(t *testing.T) {
 		_, _ = io.WriteString(w, "two")
 	})
 	s := &httpproxy.Server{}
-	addr := serve(t, s)
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	br := bufio.NewReader(c)
+	c, br := dialProxy(t, s)
 	// Pipelined: both requests are sent before either response.
 	_, _ = fmt.Fprintf(c, "GET %s/a HTTP/1.1\r\nHost: x\r\n\r\nPOST %s/b HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc", o1.URL, o2.URL)
 	for i, want := range []string{"", "two", "one"} {
@@ -692,7 +690,7 @@ func TestHandshakeTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = c.Close() }()
-	_, _ = io.WriteString(c, "GET http://example.com/ HTTP/1.1\r\n") // never ends
+	_, _ = io.WriteString(c, "GET "+originURL(t.Name())+"/ HTTP/1.1\r\n") // never ends
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Read(make([]byte, 1)); err != io.EOF {
 		t.Fatalf("read after the timeout = %v, want EOF", err)
@@ -802,10 +800,10 @@ func TestTruncatedFixedBody(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- s.ServeConn(ctx, proxy) }()
 			if direction == "request" {
-				_, _ = io.WriteString(client, "POST http://"+t.Name()+"/ HTTP/1.1\r\nContent-Length: 4\r\n\r\nx")
+				_, _ = io.WriteString(client, "POST "+originURL(target.LocalAddr().String())+"/ HTTP/1.1\r\nContent-Length: 4\r\n\r\nx")
 				_ = client.(interface{ CloseWrite() error }).CloseWrite()
 			} else {
-				_, _ = io.WriteString(client, "GET http://"+t.Name()+"/ HTTP/1.1\r\n\r\n")
+				_, _ = io.WriteString(client, "GET "+originURL(target.LocalAddr().String())+"/ HTTP/1.1\r\n\r\n")
 				_, _ = io.WriteString(origin, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx")
 				_ = origin.(interface{ CloseWrite() error }).CloseWrite()
 			}

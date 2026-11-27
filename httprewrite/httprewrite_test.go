@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"github.com/djylb/netx/httphead"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/forwarded"
+	"github.com/djylb/netx/httphead"
 )
 
 func testRequest() *http.Request {
@@ -40,7 +40,9 @@ func TestVariables(t *testing.T) {
 	res := &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"/next"}, "X-Up": {"u1", "u2"}}}
 	when := time.Date(2026, 10, 24, 1, 2, 3, 456e6, time.UTC)
 	client := forwarded.Client{Addr: netip.MustParseAddrPort("198.51.100.1:0"), Hops: 2, Proto: "https", Host: "public.example"}
-	for _, tt := range []struct {
+	// The request has no TLS state, so both expected URLs for it use HTTP.
+	//noinspection HttpUrlsUsage
+	cases := []struct {
 		tmpl string
 		want string
 		c    Context
@@ -73,7 +75,8 @@ func TestVariables(t *testing.T) {
 		{tmpl: "${scheme}${host}${remote_addr}${proxy_add_x_forwarded_for}", c: Context{}, want: "http"},
 		{tmpl: "$$${scheme}$ $x $", c: Context{Request: r}, want: "$http$ $x $"},
 		{tmpl: "${scheme}://${host}${request_uri}", c: Context{Request: r}, want: "http://example.com/a%20b/c?x=1&y=two&x=3"},
-	} {
+	}
+	for _, tt := range cases {
 		tm, err := Compile(tt.tmpl, nil)
 		if err != nil {
 			t.Errorf("Compile(%q): %v", tt.tmpl, err)
@@ -260,6 +263,8 @@ func TestApplyRedirects(t *testing.T) {
 		{From: "http://other.internal/a/", To: MustCompile("https://pub.example/b/", nil)},
 		{To: to},
 	}
+	// These literal HTTP headers exercise rewrites for a cleartext origin.
+	//noinspection HttpUrlsUsage
 	for _, tt := range []struct{ field, in, want string }{
 		{"Location", "http://backend.internal:8080/login?next=/", "http://Example.COM:8080/login?next=/"},
 		{"Location", "HTTP://Backend.Internal:8080", "http://Example.COM:8080"},
@@ -285,7 +290,7 @@ func TestApplyRedirects(t *testing.T) {
 	if err := ApplyRedirects(h, redirects, &Context{Request: in}); err != nil || h.Get("Location") != "http://backend.internal:8080/" {
 		t.Errorf("without response: %v %v", h, err)
 	}
-	bad := []Redirect{{To: MustCompile("http://x${uri}", nil)}}
+	bad := []Redirect{{To: MustCompile("https://x${uri}", nil)}}
 	evil := httptest.NewRequest(http.MethodGet, "/%0d%0a", nil)
 	h = http.Header{"Location": {"http://backend.internal:8080/"}}
 	if err := ApplyRedirects(h, bad, &Context{Request: evil, Response: res}); !errors.Is(err, ErrInvalidValue) || h.Get("Location") != "http://backend.internal:8080/" {
@@ -520,6 +525,8 @@ func FuzzApplyRedirects(f *testing.F) {
 		res := &http.Response{Request: &http.Request{URL: u}}
 		c := &Context{Request: &http.Request{Host: "pub", Header: http.Header{}}, Response: res}
 		h := http.Header{"Location": {loc}, "Refresh": {refresh}}
+		// Match the cleartext scheme in the fuzz input.
+		//noinspection HttpUrlsUsage
 		err := ApplyRedirects(h, []Redirect{{To: MustCompile("https://${http_host}", nil)}, {From: "http://", To: MustCompile("x:", nil)}}, c)
 		if err != nil {
 			t.Fatal(err)

@@ -14,7 +14,7 @@ import (
 )
 
 // rawOrigin answers every request on a connection with a fixed response of
-// size bytes, ending the connection after it when the request asks to,
+// size bytes, closing the connection when the request asks for closure,
 // without the cost of an HTTP server, so that the benchmarks measure the
 // proxy.
 func rawOrigin(b *testing.B, size int) string {
@@ -137,7 +137,7 @@ func benchForward(b *testing.B, proxy, origin string, size int) {
 	}
 	defer func() { _ = c.Close() }()
 	br := bufio.NewReaderSize(c, 64<<10)
-	req := []byte(fmt.Sprintf("GET http://%s/ HTTP/1.1\r\nHost: %s\r\nUser-Agent: bench\r\nAccept: */*\r\n\r\n", origin, origin))
+	req := []byte(fmt.Sprintf("GET %s/ HTTP/1.1\r\nHost: %s\r\nUser-Agent: bench\r\nAccept: */*\r\n\r\n", originURL(origin), origin))
 	body := make([]byte, size)
 	b.ReportAllocs()
 	for b.Loop() {

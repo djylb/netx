@@ -120,9 +120,8 @@ func pick(t *testing.T, s *CertStore, hello *tls.ClientHelloInfo) string {
 
 func hello(name string) *tls.ClientHelloInfo { return &tls.ClientHelloInfo{ServerName: name} }
 
-// The ranking: issued by an authority over self-signed, outranking exact
-// over wildcard; then the later NotAfter, then the later added; never one
-// that is not valid now.
+// Among currently valid certificates, prefer an authority-issued certificate,
+// then an exact match, then a later NotAfter, then the most recent addition.
 func TestCertStoreRanking(t *testing.T) {
 	ca := newTestCA(t)
 	now := time.Now()

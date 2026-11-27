@@ -7,7 +7,6 @@ import (
 	"net/netip"
 )
 
-//goland:noinspection GoUnusedParameter
-func originalDestination(net.Conn) (netip.AddrPort, bool, error) {
+func originalDestination(_ net.Conn) (netip.AddrPort, bool, error) {
 	return netip.AddrPort{}, false, ErrOriginalDestinationUnsupported
 }

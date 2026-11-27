@@ -9,7 +9,7 @@ import (
 )
 
 func TestDarwinDIOCNATLOOK(t *testing.T) {
-	// _IOWR('D', 23, struct pfioc_natlook) from XNU bsd/net/pfvar.h.
+	// _IOWR('D', 23, struct pfioc_natlook) from Darwin's bsd/net/pfvar.h.
 	// Keep this ABI regression check even though both sides are constants.
 	//noinspection GoBoolExpressions
 	if diocNatLook != 0xc0544417 {

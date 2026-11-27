@@ -22,19 +22,7 @@ import (
 // serve runs s on a loopback listener and returns its address.
 func serve(t *testing.T, s *socks5.Server) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- s.Serve(ln) }()
-	t.Cleanup(func() {
-		_ = s.Close()
-		if err := <-done; !errors.Is(err, socks5.ErrServerClosed) {
-			t.Errorf("Serve() = %v, want ErrServerClosed", err)
-		}
-	})
-	return ln.Addr().String()
+	return nettest.Serve(t, s, socks5.ErrServerClosed)
 }
 
 // echoTCP starts a TCP echo server.
@@ -291,8 +279,8 @@ func udpEcho(t *testing.T) *net.UDPAddr {
 	return pc.LocalAddr().(*net.UDPAddr)
 }
 
-// associate opens a UDP association announcing announced and returns the
-// control connection and the relay address.
+// associate announces the client address in a UDP association request and
+// returns the control connection and relay address.
 func associate(t *testing.T, addr string, announced netx.Addr) (net.Conn, *net.UDPAddr) {
 	t.Helper()
 	c := handshake(t, addr)

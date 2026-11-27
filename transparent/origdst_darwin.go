@@ -21,7 +21,7 @@ const (
 	diocNatLook = iocInOut | ((natLookLen & iocParmMask) << 16) | ('D' << 8) | 23
 )
 
-// pfiocNatlook mirrors XNU's struct pfioc_natlook. The xport fields are
+// pfiocNatlook mirrors Darwin's struct pfioc_natlook. The xport fields are
 // union pf_state_xport, whose first two bytes hold a TCP or UDP port in
 // network byte order.
 type pfiocNatlook struct {

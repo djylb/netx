@@ -21,31 +21,7 @@ import (
 
 func tcpPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen() error = %v", err)
-	}
-	defer func() { _ = ln.Close() }()
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, _ := ln.Accept()
-		accepted <- c
-	}()
-	client, err = net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial() error = %v", err)
-	}
-	server = <-accepted
-	if server == nil {
-		_ = client.Close()
-		t.Fatal("Accept() failed")
-	}
-	// Also when a test fails before closing them.
-	t.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
-	})
-	return client, server
+	return nettest.TCPPair(t)
 }
 
 func TestRelayCopiesBothDirections(t *testing.T) {

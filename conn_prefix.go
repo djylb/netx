@@ -15,10 +15,10 @@ import (
 // go to the wrapped connection.
 type PrefixConn struct {
 	conn    net.Conn
-	packet  bool   // prefix is one complete datagram
 	prefix  []byte // under mu
 	mu      sync.Mutex
 	drained atomic.Bool // prefix fully consumed; reads skip the lock
+	packet  bool        // prefix is one complete datagram
 }
 
 // Peek reads the first bytes of c, at most n, as for sniffing the protocol

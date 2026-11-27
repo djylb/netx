@@ -85,37 +85,20 @@ func NewHeader(v Version, src, dst net.Addr) (*Header, error) {
 		return nil, fmt.Errorf("proxyproto: unknown version %d", v)
 	}
 	h := &Header{Version: v}
+	var err error
 	switch s := src.(type) {
 	case *net.TCPAddr:
 		d, ok := dst.(*net.TCPAddr)
 		if !ok && dst != nil {
 			return nil, mismatched(src, dst)
 		}
-		if s == nil {
-			return nil, errNilAddr
-		}
-		var dip net.IP
-		var dport int
-		if d != nil {
-			dip, dport = d.IP, d.Port
-		}
-		h.Source = &net.TCPAddr{IP: cloneIP(s.IP), Port: s.Port, Zone: s.Zone}
-		h.Destination = &net.TCPAddr{IP: destinationIP(s.IP, dip), Port: dport}
+		h.Source, h.Destination, err = copyIPAddrs(s, d)
 	case *net.UDPAddr:
 		d, ok := dst.(*net.UDPAddr)
 		if !ok && dst != nil {
 			return nil, mismatched(src, dst)
 		}
-		if s == nil {
-			return nil, errNilAddr
-		}
-		var dip net.IP
-		var dport int
-		if d != nil {
-			dip, dport = d.IP, d.Port
-		}
-		h.Source = &net.UDPAddr{IP: cloneIP(s.IP), Port: s.Port, Zone: s.Zone}
-		h.Destination = &net.UDPAddr{IP: destinationIP(s.IP, dip), Port: dport}
+		h.Source, h.Destination, err = copyIPAddrs(s, d)
 	case *net.UnixAddr:
 		d, ok := dst.(*net.UnixAddr)
 		if !ok && dst != nil {
@@ -134,6 +117,9 @@ func NewHeader(v Version, src, dst net.Addr) (*Header, error) {
 		return nil, errNilAddr
 	default:
 		return nil, fmt.Errorf("proxyproto: unsupported source address type %T", src)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if _, err := h.addrs(); err != nil {
 		return nil, err
@@ -154,6 +140,24 @@ var errNilAddr = errors.New("proxyproto: nil address")
 
 func mismatched(src, dst net.Addr) error {
 	return fmt.Errorf("proxyproto: source %T and destination %T do not form an address pair", src, dst)
+}
+
+// copyIPAddrs preserves the transport and fills an omitted destination with
+// the unspecified address of the source family. TCPAddr and UDPAddr share
+// the same IP, port and zone fields.
+func copyIPAddrs[A net.TCPAddr | net.UDPAddr](src, dst *A) (*A, *A, error) {
+	if src == nil {
+		return nil, nil, errNilAddr
+	}
+	s := net.TCPAddr(*src)
+	var d net.TCPAddr
+	if dst != nil {
+		d = net.TCPAddr(*dst)
+	}
+	d.IP = destinationIP(s.IP, d.IP)
+	d.Zone = ""
+	s.IP = cloneIP(s.IP)
+	return new(A(s)), new(A(d)), nil
 }
 
 func cloneIP(ip net.IP) net.IP {

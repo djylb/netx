@@ -56,18 +56,17 @@ import (
 // fail.
 type PacketListener struct {
 	closeErr   error
-	reject     *rejectCache // nil without WithPacketRejectCache
-	epoch      *clock.Epoch // of the idle timeout
-	more       []packetSocket
-	sock       packetSocket // pc's
+	reject     *rejectCache      // nil without WithPacketRejectCache
+	epoch      *clock.Epoch      // of the idle timeout
+	broadcasts *packetBroadcasts // owned cache, set only in destination-aware mode
+	sock       packetSocket      // pc's
 	conns      flowtable.Table[packetFlow, peerKey, *packetConn]
-	pktinfo    bool // all sockets use destination-aware flow keys
-	broadcasts *packetBroadcasts
+	more       []packetSocket
 	opts       packetListenerOptions
 	wg         sync.WaitGroup
-	closeOnce  sync.Once
 	filtering  atomic.Int64 // number of read loops in the accept filter
-	closing    atomic.Bool  // Close has begun; with filtering, orders the two
+	closeOnce  sync.Once
+	closing    atomic.Bool // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {
@@ -257,25 +256,24 @@ func NewPacketListener(pc net.PacketConn, opts ...PacketListenerOption) *PacketL
 		pc = nil
 	}
 	l.sock = newPacketSocket(pc)
-	l.pktinfo = pc == nil || l.sock.pktinfo
+	pktinfo := pc == nil || l.sock.pktinfo
 	if cfg.rejectSize > 0 && cfg.rejectTTL > 0 {
 		l.reject = newRejectCache(cfg.rejectSize, cfg.rejectTTL, l.epoch)
 	}
 	for _, more := range cfg.more {
 		if more != nil && !netutil.IsNilPointer(more) {
 			sock := newPacketSocket(more)
-			l.pktinfo = l.pktinfo && sock.pktinfo
+			pktinfo = pktinfo && sock.pktinfo
 			l.more = append(l.more, sock)
 		}
 	}
-	l.pktinfo = l.pktinfo && (pc != nil || len(l.more) != 0)
 	tableOpts := flowtable.TableOptions[packetFlow, peerKey, *packetConn]{
 		Queue: (*packetConn).queue, Shutdown: (*packetConn).shutdown,
 		Membership: func(c *packetConn) *flowtable.Membership[packetFlow, peerKey] { return &c.membership },
 		HashKey:    func(seed maphash.Seed, key packetFlow) uint64 { return hashPeer(seed, key.peer) },
 		Epoch:      l.epoch, Backlog: cfg.backlog, Limit: cfg.maxConns, Idle: cfg.idle,
 	}
-	if l.pktinfo {
+	if pktinfo && (pc != nil || len(l.more) != 0) {
 		tableOpts.Peer = func(key packetFlow) peerKey { return key.peer }
 		tableOpts.HashPeer = hashPeer
 		l.broadcasts = acquirePacketBroadcasts()
@@ -330,9 +328,7 @@ func (l *PacketListener) Close() error {
 				l.closeErr = err
 			}
 		}
-		if l.pktinfo {
-			releasePacketBroadcasts(l.broadcasts)
-		}
+		releasePacketBroadcasts(l.broadcasts)
 	})
 	// Wait for the read loop to stop, unless the accept filter called Close
 	// on it: it cannot wait for itself.
@@ -354,7 +350,7 @@ func (l *PacketListener) Addr() net.Addr {
 // their destination. This mode is selected at construction when every
 // socket can report packet destinations. Otherwise all sockets share
 // remote-only flow keys. The result is fixed for the listener's lifetime.
-func (l *PacketListener) DestinationAware() bool { return l != nil && l.pktinfo }
+func (l *PacketListener) DestinationAware() bool { return l != nil && l.broadcasts != nil }
 
 var errInvalidPeer = errors.New("udpflow: invalid peer address")
 
@@ -452,7 +448,8 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	case l.sock.pc == nil:
 		return nil, errNoPacketConn
 	}
-	if l.pktinfo {
+	aware := l.DestinationAware()
+	if aware {
 		addr, ok := peer.(*net.UDPAddr)
 		if !ok || !addr.AddrPort().IsValid() {
 			return nil, errors.New("udpflow: destination-aware Dial requires a valid *net.UDPAddr")
@@ -465,7 +462,7 @@ func (l *PacketListener) Dial(peer net.Addr) (net.Conn, error) {
 	c := l.makeConn(k, peer, &l.sock)
 	c.q.Accepted()
 	var result flowtable.Result
-	if l.pktinfo {
+	if aware {
 		_, result = l.conns.AddUnbound(k.peer, c)
 	} else {
 		_, result = l.conns.Add(k, c, false)

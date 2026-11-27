@@ -30,9 +30,9 @@ func TestWindowsErrnoConstantsMatchSyscall(t *testing.T) {
 
 func TestWindowsWinsockErrnosAreClassified(t *testing.T) {
 	tests := []struct {
-		errno syscall.Errno
 		kind  ErrorKind
 		name  string
+		errno syscall.Errno
 	}{
 		{errno: 10054, kind: "conn_reset", name: "ECONNRESET"},            // WSAECONNRESET
 		{errno: 64, kind: "conn_reset", name: "ECONNRESET"},               // ERROR_NETNAME_DELETED
