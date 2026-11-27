@@ -479,8 +479,8 @@ func TestDeadlineCallNotUnderLock(t *testing.T) {
 }
 
 type deadlineBarrier struct {
-	setting, release chan struct{}
 	bytes.Buffer
+	setting, release chan struct{}
 }
 
 func (d *deadlineBarrier) set() error                       { close(d.setting); <-d.release; return nil }
@@ -582,8 +582,8 @@ func TestRejectedInheritedDeadline(t *testing.T) {
 }
 
 type deadlineHook struct {
-	set func() error
 	bytes.Buffer
+	set func() error
 }
 
 func (s *deadlineHook) SetReadDeadline(time.Time) error  { return s.set() }

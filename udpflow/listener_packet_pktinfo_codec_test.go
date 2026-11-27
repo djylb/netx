@@ -252,8 +252,8 @@ func TestPacketListenerSeparatesDestinations(t *testing.T) {
 	}
 	for _, want := range []struct {
 		dst      netip.Addr
-		payloads []string
 		ifindex  uint32
+		payloads []string
 	}{
 		{dst: a, ifindex: 1, payloads: []string{"a", "c"}}, {dst: b, ifindex: 1, payloads: []string{"b"}}, {dst: local, ifindex: 1, payloads: []string{"d"}}, {dst: local, ifindex: 2, payloads: []string{"e"}},
 	} {

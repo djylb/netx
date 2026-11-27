@@ -25,9 +25,9 @@ type packetBroadcastSnapshot struct {
 const packetBroadcastTTL = time.Second
 
 var sharedPacketBroadcasts struct {
+	sync.Mutex
 	cache *packetBroadcasts
 	refs  int
-	sync.Mutex
 }
 
 func acquirePacketBroadcasts() *packetBroadcasts {

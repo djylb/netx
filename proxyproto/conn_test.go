@@ -113,8 +113,8 @@ func (c *datagramScript) Read(b []byte) (int, error) {
 func (*datagramScript) SetReadDeadline(time.Time) error { return nil }
 
 type datagramReadError struct {
-	err error
 	datagramScript
+	err error
 }
 
 func (c *datagramReadError) Read(b []byte) (int, error) {
@@ -128,8 +128,8 @@ func (c *datagramReadError) Read(b []byte) (int, error) {
 
 func TestOptionalDatagramFirstReadError(t *testing.T) {
 	for _, tc := range []struct {
-		err  error
 		name string
+		err  error
 	}{
 		{name: "timeout", err: os.ErrDeadlineExceeded},
 		{name: "closed", err: net.ErrClosed},

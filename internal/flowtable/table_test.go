@@ -15,8 +15,8 @@ import (
 )
 
 type wheelConn struct {
-	q      dgram.Queue
 	member Membership[int, struct{}]
+	q      dgram.Queue
 	key    int
 	free   bool // the wheel's lock was free while it was shut down
 }

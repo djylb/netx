@@ -279,9 +279,9 @@ func TestResolveAddressTrustDoesNotImplyMetadataTrust(t *testing.T) {
 	trusted := mustSet(t, "10.0.0.0/8")
 	peer := ap("10.0.0.1:443")
 	for _, tc := range []struct {
+		header Header
 		name   string
 		value  string
-		header Header
 	}{
 		{header: HeaderXForwardedFor, name: "X-Forwarded-For", value: "198.51.100.9, 10.0.0.2"},
 		{header: HeaderXRealIP, name: "X-Real-Ip", value: "198.51.100.9"},
@@ -308,9 +308,9 @@ func TestResolveMetadataTrustByField(t *testing.T) {
 		"Forwarded":         {`for=198.51.100.9;proto=http, for=10.0.0.2;proto=https;host=near.example.com`},
 	}
 	for _, tc := range []struct {
-		proto, host string
 		header      Header
 		metadata    Metadata
+		proto, host string
 	}{
 		{header: HeaderXForwardedFor, metadata: TrustProto, proto: "https", host: ""},
 		{header: HeaderXForwardedFor, metadata: TrustHost, proto: "", host: "example.com:443"},

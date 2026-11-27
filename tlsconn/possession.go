@@ -282,7 +282,8 @@ func (c *Challenger) Challenge(purpose string) (string, error) {
 }
 
 // Expiry returns the expiration time of a challenge issued for purpose.
-// It uses the wall clock in effect when the Challenger was created.
+// The returned wall-clock time is projected from the Challenger's creation
+// time using elapsed time, so later wall-clock adjustments do not affect it.
 // It returns ErrBadChallenge or ErrNoChallenger if the challenge cannot be opened.
 func (c *Challenger) Expiry(purpose, challenge string) (time.Time, error) {
 	raw, err := c.open(purpose, challenge)

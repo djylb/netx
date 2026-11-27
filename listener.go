@@ -124,7 +124,7 @@ func (l *ChanListener) Dial(ctx context.Context, remote net.Addr) (net.Conn, err
 	client, server := net.Pipe()
 	addr := l.Addr()
 	// Delivered, l owns sc; on failure it is closed below.
-	//noinspection GoResourceLeak
+	//goland:noinspection GoResourceLeak
 	sc := NewAddrOverrideConn(server, addr, remote)
 	if err := l.Deliver(ctx, sc); err != nil {
 		_ = client.Close()

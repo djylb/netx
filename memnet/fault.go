@@ -30,9 +30,9 @@ type LinkPair struct {
 }
 
 type faults struct {
+	mu    sync.Mutex
 	links map[string]LinkPair
 	conns map[string]map[*faultConn]struct{}
-	mu    sync.Mutex
 }
 
 // SetLink sets the link properties of addr (a listener or packet
@@ -109,14 +109,14 @@ func addDelay(a, b time.Duration) time.Duration {
 type faultConn struct {
 	*halfConn
 	n    *Net
+	addr string
+	to   bool
+	once sync.Once
 	done chan struct{}
 	// local and remote are the addresses of a DialFrom connection (nil:
 	// the halfConn's "pipe").
 	local, remote net.Addr
-	addr          string
 	port          string // local DialFrom port owned until Close
-	once          sync.Once
-	to            bool
 }
 
 func (c *faultConn) LocalAddr() net.Addr {

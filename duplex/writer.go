@@ -26,13 +26,15 @@ import (
 // Write may be called concurrently with itself, Swap, SetWriteDeadline and
 // Close, and does not allocate. A Writer copies through Write, without a
 // ReadFrom of its own, so that a copy into it never holds up a Swap.
+//
+//goland:noinspection GoStructLayout
 type Writer struct {
 	deadline time.Time // under mu
 	w        io.Writer // under mu
 	changed  waiter    // under mu
+	writing  bool      // a Write owns the stream; under mu
 	gen      uint64    // counts the changes of deadline and stream, see Reader.gen; under mu
 	mu       sync.Mutex
-	writing  bool // a Write owns the stream; under mu
 	set      bool // w was installed, perhaps nil; under mu
 	swapping bool // a swap waits for the writes to end; new ones wait; under mu
 	closed   bool // under mu

@@ -199,9 +199,9 @@ func TestEachAndAutoDatagrams(t *testing.T) {
 	plain := []byte("raw")
 	partialV1, partialV2 := []byte(v1Prefix[:3]), []byte(v2Signature[:len(v2Signature)-1])
 	packets := []struct {
+		wire      []byte
 		payload   string
 		source    string
-		wire      []byte
 		version   Version
 		malformed bool
 	}{

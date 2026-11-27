@@ -144,9 +144,9 @@ func TestOriginalDestinationGetsockoptBuffers(t *testing.T) {
 
 func TestOriginalDestinationOfDirectConn(t *testing.T) {
 	for _, tt := range []struct {
-		lookup  func(fd int) (netip.AddrPort, error)
 		network string
 		address string
+		lookup  func(fd int) (netip.AddrPort, error)
 	}{
 		{network: "tcp4", address: "127.0.0.1:0", lookup: originalDestinationIPv4},
 		{network: "tcp6", address: "[::1]:0", lookup: originalDestinationIPv6},

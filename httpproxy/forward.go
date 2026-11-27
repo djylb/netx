@@ -39,12 +39,8 @@ type exchange struct {
 	// cutMu guards the cut-off of a request that the final response
 	// ended before: cutTimer, which cuts it once its grace has passed, and
 	// finished, set once the relay has returned, after which nothing is cut.
-	cutTimer *time.Timer
-	aborted  chan struct{} // closed when the relay stops early
-	// headMu guards the response header timeout, with headSeen: set by the
-	// request's direction once the request is sent, cleared by the
-	// response's.
-	stopHeader                    func() bool
+	cutTimer                      *time.Timer
+	aborted                       chan struct{} // closed when the relay stops early
 	reqBodyReader, respBodyReader io.LimitedReader
 	reqHead                       headPart
 	respHead                      headPart
@@ -60,6 +56,10 @@ type exchange struct {
 	respLength int64
 	abortMu    sync.Once
 	cutMu      sync.Mutex
+	// headMu guards the response header timeout, with headSeen: set by the
+	// request's direction once the request is sent, cleared by the
+	// response's.
+	stopHeader func() bool
 	headMu     sync.Mutex
 	// reqDone and respDone are set when the request, or the final response,
 	// has been read to its end, by the goroutine of its direction.

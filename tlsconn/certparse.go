@@ -44,8 +44,8 @@ var (
 // ParseCertificates parses a certificate chain, leaf first, from PEM
 // CERTIFICATE blocks or from DER, one certificate or several concatenated.
 // PEM blocks of other types, such as a private key in the same file, and
-// text around the blocks, such as certificate attributes, are skipped, as
-// tls.X509KeyPair does. Data that starts with an ASN.1
+// text around the blocks, such as the attributes that OpenSSL writes before
+// them, are skipped, as tls.X509KeyPair does. Data that starts with an ASN.1
 // SEQUENCE byte (0x30) is DER, and other data PEM.
 //
 // The data comes from users, so bound its size before reading it; parsing is
@@ -108,7 +108,7 @@ func ParsePrivateKey(data []byte) (crypto.Signer, error) {
 			continue
 		}
 		if block.Headers["Proc-Type"] != "" {
-			// Legacy PEM encryption, as in "Proc-Type: 4,ENCRYPTED".
+			// Legacy OpenSSL encryption, as in "Proc-Type: 4,ENCRYPTED".
 			return nil, ErrEncryptedKey
 		}
 		if key != nil {

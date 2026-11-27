@@ -158,7 +158,7 @@ func (s *relaySource) readsDatagrams() bool {
 	if !s.datagramSet {
 		// Wrappers of other packages may expose the connection beneath
 		// them, which is only looked at here, not owned.
-		//noinspection GoResourceLeak
+		//goland:noinspection GoResourceLeak
 		s.datagram = isDatagramConn(s.bottom) || isDatagramConn(InnermostConn(s.bottom)) || datagramNetwork(s.bottom)
 		s.datagramSet = true
 	}

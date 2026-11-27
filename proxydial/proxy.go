@@ -153,9 +153,9 @@ func FromString(raw string, forward netx.ContextDialer, opts ...Option) (netx.Co
 	return FromURL(u, forward, opts...)
 }
 
-// ParseURL parses a proxy URL. A value without a scheme, such as
-// "proxy.example:3128", uses HTTP. Its errors omit the user information,
-// which may contain a password.
+// ParseURL parses a proxy URL leniently. A host and port without a scheme,
+// such as "proxy.example:3128", are taken as an HTTP proxy URL, as curl does.
+// Its errors omit the user information, which may contain a password.
 func ParseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	switch {

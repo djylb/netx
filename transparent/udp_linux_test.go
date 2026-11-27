@@ -52,8 +52,8 @@ func TestOrigDstFromControl(t *testing.T) {
 	other := controlMessage(solIP, 8 /* IP_TTL */, []byte{64, 0, 0, 0})
 	tests := []struct {
 		name string
-		want string
 		oob  []byte
+		want string
 	}{
 		{name: "ipv4", oob: append(other, controlMessage(solIP, ipRecvOrigDstAddr, sin)...), want: "203.0.113.9:53"},
 		{name: "ipv6", oob: controlMessage(solIPv6, ipv6RecvOrigDstAddr, sin6), want: "[2001:db8::7]:443"},

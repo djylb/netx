@@ -26,13 +26,6 @@ type SelfSignedOptions struct {
 	// Key is the certificate's private key; nil generates an ECDSA P-256
 	// key. Use an *rsa.PrivateKey for clients that need RSA.
 	Key crypto.Signer
-	// Rand is the source of the serial number, of a generated key where
-	// the standard library takes one, and of the signature; nil means
-	// crypto/rand.Reader.
-	Rand io.Reader
-	// Now is the time the certificate is made at; the zero time means
-	// time.Now(). Set it to make certificates by an injected clock.
-	Now time.Time
 	// Organization is the subject's organization, if any.
 	Organization string
 	// Hosts are the DNS names and IP addresses the certificate is for. The
@@ -49,6 +42,13 @@ type SelfSignedOptions struct {
 	// positive. Validity starts an hour before Now to allow for clock skew
 	// and ends ValidFor after Now.
 	ValidFor time.Duration
+	// Now is the time the certificate is made at; the zero time means
+	// time.Now(). Set it to make certificates by an injected clock.
+	Now time.Time
+	// Rand is the source of the serial number, of a generated key where
+	// the standard library takes one, and of the signature; nil means
+	// crypto/rand.Reader.
+	Rand io.Reader
 }
 
 // NewSelfSigned returns a self-signed certificate with its Leaf set, a

@@ -129,8 +129,8 @@ func (r *rawClosingRWC) NetConn() net.Conn {
 func (r *rawClosingRWC) NetxOwned() OwnedLayers { return OwnedLayers{Self: r, First: r.raw} }
 
 type borrowingWrapper struct {
-	raw net.Conn
 	countedCloseConn
+	raw net.Conn
 }
 
 func (c *borrowingWrapper) NetConn() net.Conn { return c.raw }

@@ -1108,7 +1108,7 @@ func TestFromString(t *testing.T) {
 		t.Fatalf("FromString() = %#v, %v; want an HTTPDialer", d, err)
 	}
 	// Exercise missing authority without requiring a TLS dialer.
-	//noinspection HttpUrlsUsage
+	//goland:noinspection HttpUrlsUsage
 	if _, err := FromString("http://", nil); err == nil {
 		t.Fatal("FromString() of a URL without host succeeded")
 	}

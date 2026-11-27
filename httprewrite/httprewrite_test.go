@@ -41,7 +41,7 @@ func TestVariables(t *testing.T) {
 	when := time.Date(2026, 10, 24, 1, 2, 3, 456e6, time.UTC)
 	client := forwarded.Client{Addr: netip.MustParseAddrPort("198.51.100.1:0"), Hops: 2, Proto: "https", Host: "public.example"}
 	// The request has no TLS state, so both expected URLs for it use HTTP.
-	//noinspection HttpUrlsUsage
+	//goland:noinspection HttpUrlsUsage
 	cases := []struct {
 		tmpl string
 		want string
@@ -264,7 +264,7 @@ func TestApplyRedirects(t *testing.T) {
 		{To: to},
 	}
 	// These literal HTTP headers exercise rewrites for a cleartext origin.
-	//noinspection HttpUrlsUsage
+	//goland:noinspection HttpUrlsUsage
 	for _, tt := range []struct{ field, in, want string }{
 		{"Location", "http://backend.internal:8080/login?next=/", "http://Example.COM:8080/login?next=/"},
 		{"Location", "HTTP://Backend.Internal:8080", "http://Example.COM:8080"},
@@ -526,7 +526,7 @@ func FuzzApplyRedirects(f *testing.F) {
 		c := &Context{Request: &http.Request{Host: "pub", Header: http.Header{}}, Response: res}
 		h := http.Header{"Location": {loc}, "Refresh": {refresh}}
 		// Match the cleartext scheme in the fuzz input.
-		//noinspection HttpUrlsUsage
+		//goland:noinspection HttpUrlsUsage
 		err := ApplyRedirects(h, []Redirect{{To: MustCompile("https://${http_host}", nil)}, {From: "http://", To: MustCompile("x:", nil)}}, c)
 		if err != nil {
 			t.Fatal(err)

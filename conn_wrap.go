@@ -52,7 +52,7 @@ func WrapConn(rwc io.ReadWriteCloser, parent net.Conn, opts ...WrapOption) net.C
 		} else {
 			// Borrowed: closing the result closes rwc, and parent only with
 			// WithWrapParentClose.
-			//noinspection GoResourceLeak
+			//goland:noinspection GoResourceLeak
 			parent = InnermostConn(rwc)
 		}
 	}

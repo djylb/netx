@@ -46,7 +46,7 @@ func OriginalDestination(conn net.Conn) (dst netip.AddrPort, redirected bool, er
 		return netip.AddrPort{}, false, net.ErrClosed
 	}
 	// The connection beneath is only looked at; conn's owner closes it.
-	//noinspection GoResourceLeak
+	//goland:noinspection GoResourceLeak
 	if conn = innermost(conn); conn == nil {
 		return netip.AddrPort{}, false, net.ErrClosed
 	}

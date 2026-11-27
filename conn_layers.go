@@ -160,7 +160,7 @@ func innermost(v any, depth int, seen []any) net.Conn {
 		return nil
 	}
 	// Unwrapping only borrows connections; their owner remains responsible for closing them.
-	//noinspection GoResourceLeak
+	//goland:noinspection GoResourceLeak
 	if raw, ok := netutil.NextConn(v); ok {
 		if raw == nil || netutil.IsNilPointer(raw) {
 			return nil

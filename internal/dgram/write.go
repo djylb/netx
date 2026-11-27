@@ -25,10 +25,10 @@ func NewWriteGate(pc net.PacketConn) *WriteGate {
 
 // Writer holds the write deadline of one flow.
 type Writer struct {
-	deadline time.Time
-	active   *WriteGate
-	expiry   clock.Deadline
 	mu       sync.Mutex
+	deadline time.Time
+	expiry   clock.Deadline
+	active   *WriteGate
 	applying int
 	updates  sync.WaitGroup
 	closed   bool

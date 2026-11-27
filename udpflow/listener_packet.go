@@ -54,19 +54,21 @@ import (
 // Create it with NewPacketListener. The zero value has no packet connection:
 // its Accept waits until Close, its Addr is nil, and its Dial and WriteTo
 // fail.
+//
+//goland:noinspection GoStructLayout
 type PacketListener struct {
 	closeErr   error
-	reject     *rejectCache      // nil without WithPacketRejectCache
-	epoch      *clock.Epoch      // of the idle timeout
-	broadcasts *packetBroadcasts // owned cache, set only in destination-aware mode
-	sock       packetSocket      // pc's
-	conns      flowtable.Table[packetFlow, peerKey, *packetConn]
+	reject     *rejectCache // nil without WithPacketRejectCache
+	epoch      *clock.Epoch // of the idle timeout
 	more       []packetSocket
+	sock       packetSocket // pc's
+	conns      flowtable.Table[packetFlow, peerKey, *packetConn]
+	broadcasts *packetBroadcasts // owned cache, set only in destination-aware mode
 	opts       packetListenerOptions
 	wg         sync.WaitGroup
-	filtering  atomic.Int64 // number of read loops in the accept filter
 	closeOnce  sync.Once
-	closing    atomic.Bool // Close has begun; with filtering, orders the two
+	filtering  atomic.Int64 // number of read loops in the accept filter
+	closing    atomic.Bool  // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {

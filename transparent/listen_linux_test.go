@@ -56,8 +56,8 @@ func TestControlWithOtherOptions(t *testing.T) {
 func TestControlPacketSetsOptions(t *testing.T) {
 	for _, tt := range []struct {
 		network, address string
-		opts             []int
 		level            int
+		opts             []int
 	}{
 		{network: "udp4", address: "127.0.0.1:0", level: solIP, opts: []int{ipTransparent, ipRecvOrigDstAddr}},
 		{network: "udp6", address: "[::1]:0", level: solIPv6, opts: []int{ipv6Transparent, ipv6RecvOrigDstAddr}},

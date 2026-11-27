@@ -36,13 +36,14 @@ type Net struct {
 	Clock timeshim.Clock
 	// Rand draws datagram losses; nil draws from math/rand/v2's global
 	// source. It is used under a lock of the Net.
-	Rand      *rand.Rand
+	Rand   *rand.Rand
+	faults faults
+
+	mu        sync.Mutex
 	listeners map[string]*listener
 	dialPorts map[string]bool // reserved by live DialFrom clients
 	packets   map[string]*packetConn
 	hosts     map[string][]netip.Addr
-	faults    faults
-	mu        sync.Mutex
 	next      int
 }
 
@@ -245,10 +246,10 @@ func (a memAddr) String() string  { return a.s }
 
 type listener struct {
 	n    *Net
-	ch   chan net.Conn
-	done chan struct{}
 	addr memAddr
+	ch   chan net.Conn
 	once sync.Once
+	done chan struct{}
 }
 
 func (l *listener) Accept() (net.Conn, error) {
@@ -273,20 +274,21 @@ func (l *listener) Close() error {
 func (l *listener) Addr() net.Addr { return l.addr }
 
 type datagram struct {
-	from net.Addr
 	b    []byte
+	from net.Addr
 }
 
 type packetConn struct {
-	n               *Net
-	in              chan datagram
-	done            chan struct{}
+	n    *Net
+	addr memAddr
+	in   chan datagram
+	once sync.Once
+	done chan struct{}
+
+	// Under n.mu: delayed packets reserve a receive queue slot before copying.
+	pending         int
 	nextIn, nextOut time.Time
 	rdl, wdl        pipeDeadline
-	addr            memAddr
-	once            sync.Once
-	// Under n.mu: delayed packets reserve a receive queue slot before copying.
-	pending int
 }
 
 func (p *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -462,7 +464,7 @@ type halfConn struct {
 // connection: the peer's reads and writes fail with ECONNRESET.
 func Pipe() (net.Conn, net.Conn) {
 	// The caller owns both ends and closes them independently.
-	//noinspection GoResourceLeak
+	//goland:noinspection GoResourceLeak
 	return halfPipe()
 }
 
@@ -509,13 +511,13 @@ const streamBuf = 256 << 10
 
 // streamDir is one direction of a stream connection: a bounded byte queue.
 type streamDir struct {
-	rdl, wdl pipeDeadline
-	changed  chan struct{} // closed and replaced on every state change
-	buf      []byte
 	mu       sync.Mutex
-	wclosed  bool // FIN: the reader gets EOF once drained
-	rst      bool // RST: both ends fail at once, the bytes dropped
-	rclosed  bool // the reader closed: writes fail
+	buf      []byte
+	wclosed  bool          // FIN: the reader gets EOF once drained
+	rst      bool          // RST: both ends fail at once, the bytes dropped
+	rclosed  bool          // the reader closed: writes fail
+	changed  chan struct{} // closed and replaced on every state change
+	rdl, wdl pipeDeadline
 }
 
 func newStreamDir() *streamDir {
@@ -635,9 +637,9 @@ func (d *streamDir) closeRead() {
 
 // pipeDeadline is a settable deadline that wakes the waiters when it moves.
 type pipeDeadline struct {
+	mu    sync.Mutex
 	t     time.Time
 	moved chan struct{}
-	mu    sync.Mutex
 }
 
 func (dl *pipeDeadline) init() { dl.moved = make(chan struct{}) }

@@ -16,7 +16,7 @@ import (
 // for the proxy, whatever the client sent.
 func FuzzForwardedHead(f *testing.F) {
 	// These seeds exercise absolute-form requests sent to a cleartext proxy.
-	//noinspection HttpUrlsUsage
+	//goland:noinspection HttpUrlsUsage
 	for _, seed := range []string{
 		"GET http://example.com/a?b HTTP/1.1\r\nHost: x\r\nConnection: x-a, close\r\nX-A: 1\r\n\r\n",
 		"POST http://[::1]:8080 HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTrailer: x\r\n\r\n",

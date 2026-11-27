@@ -59,7 +59,10 @@ go get github.com/djylb/netx
 ## Connections
 
 This example reads a TLS stream to standard output and counts the bytes
-received. Pass the server's `host:port` as the argument.
+received. Pass the server's `host:port` as the argument. The five-second
+context bounds the dial and TLS handshake, and the dialer closes the
+underlying connection if the handshake fails. The stream times out after
+30 seconds without a read or write.
 
 ```go
 package main
@@ -205,8 +208,9 @@ func perHost() *tls.Config {
   loads share one read. Files stay in sync by change: a use at most every
   `CheckInterval` (`DefaultCheckInterval`, 10s; negative never) stats both
   files, following symbolic links, and reads them again only if the size,
-  modification time or file identity changed, including when a symbolic link
-  is replaced. Once a certificate has expired, its files are read again even when
+  modification time or file identity changed. A symbolic link switched to
+  a different file counts as a change in file identity, as with a certbot
+  renewal. Once a certificate has expired, its files are read again even when
   they look unchanged, at most once a minute, and it is not returned
   (`ErrNotValidNow`). A read that fails, such as a certificate replaced before
   its key, or that brings a certificate not valid now while the previous one
@@ -254,7 +258,8 @@ func perHost() *tls.Config {
   `RetryAfter`. A loaded certificate is loaded again before it
   expires (`RefreshBefore`, or a third of its lifetime if shorter) while it
   serves on, also when that fails or brings one not valid now; a refresh that
-  finds no certificate removes the old one. `Refresh` makes one due, also during a load,
+  returns no certificate and no error removes the old one. `Refresh` makes
+  a reload due, also during a load,
   and `Forget` drops one; adding a certificate drops what was loaded for the
   names it covers. Names come from clients, so the loaded ones are bounded
   by `MaxEntries` (1024 at 0) and `IdleTimeout` (24h at 0); have `Load` turn
@@ -331,7 +336,7 @@ func prove(challenger *tlsconn.Challenger, leaf *x509.Certificate, userKey crypt
 ```
 
 - `ParseKeyPair` takes the chain, leaf first, as PEM (text around the blocks,
-  including key attributes, and other block types are skipped) or DER,
+  such as OpenSSL's attributes, and other block types are skipped) or DER,
   and one private key in PKCS #1, PKCS #8 or SEC 1 form (RSA, ECDSA,
   Ed25519); both may be in one file. It checks that the key's public key
   equals the leaf's and returns a `tls.Certificate` with its `Leaf` set.
@@ -588,8 +593,8 @@ func forwardMetered(ctx context.Context, client, backend net.Conn,
 `ExampleWithRelayFlows_limit` in the package documentation shows a complete
 limiter for `Wait` and `Done` that many relays can share.
 
-`ConnGroup` can close all of a user's connections when the user exhausts
-their allowance: `remove, err := group.Add(conn)` adds one (`remove` is
+`ConnGroup` closes connections together, for example when a user exhausts
+their allowance. `remove, err := group.Add(conn)` adds one (`remove` is
 called when it is done; a closed group returns `netx.ErrGroupClosed` and
 leaves `conn` alone), `CloseMembers(cause)` closes the current members and
 keeps the group open, and `Close` also refuses later ones. A connection can
@@ -812,8 +817,8 @@ func serveUDP(pc net.PacketConn, handle func(net.Conn)) error {
   lets the next datagram of that flow start a new one.
 - Datagrams are dropped when a connection's queue (`WithPacketQueue`) or
   the accept backlog (`WithPacketAcceptBacklog`) is full. Both default to 128.
-  A datagram larger than 2 KiB uses multiple queue slots, so the default
-  queue holds at most 128 × 2 KiB.
+  The default connection queue also has a budget of 128 × 2 KiB. Each
+  queued datagram is charged its length or 2 KiB, whichever is larger.
   `WithPacketAcceptFilter` sees a new flow's first datagram and can reject it
   before anything is allocated for the peer; it can answer with
   `l.WriteTo`, as a stateless retry does.

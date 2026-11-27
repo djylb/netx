@@ -13,12 +13,14 @@ import (
 // connection it wraps. It hands a connection on after bytes were already read
 // from it, for example to sniff the protocol. Writes, deadlines and addresses
 // go to the wrapped connection.
+//
+//goland:noinspection GoStructLayout
 type PrefixConn struct {
 	conn    net.Conn
+	packet  bool   // prefix is one complete datagram
 	prefix  []byte // under mu
 	mu      sync.Mutex
 	drained atomic.Bool // prefix fully consumed; reads skip the lock
-	packet  bool        // prefix is one complete datagram
 }
 
 // Peek reads the first bytes of c, at most n, as for sniffing the protocol

@@ -67,7 +67,8 @@ linters:
       disable:
         # Checked on its own, as fieldalignment; what remains are
         # pointer-byte reports, for which fields keep their order of
-        # meaning.
+        # meaning. Exported types and JSON-tagged types also keep their
+        # field order when a different layout would save space.
         - fieldalignment
     exhaustive:
       default-signifies-exhaustive: true
