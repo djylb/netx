@@ -11,6 +11,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | Package                               | Contents                                                                          |
 | ------------------------------------- | --------------------------------------------------------------------------------- |
 | `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory listeners, error helpers           |
+| `github.com/djylb/netx/addrclass`     | IP address scopes, embedded IPv4, and local or private routing prefix sets        |
 | `github.com/djylb/netx/duplex`        | a read half and a write half as one `net.Conn`, with half-closes and hot swaps    |
 | `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, certs, pins, uploaded-cert checks    |
 | `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
@@ -18,7 +19,7 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/udpflow`       | packet sockets as datagram flow listeners, with UDP destination-aware replies     |
 | `github.com/djylb/netx/socks5`        | SOCKS5 and SOCKS4 codec, client dialer and a configurable server                  |
 | `github.com/djylb/netx/httpproxy`     | HTTP proxy server: CONNECT tunnels and request forwarding                         |
-| `github.com/djylb/netx/httphead`      | HTTP/1.x head reader and parser: fields, body framing, request targets            |
+| `github.com/djylb/netx/httphead`      | HTTP/1.x heads and body framing, and routing from HTTP/1.x or cleartext HTTP/2   |
 | `github.com/djylb/netx/forwarded`     | real client address behind trusted proxies: X-Forwarded-For, X-Real-IP, Forwarded |
 | `github.com/djylb/netx/httprewrite`   | header templates and rules for reverse proxies, redirect rewriting                |
 | `github.com/djylb/netx/wsconn`        | WebSocket: handshakes, messages, stream `net.Conn`, permessage-deflate            |
@@ -911,16 +912,16 @@ fromName := netx.HostAddr("127.0.0.1.", 80)    // {IP: 127.0.0.1, Port: 80}
 
 ### Address scopes
 
-`ScopeOf` classifies an IP address by the IANA IPv4 and IPv6 Special-Purpose
-Address Registries, and `IsGlobal` reports whether it is globally reachable
-unicast:
+`addrclass.ScopeOf` classifies an IP address by the IANA IPv4 and IPv6
+Special-Purpose Address Registries. `addrclass.IsGlobal` reports whether it
+is globally reachable unicast. Both are also available in the root package.
 
 ```go
-if !netx.IsGlobal(candidate.Addr()) {
+if !addrclass.IsGlobal(candidate.Addr()) {
 	return // not worth offering to a peer on the Internet
 }
-switch netx.ScopeOf(addr) {
-case netx.ScopePrivate, netx.ScopeShared, netx.ScopeLinkLocal:
+switch addrclass.ScopeOf(addr) {
+case addrclass.ScopePrivate, addrclass.ScopeShared, addrclass.ScopeLinkLocal:
 	// on the local network or behind carrier-grade NAT
 }
 ```
@@ -942,6 +943,16 @@ case netx.ScopePrivate, netx.ScopeShared, netx.ScopeLinkLocal:
 - It is a table lookup indexed by the first byte: 2–7 ns for most addresses,
   no allocation.
 
+Use `addrclass.Loopback.Contains(addr)` for loopback and
+`addrclass.PrivateLAN.Contains(addr)` for local networks. The latter
+includes private IPv4, shared carrier-grade NAT, IPv6 unique local,
+loopback and link-local ranges. `addrclass.PrivateRouting` adds multicast,
+IPv4's “this network” and reserved high ranges. These sets match IPv4-mapped
+addresses as IPv4 and ignore zones. Each `Class.Prefixes()` call returns
+an independent slice for building a route table or a destination policy.
+`addrclass.Contains(prefixes, addr)` applies the same address
+normalization to a caller's prefix list.
+
 ## Clocks
 
 What times out or expires in the background takes a `timeshim.Clock`
@@ -958,6 +969,8 @@ calls that come due in its own goroutine. A nil `Clock` means
 - `tlsconn.CertStore.Clock`, `tlsconn.CertFiles.Clock` and
   `tlsconn.ChallengerOptions.Clock` time file checks, refreshes,
   certificate validity and challenge expiry.
+- `RaceDialer.Clock` and `safedial.Dialer.Clock` time the stagger between
+  dial attempts.
 
 Socket deadlines and dial and handshake timeouts stay on the system clock.
 
@@ -1847,9 +1860,23 @@ framing, n, err := httphead.RequestBody(req.Header, req.Minor)
   `Content-Length` with `Transfer-Encoding` in requests and differing
   lengths, and `ParseChunkSize` reads chunk-size lines; `ParseTarget` splits
   a request-target in any of its four forms.
-- `Header` has `Get`, `Values`, `Count`, `Has`, `HasToken`, `Add`, `Set` and
-  `Del`, and `AppendTo` writes it back, refusing fields that would add a
-  line.
+- `Header` has `Get`, `Values`, `All`, `Count`, `Has`, `HasToken`, `Add`,
+  `Set` and `Del`. `All` iterates matching values in wire order. `AppendTo`
+  writes the fields back, refusing fields that would add a line.
+- `ScanRequest` and `ParseHTTP2` inspect the first request from an HTTP/1.x
+  or prior-knowledge cleartext HTTP/2 connection. Both return a
+  `RoutedRequest` with the raw request and fields, validated authority
+  (`Host`), normalized routing `Path`, and `Query()` for query parameters.
+  `CleanPath` validates escaped paths, `CleanDecodedPath` normalizes an
+  already decoded path, and `HasPathPrefix` matches path segment boundaries.
+- For successive prefixes, use one `Scanner` or `HTTP2Scanner` per stream.
+  Start with the zero value, pass the cumulative prefix to `Scan`, and use
+  `Need` after `io.ErrUnexpectedEOF` to find how many bytes to read next.
+  `MaxBytes` bounds the wire prefix and `MaxHeaderListBytes` bounds the
+  decoded HTTP/2 header list. Both default to 64 KiB. `ErrTooLarge`
+  reports a budget breach. Scanners retain no reference to caller buffers
+  and own no I/O resources. Use `Reset` for a new stream and treat shared
+  results as read-only.
 
 ## Real client addresses
 
@@ -2231,9 +2258,11 @@ if errors.As(err, &denied) { // errors.Is(err, safedial.ErrDenied) too
 }
 ```
 
-- `Dialer` is a `netx.ContextDialer` with `Forward` (zero `net.Dialer` if
-  nil), `Resolver` (`*net.Resolver` or anything with `LookupNetIP`), `Policy`,
-  `Stagger` and `VerifyRemoteAddr`. It parses the target with `ParseTarget`:
+- `Dialer` is a `netx.ContextDialer`. Set `Network` to inject both
+  `Dial` and `Resolve`, or set `Forward` and `Resolver` to supply them
+  independently. Each explicit field overrides its side of `Network`.
+  The zero dialer uses the system dialer and resolver. It parses the target
+  with `ParseTarget`:
   IP literals in every form, bracketed, IPv4-mapped (unmapped), zoned (the
   zone kept apart, in `Target.Zone`, and used to dial) or with a trailing
   dot, are checked as addresses, and so are the legacy IPv4 forms that
@@ -2251,6 +2280,15 @@ if errors.As(err, &denied) { // errors.Is(err, safedial.ErrDenied) too
   `Lookup` returns the addresses `DialContext` would dial. `VerifyRemoteAddr`
   closes a connection whose `RemoteAddr` is not the address dialed, for a
   `Forward` that might connect elsewhere.
+- `LocalAddr` selects a source IP with the system dialer or an injected
+  `Network` that implements `NetworkFrom`. An incompatible address family
+  returns `ErrLocalAddrFamily`. An explicit `Forward` or a network without
+  source binding returns `ErrLocalAddrUnsupported` when `LocalAddr` is set.
+  `Stagger` controls the delay between attempts, and `Clock` can drive that
+  delay in a test. Keep the dialer configuration fixed during concurrent
+  use and give it dependencies that honor context cancellation. The caller
+  owns the winning connection. Failed or losing attempts' connections close
+  automatically.
 - Not covered: an upstream proxy that resolves names itself. Give an
   `http.Transport` that dials with a `Dialer` no `Proxy`; a proxy dialer as
   `Forward` receives IP addresses only, which reach what they reach from the

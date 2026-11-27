@@ -58,7 +58,7 @@ type Request struct {
 	// Proto is the version as sent, such as "HTTP/1.1".
 	Proto  string
 	Header Header
-	// Minor is the minor version: 0 for HTTP/1.0, 1 for HTTP/1.1 and later
+	// Minor applies to HTTP/1.x: 0 for HTTP/1.0, 1 for HTTP/1.1 and later
 	// minor versions, which are compatible with it (RFC 9110, section 2.5).
 	Minor int
 }
@@ -89,10 +89,8 @@ func ParseRequest(head string, fields Header) (Request, error) {
 	if !ok1 || !ok2 || !ValidFieldName(method) || target == "" {
 		return Request{}, malformed("request line " + quote(first))
 	}
-	for i := range len(target) {
-		if c := target[i]; c <= ' ' || c >= 0x7f {
-			return Request{}, malformed("request target " + quote(target))
-		}
+	if !validRequestTarget(target) {
+		return Request{}, malformed("request target " + quote(target))
 	}
 	minor, err := ParseVersion(proto)
 	if err != nil {
@@ -100,6 +98,17 @@ func ParseRequest(head string, fields Header) (Request, error) {
 	}
 	return Request{Method: method, Target: target, Proto: proto, Minor: minor, Header: h}, nil
 }
+
+func validRequestTarget(target string) bool {
+	for i := range len(target) {
+		if !targetByte(target[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func targetByte(c byte) bool { return ' ' < c && c < 0x7f }
 
 // ParseResponse parses a response head as Read returns it, converted to a
 // string, appending the fields to fields as ParseRequest does. The status
@@ -197,22 +206,27 @@ func nextLine(s string) (string, string, error) {
 
 // ParseField parses a single field line without its line ending.
 func ParseField(line string) (Field, error) {
+	name, value, err := parseField(line, strings.IndexByte(line, ':'))
+	return Field{Name: name, Value: value}, err
+}
+
+func parseField[T ~string | ~[]byte](line T, colon int) (T, T, error) {
+	var zero T
 	if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-		return Field{}, malformed("obsolete line folding")
+		return zero, zero, malformed("obsolete line folding")
 	}
-	colon := strings.IndexByte(line, ':')
 	if colon <= 0 {
-		return Field{}, malformed("header line " + quote(line))
+		return zero, zero, malformed("header line " + quote(string(line)))
 	}
 	name := line[:colon]
-	if !ValidFieldName(name) {
-		return Field{}, malformed("header field name " + quote(name))
+	if !validToken(name) {
+		return zero, zero, malformed("header field name " + quote(string(name)))
 	}
-	value := TrimOWS(line[colon+1:])
+	value := trimOWS(line[colon+1:])
 	if !ValidFieldValue(value) {
-		return Field{}, malformed("value of header field " + quote(name))
+		return zero, zero, malformed("value of header field " + quote(string(name)))
 	}
-	return Field{Name: name, Value: value}, nil
+	return name, value, nil
 }
 
 // ParseVersion parses "HTTP/1.x" and returns the minor version, 1 for any x

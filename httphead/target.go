@@ -53,8 +53,12 @@ type Target struct {
 // underscores and dots, of at most 255 bytes. With an error it returns the
 // zero Target.
 func ParseTarget(method, target string) (Target, error) {
+	return parseTarget(method, target, strings.EqualFold(method, methodConnect))
+}
+
+func parseTarget(method, target string, connect bool) (Target, error) {
 	switch {
-	case strings.EqualFold(method, "CONNECT"):
+	case connect:
 		t, err := parseAuthority(target)
 		if err != nil {
 			return Target{}, err

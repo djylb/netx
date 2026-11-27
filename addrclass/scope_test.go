@@ -1,4 +1,4 @@
-package netx
+package addrclass
 
 import (
 	"encoding/binary"

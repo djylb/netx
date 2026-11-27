@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/djylb/netx"
+	"github.com/djylb/netx/addrclass"
 	"github.com/djylb/netx/internal/netutil"
 )
 
@@ -48,16 +48,16 @@ var (
 )
 
 // scopeError is the reason that a scope policy refuses a scope with.
-type scopeError struct{ scope netx.Scope }
+type scopeError struct{ scope addrclass.Scope }
 
 func (e *scopeError) Error() string { return "safedial: " + e.scope.String() + " address not allowed" }
 func (e *scopeError) Unwrap() error { return ErrScope }
 
 // scopeErrors holds the reason of each scope, so that a refusal does not
 // allocate.
-var scopeErrors = func() (errs [netx.ScopeGlobal + 1]error) {
+var scopeErrors = func() (errs [addrclass.ScopeGlobal + 1]error) {
 	for s := range errs {
-		errs[s] = &scopeError{netx.Scope(s)}
+		errs[s] = &scopeError{addrclass.Scope(s)}
 	}
 	return errs
 }()
@@ -69,7 +69,7 @@ func (p scopePolicy) Check(t Target) error {
 	if !t.Addr.IsValid() && t.Name != "" {
 		return nil // a name, decided by its addresses
 	}
-	s := netx.ScopeOf(t.Addr) // ScopeInvalid for a target of neither
+	s := addrclass.ScopeOf(t.Addr) // ScopeInvalid for a target of neither
 	if p&(1<<s) != 0 {
 		return nil
 	}
@@ -77,41 +77,41 @@ func (p scopePolicy) Check(t Target) error {
 }
 
 // defaultPolicy allows global unicast addresses alone.
-const defaultPolicy = scopePolicy(1 << netx.ScopeGlobal)
+const defaultPolicy = scopePolicy(1 << addrclass.ScopeGlobal)
 
 // DefaultPolicy returns the policy of a Dialer without one: it allows
 // every host name and port, and only globally reachable unicast addresses,
-// AllowScopes(netx.ScopeGlobal). It refuses loopback, private, link-local,
+// AllowScopes(addrclass.ScopeGlobal). It refuses loopback, private, link-local,
 // shared (carrier-grade NAT), unspecified, multicast, broadcast,
 // documentation, benchmarking and reserved addresses, and translation
 // addresses (NAT64, 6to4, Teredo) that embed such an IPv4 address, as
-// netx.ScopeOf classifies them.
+// addrclass.ScopeOf classifies them.
 func DefaultPolicy() Policy { return defaultPolicy }
 
 // AllowScopes returns a policy that allows only the addresses of scopes, as
-// netx.ScopeOf classifies them, and every name. A target with neither an
+// addrclass.ScopeOf classifies them, and every name. A target with neither an
 // address nor a name, of ScopeInvalid, is refused whatever scopes holds.
-func AllowScopes(scopes ...netx.Scope) Policy {
+func AllowScopes(scopes ...addrclass.Scope) Policy {
 	var p scopePolicy
 	for _, s := range scopes {
-		if s <= netx.ScopeGlobal {
+		if s <= addrclass.ScopeGlobal {
 			p |= 1 << s
 		}
 	}
-	return p &^ (1 << netx.ScopeInvalid)
+	return p &^ (1 << addrclass.ScopeInvalid)
 }
 
 // DenyScopes returns a policy that refuses the addresses of scopes, as
-// netx.ScopeOf classifies them, and a target with neither an address nor a
+// addrclass.ScopeOf classifies them, and a target with neither an address nor a
 // name, and allows every name.
-func DenyScopes(scopes ...netx.Scope) Policy {
-	p := scopePolicy(1<<(netx.ScopeGlobal+1) - 1)
+func DenyScopes(scopes ...addrclass.Scope) Policy {
+	p := scopePolicy(1<<(addrclass.ScopeGlobal+1) - 1)
 	for _, s := range scopes {
-		if s <= netx.ScopeGlobal {
+		if s <= addrclass.ScopeGlobal {
 			p &^= 1 << s
 		}
 	}
-	return p &^ (1 << netx.ScopeInvalid)
+	return p &^ (1 << addrclass.ScopeInvalid)
 }
 
 // prefixPolicy matches addresses against disjoint prefixes sorted by
@@ -194,7 +194,7 @@ func (e embeddedPolicy) Check(t Target) error {
 	if err := e.p.Check(t); err != nil {
 		return err
 	}
-	if v4, ok := netx.EmbeddedIPv4(t.Addr); ok {
+	if v4, ok := addrclass.EmbeddedIPv4(t.Addr); ok {
 		t.Addr = v4
 		return e.p.Check(t)
 	}
@@ -203,11 +203,11 @@ func (e embeddedPolicy) Check(t Target) error {
 
 // WithEmbeddedIPv4 returns a policy that allows a target that p allows
 // both as it is and, for an address that embeds an IPv4 address
-// (netx.EmbeddedIPv4: NAT64, 6to4, IPv4-compatible), with that IPv4
+// (addrclass.EmbeddedIPv4: NAT64, 6to4, IPv4-compatible), with that IPv4
 // address in its place, and otherwise returns the reason p gives. Range
 // policies such as DenyPrefixes match an address by its own form alone;
 // wrapped, a denied IPv4 range cannot be reached through a translator under
-// an IPv6 spelling. Scope policies need no wrapping, as netx.ScopeOf already
+// an IPv6 spelling. Scope policies need no wrapping, as addrclass.ScopeOf already
 // judges translation addresses by what they embed. A nil p allows every
 // target, as All() does.
 func WithEmbeddedIPv4(p Policy) Policy {
@@ -352,7 +352,7 @@ func newNamePolicy(patterns []string, allow bool) *namePolicy {
 //	// Names under intranet.example may resolve to private addresses; other
 //	// names and IP addresses must be global.
 //	safedial.Any(
-//		safedial.All(safedial.AllowNames("intranet.example"), safedial.AllowScopes(netx.ScopePrivate, netx.ScopeGlobal)),
+//		safedial.All(safedial.AllowNames("intranet.example"), safedial.AllowScopes(addrclass.ScopePrivate, addrclass.ScopeGlobal)),
 //		safedial.DefaultPolicy(),
 //	)
 func AllowNames(patterns ...string) Policy { return newNamePolicy(patterns, true) }

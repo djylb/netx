@@ -19,11 +19,15 @@
 // A Policy returns nil to allow a Target or the reason to refuse it, which
 // comes back in a *DeniedError that matches ErrDenied. DefaultPolicy,
 // which a Dialer without a policy uses, allows only globally reachable
-// unicast addresses, as netx.ScopeOf classifies them. AllowScopes,
+// unicast addresses, as addrclass.ScopeOf classifies them. AllowScopes,
 // DenyScopes, AllowPrefixes, DenyPrefixes, AllowPorts, DenyPorts,
 // AllowPortRange, DenyPortRange, AllowNames and DenyNames build others,
 // All and Any combine them, and WithEmbeddedIPv4 makes a range policy
 // judge translation addresses also by the IPv4 address they embed.
+//
+// A Dialer can use an injected Network for both resolution and dialing.
+// LocalAddr selects a source address, and Clock controls the stagger
+// between dial attempts.
 //
 // For relays that send datagrams to many destinations, such as SOCKS5 UDP
 // associations, WrapPacketConn and WrapAddrPacketConn check the destination

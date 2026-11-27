@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/djylb/netx"
+	"github.com/djylb/netx/addrclass"
 	"github.com/djylb/netx/internal/netutil"
+	"github.com/djylb/timeshim"
 )
 
 // ErrDenied matches every *DeniedError: a target that the policy refuses.
@@ -60,7 +62,7 @@ type Resolver interface {
 // in any form, also a legacy IPv4 form that a resolver might read as an
 // address, is checked as an address. It checks a host name before
 // resolving it, then resolves it once and checks every address, and dials
-// only the addresses allowed, as IP literals, through Forward. As the check
+// only the addresses allowed, as IP literals. As the check
 // binds to the address dialed, a name cannot reach a refused address by
 // resolving differently on a later lookup, as in DNS rebinding, and CNAME
 // chains do not matter. An HTTP client that follows redirects dials each
@@ -71,15 +73,25 @@ type Resolver interface {
 // the proxy's network.
 //
 // The zero Dialer, and a nil one, dial with a zero net.Dialer, resolve with
-// net.DefaultResolver and allow DefaultPolicy. Its fields must not change
-// while it dials or its packet wrappers send.
+// net.DefaultResolver and allow DefaultPolicy. A Dialer can be used
+// concurrently. Its configuration must remain fixed during use, and
+// its dependencies must also support concurrent use. Resolvers and dial
+// methods must honor cancellation.
 type Dialer struct {
-	// Forward dials the addresses allowed, given as IP literals; a zero
-	// net.Dialer if nil. It may be any dialer, such as a netx.RaceDialer
-	// or a proxy dialer.
+	// Forward dials the addresses allowed, given as IP literals. It
+	// overrides Network and cannot be combined with LocalAddr. If both
+	// Forward and Network are nil, Dialer uses the system dialer.
 	Forward netx.ContextDialer
-	// Resolver resolves host names; net.DefaultResolver if nil.
+	// Resolver resolves host names, overriding Network. If both are nil,
+	// Dialer uses net.DefaultResolver.
 	Resolver Resolver
+	// Network supplies the dial and resolution methods when Forward or
+	// Resolver is nil, respectively.
+	Network Network
+	// LocalAddr is the source IP for DialContext. The zero address leaves
+	// source selection to the dialer. An injected Network must implement
+	// NetworkFrom when LocalAddr is set.
+	LocalAddr netip.Addr
 	// Policy decides which targets may be reached; DefaultPolicy if nil.
 	Policy Policy
 	// Stagger is how long the dial of one address of a name runs alone
@@ -88,6 +100,9 @@ type Dialer struct {
 	// netx.DefaultDialStagger (300ms), and a negative value starts the next
 	// only when one fails, as for net.Dialer.FallbackDelay.
 	Stagger time.Duration
+	// Clock drives Stagger. Nil uses the system clock; context and
+	// socket deadlines keep their own clocks.
+	Clock timeshim.Clock
 	// VerifyRemoteAddr, if set, closes a connection whose RemoteAddr is
 	// not the address dialed and returns a *DeniedError with
 	// ErrRemoteMismatch, for a Forward that might connect elsewhere. It
@@ -108,18 +123,16 @@ func (d *Dialer) policy() Policy {
 	return d.Policy
 }
 
-func (d *Dialer) resolver() Resolver {
-	if d == nil || d.Resolver == nil {
-		return net.DefaultResolver
+func (d *Dialer) lookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	if d != nil {
+		if d.Resolver != nil {
+			return d.Resolver.LookupNetIP(ctx, network, host)
+		}
+		if d.Network != nil {
+			return d.Network.Resolve(ctx, host)
+		}
 	}
-	return d.Resolver
-}
-
-func (d *Dialer) forward() netx.ContextDialer {
-	if d == nil || d.Forward == nil {
-		return &zeroDialer
-	}
-	return d.Forward
+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
 }
 
 // check returns a *DeniedError when the policy refuses t, and for a target
@@ -127,7 +140,7 @@ func (d *Dialer) forward() netx.ContextDialer {
 // the policy, as a socket sends to it on the local host.
 func (d *Dialer) check(t Target) error {
 	if !t.Addr.IsValid() && t.Name == "" {
-		return &DeniedError{Target: t, Reason: scopeErrors[netx.ScopeInvalid]}
+		return &DeniedError{Target: t, Reason: scopeErrors[addrclass.ScopeInvalid]}
 	}
 	if reason := d.policy().Check(t); reason != nil {
 		return &DeniedError{Target: t, Reason: reason}
@@ -150,11 +163,11 @@ func (d *Dialer) Check(network string, ap netip.AddrPort) error {
 }
 
 // Lookup returns the addresses, with their zones, that DialContext would
-// dial for network and address, in that order: the IP address of an IP
-// literal, or the addresses that a host name resolves to, once, that the
-// policy allows, without duplicates and those of another family than
-// network's, interleaved by family starting with the first, as Happy
-// Eyeballs dials them. It returns a *DeniedError when the policy refuses
+// consider for network and address: an IP literal, or the addresses that
+// a host name resolves to, filtered by policy and network family,
+// deduplicated and interleaved by family starting with the first, as
+// Happy Eyeballs tries them. Lookup applies the destination policy without
+// checking LocalAddr. It returns a *DeniedError when the policy refuses
 // the name or address, or every address that the name resolves to.
 func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.AddrPort, error) {
 	t, err := ParseTarget(network, address)
@@ -173,7 +186,7 @@ func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.A
 	if err = d.check(t); err != nil {
 		return nil, err
 	}
-	ips, err := d.resolver().LookupNetIP(ctx, lookupNetwork(network), t.Name)
+	ips, err := d.lookupNetIP(ctx, lookupNetwork(network), t.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -209,15 +222,24 @@ func (d *Dialer) Lookup(ctx context.Context, network, address string) ([]netip.A
 }
 
 // DialContext dials address on network, "tcp", "tcp4", "tcp6", "udp",
-// "udp4" or "udp6", through Forward, at the addresses that Lookup returns:
+// "udp4" or "udp6", through the configured network, at the addresses
+// that Lookup returns:
 // one at a time, the next one starting after Stagger or once the one
 // before has failed, as netx.DialFirst runs them, so that the first to
 // connect wins. A refusal by the policy returns a *DeniedError without
 // dialing. When every dial fails, it returns ctx's error when ctx ended the
 // dial, or else the errors of every attempt, joined. The name is resolved
-// once; the context bounds the lookup and the dials.
+// once; the context bounds the lookup and the dials. The caller owns the
+// returned connection. Failed or losing attempts' connections are closed.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	addrs, err := d.Lookup(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	forward, err := d.forward(network)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +249,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	)
 	if len(addrs) == 1 {
 		dialed = addrs[0]
-		c, err = d.forward().DialContext(ctx, network, dialed.String())
+		c, err = forward.DialContext(ctx, network, dialed.String())
 		switch {
 		case err == nil && c == nil:
 			err = errNoConn
@@ -239,12 +261,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		for i, ap := range addrs {
 			strs[i] = ap.String()
 		}
-		var stagger time.Duration
+		race := netx.RaceDialer{Dialers: []netx.ContextDialer{forward}}
 		if d != nil {
-			stagger = d.Stagger
+			race.Stagger, race.Clock = d.Stagger, d.Clock
 		}
 		var addr string
-		race := netx.RaceDialer{Dialers: []netx.ContextDialer{d.forward()}, Stagger: stagger}
 		c, addr, err = race.DialAny(ctx, network, strs...)
 		if err == nil {
 			dialed = addrs[indexOf(strs, addr)]

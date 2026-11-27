@@ -7,16 +7,21 @@
 // next message stay in the reader, and it allocates one string per head,
 // which the start line parts and the fields are substrings of.
 //
-// It depends on the standard library alone and has no package
-// initialisation beyond a table, so that sniffers and servers can use it at
-// a small cost; net/http's parser would add crypto/tls and the HTTP/2
-// machinery to a program.
+// Scanner and HTTP2Scanner also recognise requests in connection prefixes
+// and derive routing information. HTTP2Scanner handles the first request
+// of a cleartext HTTP/2 connection made with prior knowledge.
+//
+// The package uses only the standard library and does not import net/http.
 package httphead
 
 import (
 	"errors"
+	"iter"
+	"slices"
 	"strings"
 )
+
+const methodConnect = "CONNECT"
 
 // Errors of reading and parsing. Parse errors match ErrMalformed, or one of
 // the more precise errors, and carry a description.
@@ -68,13 +73,19 @@ func (h *Header) Get(name string) string {
 
 // Values returns the values of the fields named name, in order.
 func (h *Header) Values(name string) []string {
-	var vs []string
-	for _, f := range *h {
-		if strings.EqualFold(f.Name, name) {
-			vs = append(vs, f.Value)
+	return slices.Collect(h.All(name))
+}
+
+// All iterates over the values of the fields named name, in order. The
+// fields must not be changed while iterating.
+func (h *Header) All(name string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for _, f := range *h {
+			if strings.EqualFold(f.Name, name) && !yield(f.Value) {
+				return
+			}
 		}
 	}
-	return vs
 }
 
 // Count returns the number of fields named name.
@@ -181,8 +192,10 @@ var tokenChars = func() (t [256]bool) {
 
 // ValidFieldName reports whether s is a token, as a field name or a method
 // must be (RFC 9110, section 5.6.2).
-func ValidFieldName(s string) bool {
-	if s == "" {
+func ValidFieldName(s string) bool { return validToken(s) }
+
+func validToken[T ~string | ~[]byte](s T) bool {
+	if len(s) == 0 {
 		return false
 	}
 	for i := range len(s) {
@@ -206,7 +219,9 @@ func ValidFieldValue[T ~string | ~[]byte](s T) bool {
 }
 
 // TrimOWS returns s without leading and trailing spaces and tabs.
-func TrimOWS(s string) string {
+func TrimOWS(s string) string { return trimOWS(s) }
+
+func trimOWS[T ~string | ~[]byte](s T) T {
 	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
 		s = s[1:]
 	}

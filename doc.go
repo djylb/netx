@@ -35,9 +35,11 @@
 //
 // Protocol and platform helpers live in subpackages:
 //
+//   - addrclass classifies IP addresses and provides routing prefix sets.
 //   - duplex joins a read half and a write half into one connection.
 //   - forwarded interprets client metadata from trusted proxies.
-//   - httphead parses HTTP/1.x heads and body framing.
+//   - httphead parses HTTP/1.x heads and body framing and inspects HTTP/1.x
+//     and cleartext HTTP/2 requests for routing.
 //   - httpproxy serves HTTP forward proxies and CONNECT tunnels.
 //   - httprewrite applies HTTP header and redirect rewrite rules.
 //   - memnet provides in-process streams and datagrams for tests.

@@ -41,6 +41,7 @@ func TestPackageDependencies(t *testing.T) {
 		{module + "/internal/nettest", false, true},
 		{module + "/internal/netutil", false, true},
 		{module + "/internal/serve", false, true},
+		{module + "/addrclass", false, true},
 		{module + "/duplex", false, true},
 		{module + "/proxyproto", false, true},
 		{module + "/transparent", false, true},

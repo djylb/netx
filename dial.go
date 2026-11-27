@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/djylb/netx/internal/netutil"
+	"github.com/djylb/timeshim"
 )
 
 // DefaultDialStagger is how long DialFirst waits for an attempt before it
@@ -42,8 +43,15 @@ var errNoConn = errors.New("netx: dialer returned no connection")
 // or ctx's error when ctx ended the dial. An attempt that returns a
 // connection with an error fails, and its connection is closed.
 func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(context.Context) (net.Conn, error)) (net.Conn, int, error) {
+	return dialFirst(ctx, stagger, nil, attempts)
+}
+
+func dialFirst(ctx context.Context, stagger time.Duration, clock timeshim.Clock, attempts []func(context.Context) (net.Conn, error)) (net.Conn, int, error) {
 	if len(attempts) == 0 {
 		return nil, -1, ErrNoDialAttempts
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, -1, err
 	}
 	if stagger == 0 {
 		stagger = DefaultDialStagger
@@ -53,10 +61,12 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 
 	// Buffered for every attempt, so that none blocks once DialFirst returns.
 	results := make(chan dialResult, len(attempts))
-	timer := time.NewTimer(stagger)
-	defer timer.Stop()
-	if stagger < 0 {
-		timer.Stop() // a failure alone starts the next
+	var timer *timeshim.ChanTimer
+	var tick <-chan time.Time
+	if stagger > 0 && len(attempts) > 1 {
+		timer = timeshim.NewTimer(timeshim.Or(clock), stagger)
+		tick = timer.C
+		defer timer.Stop()
 	}
 	var (
 		next    int // the next attempt to start
@@ -67,13 +77,17 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 		i, attempt := next, attempts[next]
 		next++
 		running++
+		if timer != nil && i > 0 {
+			if next < len(attempts) {
+				timer.Reset(stagger)
+			} else {
+				timer.Stop()
+			}
+		}
 		go func() {
 			c, err := attempt(ctx)
 			results <- dialResult{conn: c, index: i, err: err}
 		}()
-		if stagger >= 0 {
-			timer.Reset(stagger)
-		}
 	}
 	start()
 	// A failure starts the next attempt, so one runs until all have ended.
@@ -96,8 +110,8 @@ func DialFirst(ctx context.Context, stagger time.Duration, attempts ...func(cont
 			if next < len(attempts) && ctx.Err() == nil {
 				start() // a failure starts the next at once
 			}
-		case <-timer.C:
-			if next < len(attempts) {
+		case <-tick:
+			if next < len(attempts) && ctx.Err() == nil {
 				start()
 			}
 		case <-ctx.Done():
@@ -133,6 +147,9 @@ type RaceDialer struct {
 	// negative value starts the next only when one fails, as for
 	// net.Dialer.FallbackDelay.
 	Stagger time.Duration
+	// Clock drives Stagger. Nil uses the system clock. Context and
+	// socket deadlines keep their own clocks.
+	Clock timeshim.Clock
 }
 
 // DialContext dials address through each of d's dialers, as DialFirst
@@ -157,6 +174,7 @@ func (d *RaceDialer) DialAny(ctx context.Context, network string, addresses ...s
 func (d *RaceDialer) dial(ctx context.Context, network string, addresses []string, name bool) (net.Conn, string, error) {
 	var (
 		dialers = []ContextDialer{&net.Dialer{}}
+		clock   timeshim.Clock
 		stagger time.Duration
 	)
 	if d != nil {
@@ -164,6 +182,7 @@ func (d *RaceDialer) dial(ctx context.Context, network string, addresses []strin
 			dialers = d.Dialers
 		}
 		stagger = d.Stagger
+		clock = d.Clock
 	}
 	attempts := make([]func(context.Context) (net.Conn, error), 0, len(addresses)*len(dialers))
 	for _, address := range addresses {
@@ -177,7 +196,7 @@ func (d *RaceDialer) dial(ctx context.Context, network string, addresses []strin
 			})
 		}
 	}
-	c, i, err := DialFirst(ctx, stagger, attempts...)
+	c, i, err := dialFirst(ctx, stagger, clock, attempts)
 	if err != nil {
 		return nil, "", err
 	}

@@ -75,7 +75,7 @@ func RequestBody(h Header, minor int) (Framing, int64, error) {
 // differing Content-Length values. A response with neither is read until
 // close.
 func ResponseBody(method string, code int, h Header) (Framing, int64, string, error) {
-	if method == "HEAD" || code < 200 || code == 204 || code == 304 || method == "CONNECT" && code/100 == 2 {
+	if method == "HEAD" || code < 200 || code == 204 || code == 304 || method == methodConnect && code/100 == 2 {
 		return NoBody, 0, "", nil
 	}
 	te, final, err := transferEncoding(h, true)

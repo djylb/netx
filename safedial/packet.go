@@ -103,7 +103,7 @@ func (g *guard) pick(addrs []netip.Addr, name string, port uint16) (netip.AddrPo
 // lookup resolves name into its addresses, unmapped, without duplicates and
 // IPv4 first, which IPv4 and dual-stack sockets both reach.
 func (g *guard) lookup(ctx context.Context, name string) ([]netip.Addr, error) {
-	ips, err := g.d.resolver().LookupNetIP(ctx, "ip", name)
+	ips, err := g.d.lookupNetIP(ctx, "ip", name)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (g *guard) lookup(ctx context.Context, name string) ([]netip.Addr, error) {
 // as a full-cone NAT does.
 //
 // A host name is checked as ParseTarget and Dialer.DialContext check it, a
-// legacy IPv4 form as an address, and resolved with d's Resolver by the
+// legacy IPv4 form as an address, and resolved by the
 // wrapper itself, so that c gets IP addresses alone and never resolves:
 // each datagram goes to the first address of the name, IPv4 first, that
 // the policy allows for its port, without a zone, as netx.Addr has none.
@@ -151,9 +151,9 @@ func (g *guard) lookup(ctx context.Context, name string) ([]netip.Addr, error) {
 // datagrams to the name, or drops it. Up to 64 names are looked up at
 // once, each holding up to 16 datagrams, and up to 256 KiB in all; WriteTo
 // fails with ErrLookupBusy beyond these bounds, dropping the datagram as a
-// full socket buffer would. Close cancels the lookups, whose goroutines
-// end within ten seconds also with a resolver that does not see the
-// cancellation at once, and closes c.
+// full socket buffer would. Each lookup has a ten-second context deadline.
+// Close cancels the lookups and closes c. Resolution must honor the context
+// so that in-flight lookups can release their resources.
 //
 // Checking a datagram to an IP address does not allocate.
 func (d *Dialer) WrapAddrPacketConn(c AddrPacketConn) AddrPacketConn {
