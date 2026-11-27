@@ -66,9 +66,9 @@ type PacketListener struct {
 	broadcasts *packetBroadcasts // owned cache, set only in destination-aware mode
 	opts       packetListenerOptions
 	wg         sync.WaitGroup
-	closeOnce  sync.Once
 	filtering  atomic.Int64 // number of read loops in the accept filter
-	closing    atomic.Bool  // Close has begun; with filtering, orders the two
+	closeOnce  sync.Once
+	closing    atomic.Bool // Close has begun; with filtering, orders the two
 }
 
 type packetListenerOptions struct {

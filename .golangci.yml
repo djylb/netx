@@ -64,12 +64,6 @@ linters:
   settings:
     govet:
       enable-all: true
-      disable:
-        # Checked on its own, as fieldalignment; what remains are
-        # pointer-byte reports, for which fields keep their order of
-        # meaning. Exported types and JSON-tagged types also keep their
-        # field order when a different layout would save space.
-        - fieldalignment
     exhaustive:
       default-signifies-exhaustive: true
     errorlint:
@@ -96,6 +90,10 @@ linters:
       require-specific: true
   exclusions:
     rules:
+      # Keep field order when a different layout only saves pointer bytes.
+      - linters:
+          - govet
+        text: "^fieldalignment: (struct with [0-9]+ pointer bytes could be [0-9]+|.* has [0-9]+ leading bytes of pointer data but optimal value is [0-9]+)"
       # These packages carry no net/http import, so as not to pull it into
       # programs that do not use it; method and header names are literals.
       - path: ^(httpproxy|wsconn|httphead)/[^/]*\.go$
