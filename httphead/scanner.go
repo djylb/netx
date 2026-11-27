@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+
+	"github.com/djylb/netx/internal/httptoken"
 )
 
 const defaultMaxHeadBytes = 64 << 10
@@ -80,7 +82,7 @@ func (s *Scanner) scan(data []byte) (*RoutedRequest, error) {
 				s.phase = scanLeadingLF
 			case s.pos == s.headStart && c == '\n':
 				s.headStart = s.pos + 1
-			case tokenChars[c]:
+			case httptoken.Contains(c):
 			case c == ' ' && s.pos > s.headStart:
 				s.targetStart, s.phase = s.pos+1, scanTarget
 			default:

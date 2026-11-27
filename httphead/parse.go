@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+
+	"github.com/djylb/netx/internal/httptoken"
 )
 
 // Read reads a message head, the start line and the header fields up to and
@@ -219,7 +221,7 @@ func parseField[T ~string | ~[]byte](line T, colon int) (T, T, error) {
 		return zero, zero, malformed("header line " + quote(string(line)))
 	}
 	name := line[:colon]
-	if !validToken(name) {
+	if !httptoken.Valid(name) {
 		return zero, zero, malformed("header field name " + quote(string(name)))
 	}
 	value := trimOWS(line[colon+1:])

@@ -3,6 +3,8 @@ package httphead
 import (
 	"strconv"
 	"strings"
+
+	"github.com/djylb/netx/internal/httptoken"
 )
 
 // Framing is how the body of a message is delimited (RFC 9112, section 6).
@@ -167,7 +169,7 @@ func cutCoding(value string) (coding, rest string, ok bool) {
 
 func cutToken(s string) (token, rest string) {
 	i := 0
-	for i < len(s) && tokenChars[s[i]] {
+	for i < len(s) && httptoken.Contains(s[i]) {
 		i++
 	}
 	return s[:i], s[i:]

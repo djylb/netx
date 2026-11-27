@@ -12,6 +12,8 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | ------------------------------------- | --------------------------------------------------------------------------------- |
 | `github.com/djylb/netx`               | conn wrappers, `Relay`, `ConnGroup`, in-memory listeners, error helpers           |
 | `github.com/djylb/netx/addrclass`     | IP address scopes, embedded IPv4, and local or private routing prefix sets        |
+| `github.com/djylb/netx/cors`          | origin policies, route-aware preflights and final response headers                |
+| `github.com/djylb/netx/tlsconn/certtest` | test CAs, server and client identities, and exact self-signed templates        |
 | `github.com/djylb/netx/duplex`        | a read half and a write half as one `net.Conn`, with half-closes and hot swaps    |
 | `github.com/djylb/netx/tlsconn`       | bounded TLS handshakes, TLS over any dialer, certs, pins, uploaded-cert checks    |
 | `github.com/djylb/netx/proxyproto`    | PROXY protocol v1 and v2: build, decode, header-reading conn and listener         |
@@ -28,8 +30,8 @@ return an error matching `errors.ErrUnsupported` where they are not available.
 | `github.com/djylb/netx/safedial`      | dialing and UDP relaying limited by a destination policy, rebinding-safe          |
 | `github.com/djylb/netx/memnet`        | in-process network for tests: TCP-like streams, datagrams, faults per link        |
 
-Each package depends on the standard library and timeshim. `tlsconn`
-imports `crypto/tls` directly, and `httprewrite` and `wsconn/wshttp` bring
+Packages use the standard library, with timeshim for injectable clocks. `tlsconn`
+and `tlsconn/certtest` import `crypto/tls` directly. `cors`, `httprewrite` and `wsconn/wshttp` bring
 it in through `net/http`. Programs that use `proxydial` for cleartext
 proxies can omit TLS dependencies.
 
@@ -56,6 +58,48 @@ certificate caches default `IdleTimeout` to `DefaultIdleTimeout` (24h).
 ```bash
 go get github.com/djylb/netx
 ```
+
+## Cross-origin responses
+
+Compile a policy once and share it among handlers. Origin lists accept HTTP(S)
+origins, one-label wildcard patterns and the literal `null`. A singleton `*`
+allows any valid origin without credentials. A singleton `reflect` echoes any
+valid origin, using the outgoing request on a proxied response.
+
+```go
+policy, err := cors.Compile(cors.Policy{
+    Origins: []string{"https://app.example"},
+    Headers: []string{"X-Trace"}, Credentials: true,
+})
+if err != nil { return err }
+```
+
+In a handler, `if policy.Preflight(w, r) { return }` serves local preflights.
+For a router with method-specific policies, `SelectPreflight` takes a method
+lookup returning the selected route and its policy's `LocalPreflight()`.
+Check access before serving that route. Call `AddPreflightVary` before checks
+that can end a preflight early. On final responses, call
+`policy.ApplyResponse(res, incoming)` before application header overrides.
+A backend that supplied an allow-origin value keeps control of its response.
+
+## Test certificates
+
+`certtest.NewCA(t)` creates a root for fixture clocks. `Issue`, `IssueKey`
+and `IssueClient` return a PEM chain (leaf then root), a PKCS #8 key and an
+error. Add `ca.PEM()` to an explicit trust pool and set `tls.Config.Time` to
+the fixture clock for TLS handshakes.
+
+```go
+ca := certtest.NewCA(t)
+now := time.Unix(3600, 0)
+chain, key, err := ca.Issue([]string{"service.example"}, now, time.Hour)
+if err != nil { t.Fatal(err) }
+server, err := tls.X509KeyPair(chain, key)
+if err != nil { t.Fatal(err) }
+```
+
+Use `NewCAWithValidity` for exact root validity and `SignSelfSigned` for
+tests that supply their own X.509 template, including missing SANs.
 
 ## Connections
 

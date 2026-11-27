@@ -19,6 +19,8 @@ import (
 	"iter"
 	"slices"
 	"strings"
+
+	"github.com/djylb/netx/internal/httptoken"
 )
 
 const methodConnect = "CONNECT"
@@ -175,36 +177,9 @@ func (h *Header) AppendTo(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-// tokenChars marks the bytes of a token (RFC 9110, section 5.6.2).
-var tokenChars = func() (t [256]bool) {
-	for c := '0'; c <= '9'; c++ {
-		t[c] = true
-	}
-	for c := 'a'; c <= 'z'; c++ {
-		t[c] = true
-		t[c-'a'+'A'] = true
-	}
-	for _, c := range "!#$%&'*+-.^_`|~" {
-		t[c] = true
-	}
-	return t
-}()
-
 // ValidFieldName reports whether s is a token, as a field name or a method
 // must be (RFC 9110, section 5.6.2).
-func ValidFieldName(s string) bool { return validToken(s) }
-
-func validToken[T ~string | ~[]byte](s T) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for i := range len(s) {
-		if !tokenChars[s[i]] {
-			return false
-		}
-	}
-	return true
-}
+func ValidFieldName(s string) bool { return httptoken.Valid(s) }
 
 // ValidFieldValue reports whether s may be a field value: visible ASCII,
 // spaces, tabs and bytes from 0x80, without other control characters
