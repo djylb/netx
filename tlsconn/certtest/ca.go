@@ -129,7 +129,7 @@ func (ca *CA) issueKey(o LeafOptions) ([]byte, []byte, error) {
 	}
 	if k, ok := o.Key.(*ecdsa.PrivateKey); ok {
 		//lint:ignore SA1019 PKCS #8 marshaling dereferences these components on a partially initialized ECDSA key.
-		//noinspection GoDeprecation
+		//goland:noinspection GoDeprecation
 		if k == nil || k.D == nil || k.X == nil || k.Y == nil { //nolint:staticcheck // Guard the same incomplete keys for the bundled analyzer.
 			return nil, nil, errors.New("certtest: incomplete ECDSA key")
 		}
