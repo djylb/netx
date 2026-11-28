@@ -218,6 +218,8 @@ func (c *Compiled) allow(raw string, o origin) string {
 		return "*"
 	case OriginReflect:
 		return raw
+	case OriginList:
+		// Matched against the listed origins and wildcards below.
 	}
 	if _, ok := c.origins[o]; ok {
 		return raw
