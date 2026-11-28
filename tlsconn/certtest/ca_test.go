@@ -181,6 +181,8 @@ func TestErrors(t *testing.T) {
 		t.Fatal("reversed CA lifetime")
 	}
 	for _, tpl := range []*x509.Certificate{nil, {SerialNumber: big.NewInt(-1)}} {
+		// The failed call must also return the zero certificate.
+		//noinspection GoDfaErrorMayBeNotNil
 		if cert, err := certtest.SignSelfSigned(tpl); err == nil || cert.Leaf != nil {
 			t.Fatal(cert, err)
 		}
